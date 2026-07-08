@@ -35,7 +35,8 @@ const state = {
   completedUnreadThreads: new Set(),
   connectors: [],
   connectorJobs: [],
-  selectedConnectorId: ""
+  selectedConnectorId: "",
+  disableLocal: false
 };
 const basePath = ["/codexremote", "/codex-remote"].find((path) => location.pathname === path || location.pathname.startsWith(`${path}/`)) || "";
 const draftPrefix = "codex-remote-draft:";
@@ -846,6 +847,7 @@ async function loadState() {
 function renderState(data) {
   saveDraft();
   if (Array.isArray(data.connectors)) state.connectors = data.connectors;
+  if (data.disableLocal !== undefined) state.disableLocal = data.disableLocal;
   const shouldFollow = isNearBottom();
   const previousTop = els.logWrap.scrollTop;
   const previousThreadId = state.threadId;
@@ -1324,19 +1326,21 @@ function promptConnectorRemark(device) {
 function renderConnectors() {
   if (!els.connectorList) return;
   els.connectorList.innerHTML = "";
-  const localBtn = document.createElement("button");
-  localBtn.type = "button";
-  localBtn.className = `connectorItem${!state.selectedConnectorId ? " active" : ""} online`;
-  localBtn.dataset.connectorId = "";
-  localBtn.innerHTML = '<span class="connectorDot"></span><strong></strong><small></small><small></small>';
-  localBtn.querySelector("strong").textContent = "本机（服务器）";
-  localBtn.querySelectorAll("small")[0].textContent = "服务器上的 Codex";
-  localBtn.querySelectorAll("small")[1].textContent = "在线";
-  els.connectorList.appendChild(localBtn);
+  if (!state.disableLocal) {
+    const localBtn = document.createElement("button");
+    localBtn.type = "button";
+    localBtn.className = `connectorItem${!state.selectedConnectorId ? " active" : ""} online`;
+    localBtn.dataset.connectorId = "";
+    localBtn.innerHTML = '<span class="connectorDot"></span><strong></strong><small></small><small></small>';
+    localBtn.querySelector("strong").textContent = "本机（服务器）";
+    localBtn.querySelectorAll("small")[0].textContent = "服务器上的 Codex";
+    localBtn.querySelectorAll("small")[1].textContent = "在线";
+    els.connectorList.appendChild(localBtn);
+  }
   if (!state.connectors.length) {
     const hint = document.createElement("div");
     hint.className = "remoteEvent";
-    hint.textContent = "还没有接入被控电脑。";
+    hint.textContent = state.disableLocal ? "还没有接入被控电脑。请在一台电脑上安装被控端（codex-remote-connector）后刷新。" : "还没有接入被控电脑。";
     els.connectorList.appendChild(hint);
   } else {
     for (const device of state.connectors) {
@@ -1600,6 +1604,10 @@ function restorePushSubscription() {
 async function sendMessage(mode = "queue") {
   const message = els.input.value.trim();
   if (!message && !state.uploads.length) return;
+  if (state.disableLocal && !state.selectedConnectorId) {
+    upsertAssistantMessage("当前为纯控制中心模式，请先在「PC 被控电脑」面板添加并切换到一台被控电脑。", true);
+    return;
+  }
   const outgoingMessage = messageWithUploads(message);
   const sendMode = mode === "steer" ? "steer" : "queue";
   els.input.value = "";

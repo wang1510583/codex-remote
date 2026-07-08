@@ -4,7 +4,7 @@ import path from "node:path";
 import { publicDir } from "./config.js";
 import { json, readBody, mimeType, safeCompare } from "./utils.js";
 import { isAuthenticated, routePath, routeBase, isPublicPath, redirectToLogin, authCookie } from "./auth.js";
-import { remotePassword, authToken, codexWorkDir } from "./config.js";
+import { remotePassword, authToken, codexWorkDir, disableLocal } from "./config.js";
 import { clients, broadcast, sendEvent, changesSince } from "./sse.js";
 import { readState, writeState, saveDraftForState, draftForState, syncLoadedCounts } from "./store.js";
 import {
@@ -138,7 +138,8 @@ export async function handle(req, res) {
         steerLength: runner?.steerMessages.length || 0,
         followMode: runner?.followMode || await followModeForState(state, connectorId),
         runningThreads: runningThreads(),
-        connectors: (await remoteConnectorsPayload()).devices
+        connectors: (await remoteConnectorsPayload()).devices,
+        disableLocal
       });
     }
 
