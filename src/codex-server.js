@@ -253,12 +253,14 @@ export class CodexAppServer {
 
   async readConfig(cwd = codexWorkDir) {
     await this.ensureStarted();
-    return await this.request("config/read", { cwd: projectPath(cwd || ""), includeLayers: false });
+    const targetCwd = this.isRemote ? String(cwd || "") : projectPath(cwd || "");
+    return await this.request("config/read", { cwd: targetCwd, includeLayers: false });
   }
 
   async gitDiff(cwd = codexWorkDir) {
     await this.ensureStarted();
-    return await this.request("gitDiffToRemote", { cwd: projectPath(cwd || "") });
+    const targetCwd = this.isRemote ? String(cwd || "") : projectPath(cwd || "");
+    return await this.request("gitDiffToRemote", { cwd: targetCwd });
   }
 
   async compactCurrentThread(threadId, cwd = codexWorkDir) {
