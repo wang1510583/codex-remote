@@ -407,7 +407,10 @@ textarea:focus {
   min-height: 38px;
   padding-left: 0;
   padding-right: 0;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
 }
 
 .iconButton.active {
