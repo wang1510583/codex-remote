@@ -1047,7 +1047,7 @@ async function openNewSessionPicker(dir = undefined) {
     state.newCwd = "";
     state.newCwdConnectorId = connectorId;
   }
-  const nextDir = dir === undefined ? (state.newCwd || state.cwd || "") : dir;
+  const nextDir = dir === undefined ? (state.newCwd || (connectorId ? "" : (state.cwd || ""))) : dir;
   state.newCwd = nextDir || "";
   els.threadPanel.hidden = false;
   setThreadView("new");
