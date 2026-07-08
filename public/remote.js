@@ -1326,35 +1326,55 @@ function promptConnectorRemark(device) {
   updateMeta();
 }
 
+function connectorSubtitle(device) {
+  return [device.hostname, device.platform, device.arch].filter(Boolean).join(" · ");
+}
+
+function connectorStatusText(device) {
+  return `${device.online ? "在线" : "离线"}${device.tunnelConnected ? " · 已连接" : ""}${device.lastSeen ? ` · ${connectorTime(device.lastSeen)}` : ""}`;
+}
+
+function appendConnectorRow(device) {
+  const row = document.createElement("div");
+  row.className = "connectorRow";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `connectorItem${device.id === state.selectedConnectorId ? " active" : ""}${device.online ? " online" : ""}`;
+  button.dataset.connectorId = device.id;
+  button.innerHTML = '<span class="connectorDot"></span><strong></strong><small></small><small></small>';
+  const remark = connectorRemark(device.id);
+  button.querySelector("strong").textContent = remark || device.name || device.hostname || device.id;
+  button.querySelectorAll("small")[0].textContent = connectorSubtitle(device);
+  button.querySelectorAll("small")[1].textContent = connectorStatusText(device);
+  row.appendChild(button);
+
+  const remarkBtn = document.createElement("button");
+  remarkBtn.type = "button";
+  remarkBtn.className = "connectorRemarkBtn";
+  remarkBtn.title = "设置备注名";
+  remarkBtn.textContent = "备注";
+  remarkBtn.dataset.connectorId = device.id;
+  remarkBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    promptConnectorRemark(device);
+  });
+  row.appendChild(remarkBtn);
+  els.connectorList.appendChild(row);
+}
+
 function renderConnectors() {
   if (!els.connectorList) return;
   els.connectorList.innerHTML = "";
   if (!state.disableLocal) {
-    const row = document.createElement("div");
-    row.className = "connectorRow";
-    const localBtn = document.createElement("button");
-    localBtn.type = "button";
-    localBtn.className = `connectorItem${!state.selectedConnectorId ? " active" : ""} online`;
-    localBtn.dataset.connectorId = "";
-    localBtn.innerHTML = '<span class="connectorDot"></span><strong></strong><small></small><small></small>';
-    const localRemark = connectorRemark("");
-    localBtn.querySelector("strong").textContent = localRemark || "本机（服务器）";
-    localBtn.querySelectorAll("small")[0].textContent = "服务器上的 Codex";
-    localBtn.querySelectorAll("small")[1].textContent = "在线";
-    row.appendChild(localBtn);
-    const localRemarkBtn = document.createElement("button");
-    localRemarkBtn.type = "button";
-    localRemarkBtn.className = "connectorRemarkBtn";
-    localRemarkBtn.title = "设置备注名";
-    localRemarkBtn.textContent = "备注";
-    localRemarkBtn.dataset.connectorId = "";
-    localRemarkBtn.addEventListener("click", (event) => {
-      event.stopPropagation();
-      event.preventDefault();
-      promptConnectorRemark({ id: "", name: "本机（服务器）", hostname: "本机" });
+    appendConnectorRow({
+      id: "",
+      name: "本机",
+      hostname: "local",
+      platform: "Codex",
+      arch: "",
+      online: true
     });
-    row.appendChild(localRemarkBtn);
-    els.connectorList.appendChild(row);
   }
   if (!state.connectors.length) {
     const hint = document.createElement("div");
@@ -1363,31 +1383,7 @@ function renderConnectors() {
     els.connectorList.appendChild(hint);
   } else {
     for (const device of state.connectors) {
-      const row = document.createElement("div");
-      row.className = "connectorRow";
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `connectorItem${device.id === state.selectedConnectorId ? " active" : ""}${device.online ? " online" : ""}`;
-      button.dataset.connectorId = device.id;
-      button.innerHTML = '<span class="connectorDot"></span><strong></strong><small></small><small></small>';
-      const remark = connectorRemark(device.id);
-      button.querySelector("strong").textContent = remark || device.name || device.hostname || device.id;
-      button.querySelectorAll("small")[0].textContent = [device.hostname, device.platform, device.arch].filter(Boolean).join(" · ");
-      button.querySelectorAll("small")[1].textContent = `${device.online ? "在线" : "离线"}${device.tunnelConnected ? " · 已连接" : ""}${device.lastSeen ? ` · ${connectorTime(device.lastSeen)}` : ""}`;
-      row.appendChild(button);
-      const remarkBtn = document.createElement("button");
-      remarkBtn.type = "button";
-      remarkBtn.className = "connectorRemarkBtn";
-      remarkBtn.title = "设置备注名";
-      remarkBtn.textContent = "备注";
-      remarkBtn.dataset.connectorId = device.id;
-      remarkBtn.addEventListener("click", (event) => {
-        event.stopPropagation();
-        event.preventDefault();
-        promptConnectorRemark(device);
-      });
-      row.appendChild(remarkBtn);
-      els.connectorList.appendChild(row);
+      appendConnectorRow(device);
     }
   }
 }
