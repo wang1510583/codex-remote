@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#111827" />
+    <title>登录 Codex</title>
+    <link rel="manifest" href="site.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="icon.svg" />
+    <link rel="apple-touch-icon" href="icon.svg" />
+    <link rel="stylesheet" href="styles.css?v=20260704-web-push-error" />
+  </head>
+  <body class="loginBody">
+    <main class="loginShell">
+      <form id="loginForm" class="loginCard">
+        <div class="loginIcon">🔐</div>
+        <h1>登录 Codex</h1>
+        <p>请输入访问密码后继续使用远程控制台。</p>
+        <input id="loginPassword" class="loginInput" type="password" autocomplete="current-password" placeholder="访问密码" autofocus />
+        <button id="loginSubmit" class="primary loginSubmit" type="submit">进入</button>
+        <div id="loginError" class="loginError" hidden></div>
+      </form>
+    </main>
+    <script src="pwa.js"></script>
+    <script>
+      const basePath = ["/codexremote", "/codex-remote"].find((path) => location.pathname === path || location.pathname.startsWith(`${path}/`)) || "";
+      const form = document.querySelector("#loginForm");
+      const input = document.querySelector("#loginPassword");
+      const button = document.querySelector("#loginSubmit");
+      const errorBox = document.querySelector("#loginError");
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        errorBox.hidden = true;
+        button.disabled = true;
+        try {
+          const response = await fetch(`${basePath}/api/remote/login`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ password: input.value })
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(data.error || "登录失败");
+          location.href = `${basePath}/`;
+        } catch (error) {
+          errorBox.textContent = error.message || "登录失败";
+          errorBox.hidden = false;
+          input.select();
+        } finally {
+          button.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

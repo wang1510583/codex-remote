@@ -1,0 +1,1271 @@
+:root {
+  color-scheme: dark;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  background: #0b0b0b;
+  color: #f3f0e8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  height: 100vh;
+  overflow: hidden;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 1px solid #4a4a4a;
+  background: #171717;
+  color: #f3f0e8;
+  border-radius: 6px;
+  padding: 10px 13px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #222;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.primary {
+  background: #36345f;
+  border-color: #5d5790;
+}
+
+.primary:hover {
+  background: #403d70;
+}
+
+.danger {
+  color: #ffbeb3;
+}
+
+h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+textarea {
+  width: 100%;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #050505;
+  color: #f3f0e8;
+  outline: none;
+  padding: 12px;
+  resize: none;
+  line-height: 1.35;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 15px;
+  overflow-y: auto;
+}
+
+textarea:focus {
+  border-color: #f3f0e8;
+}
+
+.message {
+  width: 100%;
+  max-width: 100%;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #171717;
+  background: #171717;
+  color: #c8c8c8;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.message.user {
+  align-self: flex-end;
+  background: #36345f;
+  border-color: #5d5790;
+  color: #d0d0d0;
+  font-weight: 500;
+}
+
+.message.assistant {
+  align-self: flex-start;
+  background: #171717;
+  border-color: #171717;
+  color: #c8c8c8;
+  font-weight: 500;
+}
+
+.messageBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  max-width: 100%;
+}
+
+.messageBlock .message {
+  max-width: 100%;
+}
+
+.assistantBlock {
+  align-self: flex-start;
+}
+
+.userBlock {
+  align-self: flex-end;
+}
+
+.userBlock .messageMeta {
+  align-self: flex-end;
+  text-align: right;
+}
+
+.messageMeta {
+  color: #b9b3a8;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.messageMetaBottom {
+  padding-left: 2px;
+}
+
+.remoteLog.hideThoughts > .messageBlock.assistantBlock:not(.completionBlock),
+.remoteLog.hideThoughts > .message.assistant:not(.completion),
+.remoteLog.onlyMine > .messageBlock:not(.userBlock),
+.remoteLog.onlyMine > .message:not(.user),
+.remoteLog.hideThoughts > .remoteEvent {
+  display: none;
+}
+
+.remoteLog.onlyMine > .remoteEvent {
+  display: none;
+}
+
+.message p,
+.message ul,
+.message ol,
+.message blockquote,
+.message pre,
+.message h1,
+.message h2,
+.message h3 {
+  margin: 0 0 8px;
+}
+
+.message > :last-child {
+  margin-bottom: 0;
+}
+
+.message h1,
+.message h2,
+.message h3 {
+  font-size: 1em;
+  line-height: 1.35;
+}
+
+.message ul,
+.message ol {
+  padding-left: 20px;
+}
+
+.message li + li {
+  margin-top: 4px;
+}
+
+.message blockquote {
+  border-left: 3px solid #555;
+  color: #c8c8c8;
+  padding-left: 10px;
+}
+
+.message code {
+  background: #111;
+  border: 1px solid #333;
+  color: #c8c8c8;
+  border-radius: 4px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.92em;
+  padding: 1px 4px;
+}
+
+.message pre {
+  background: #111;
+  border: 1px solid #333;
+  color: #c8c8c8;
+  border-radius: 6px;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 10px;
+}
+
+.message pre code {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  display: block;
+  padding: 0;
+  white-space: pre;
+}
+
+.message a {
+  color: #fff;
+}
+
+.imageLink {
+  display: block;
+  margin: 4px 0;
+}
+
+.messageImage {
+  display: block;
+  max-width: min(100%, 420px);
+  max-height: 320px;
+  border: 1px solid #2f2f2f;
+  border-radius: 6px;
+  object-fit: contain;
+  background: #050505;
+}
+
+.messageImage:hover {
+  border-color: #777;
+}
+
+.remoteApp {
+  height: 100vh;
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  background: #0b0b0b;
+  overflow: hidden;
+}
+
+.remoteTop {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 4px 10px;
+  border-bottom: 1px solid #2f2f2f;
+  background: #111;
+  position: sticky;
+  top: 0;
+  z-index: 8;
+}
+
+.remoteTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.remoteMetaStack {
+  display: grid;
+  grid-template-rows: 15px 13px;
+  align-content: center;
+  min-width: 0;
+  line-height: 1;
+  overflow: visible !important;
+}
+
+.remoteSubline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: visible !important;
+}
+
+.remoteTop span {
+  color: #b9b3a8;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#remoteMeta {
+  color: #f3f0e8;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 15px;
+}
+
+.remoteMode {
+  color: #8f8a82 !important;
+  font-size: 10px !important;
+  line-height: 13px;
+}
+
+.remoteStatusIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.queueWrap {
+  position: relative;
+  flex: 0 0 auto;
+  overflow: visible !important;
+}
+
+.queueButton {
+  min-height: 16px;
+  padding: 1px 6px;
+  border-color: #7c3aed;
+  background: rgba(49, 46, 129, 0.75);
+  color: #f3f0e8;
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.queueButton[hidden] {
+  display: none;
+}
+
+.queuePanel {
+  position: absolute;
+  top: 22px;
+  left: 0;
+  z-index: 15;
+  width: min(420px, calc(100vw - 24px));
+  max-height: min(320px, calc(100vh - 120px));
+  overflow: auto;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #111;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.36);
+  padding: 8px;
+}
+
+.queuePanel span {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: pre-wrap;
+}
+
+.queuePanel[hidden] {
+  display: none;
+}
+
+.queueItem {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid #2f2f2f;
+  color: #f3f0e8;
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.queueItem:last-child {
+  border-bottom: 0;
+}
+
+.queueIndex {
+  color: #b9b3a8;
+}
+
+.topActions {
+  display: flex !important;
+  flex-direction: row;
+  gap: 8px;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
+.topActions button {
+  white-space: nowrap;
+}
+
+.iconButton {
+  width: 42px;
+  min-width: 42px;
+  height: 38px;
+  min-height: 38px;
+  padding-left: 0;
+  padding-right: 0;
+  text-align: center;
+}
+
+.iconButton.active {
+  border-color: #d8c36a;
+  background: #3b3520;
+  color: #fff2a8;
+}
+
+.threadPanel,
+.filePanel {
+  position: fixed;
+  inset: 58px 12px auto auto;
+  z-index: 10;
+  width: min(520px, calc(100vw - 24px));
+  max-height: min(620px, calc(100vh - 84px));
+  overflow: auto;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #111;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.36);
+  padding: 10px;
+}
+
+.filePanel {
+  width: min(760px, calc(100vw - 24px));
+}
+
+.threadPanelTop,
+.filePanelTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 4px 2px 10px;
+}
+
+.panelActions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.filePanelTop .panelActions,
+.threadPanelTop .panelActions {
+  gap: 4px;
+}
+
+.filePanelTop .panelActions button,
+.threadPanelTop .panelActions button {
+  min-height: 29px;
+  padding: 4px 11px;
+  border-radius: 4px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.sshConnectForm .panelActions button,
+#sshFilesView > .panelActions button {
+  min-height: 29px;
+  padding: 4px 11px;
+  border-radius: 4px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.threadList,
+.fileList {
+  display: grid;
+  gap: 8px;
+}
+
+.filePath {
+  color: #b9b3a8;
+  font-size: 12px;
+  padding: 0 2px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileItem {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 8px;
+  width: 100%;
+  align-items: center;
+  text-align: left;
+  border: 1px solid #4a4a4a;
+  border-radius: 6px;
+  background: #171717;
+  color: #f3f0e8;
+  padding: 10px 13px;
+  cursor: pointer;
+}
+
+.fileItem.sshFileItem {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.fileActions {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.fileActions button {
+  min-height: 29px;
+  padding: 4px 9px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.fileItem:hover {
+  background: #222;
+}
+
+.fileItem strong,
+.fileItem small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileItem small {
+  color: #b9b3a8;
+  font-size: 9px;
+  line-height: 1;
+}
+
+.connectorList,
+.connectorJobs {
+  display: grid;
+  gap: 8px;
+}
+
+.connectorItem {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 4px 10px;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  padding: 9px 11px;
+  border-color: #3f3f46;
+  background: #171717;
+}
+
+.connectorItem.active {
+  border-color: #f3f0e8;
+  background: #222;
+}
+
+.connectorDot {
+  grid-row: span 3;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #737373;
+}
+
+.connectorItem.online .connectorDot {
+  background: #22c55e;
+}
+
+.connectorItem strong,
+.connectorItem small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connectorItem small {
+  color: #b9b3a8;
+  font-size: 10px;
+}
+
+.connectorRow {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.connectorRow .connectorItem {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.connectorRemarkBtn {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 0 12px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid #3f3f46;
+  background: #171717;
+  color: #d4d4d8;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.connectorRemarkBtn:hover {
+  border-color: #f3f0e8;
+  background: #222;
+  color: #f3f0e8;
+}
+
+.connectorJobForm {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+  padding-top: 10px;
+  border-top: 1px solid #2f2f2f;
+}
+
+.connectorJobForm label {
+  display: grid;
+  gap: 5px;
+  color: #b9b3a8;
+  font-size: 11px;
+}
+
+.connectorJobForm textarea {
+  min-height: 88px;
+  resize: vertical;
+}
+
+.connectorJobForm button {
+  min-height: 32px;
+}
+
+.connectorJob {
+  display: grid;
+  gap: 4px;
+  padding: 9px 11px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #141414;
+}
+
+.connectorJob.completed {
+  border-color: rgba(34, 197, 94, 0.55);
+}
+
+.connectorJob.failed {
+  border-color: rgba(239, 68, 68, 0.7);
+}
+
+.connectorJob strong,
+.connectorJob small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connectorJob small {
+  color: #b9b3a8;
+  font-size: 10px;
+}
+
+.connectorJob pre {
+  max-height: 160px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px;
+  border-radius: 4px;
+  background: #050505;
+  color: #e7e5e4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.folderDeleteButton {
+  min-height: 26px;
+  padding: 3px 8px;
+  border-color: #7f1d1d;
+  background: rgba(127, 29, 29, 0.42);
+  color: #fecaca;
+}
+
+.filePreview {
+  margin-top: 10px;
+  border-top: 1px solid #2f2f2f;
+  padding-top: 10px;
+}
+
+.filePreview[hidden] {
+  display: none;
+}
+
+.filePreviewTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.filePreviewTop strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.filePreview pre {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid #2f2f2f;
+  border-radius: 6px;
+  background: #050505;
+  white-space: pre-wrap;
+}
+
+.filePreview img {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  border: 1px solid #2f2f2f;
+  border-radius: 6px;
+  background: #050505;
+}
+
+.newSessionActions {
+  position: sticky;
+  bottom: -10px;
+  display: grid;
+  gap: 8px;
+  margin: 10px -10px -10px;
+  padding: 10px;
+  border-top: 1px solid #2f2f2f;
+  background: #111;
+}
+
+.newSessionActions button {
+  width: 100%;
+  min-height: 29px;
+  padding: 4px 11px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.threadRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px;
+  align-items: stretch;
+}
+
+.threadItem {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 9px;
+  font-size: 9px;
+}
+
+.threadItem strong {
+  font-size: 10px;
+}
+
+.threadItem.active {
+  border-color: #f3f0e8;
+  background: #111;
+}
+
+.threadItem.running {
+  border-color: #ef4444;
+  background: rgba(127, 29, 29, 0.78);
+}
+
+.threadItem.running.active {
+  border-color: #ffb4a8;
+  background: rgba(153, 27, 27, 0.86);
+}
+
+.threadItem.completedUnread {
+  border-color: #22c55e;
+  background: rgba(20, 83, 45, 0.82);
+}
+
+.threadItem.completedUnread.active {
+  border-color: #86efac;
+  background: rgba(22, 101, 52, 0.88);
+}
+
+.threadItem strong,
+.threadItem small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.threadItem small {
+  color: #b9b3a8;
+  font-size: 8px;
+}
+
+.threadPath {
+  color: #9a9a9a !important;
+}
+
+.threadActions {
+  display: flex;
+  gap: 4px;
+  align-items: stretch;
+}
+
+.threadAction {
+  min-width: 35px;
+  padding: 5px 6px;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.remoteLogWrap {
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+}
+
+.remoteLog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 6px;
+}
+
+.loadMoreMessages {
+  display: block;
+  margin: 10px auto 0;
+  min-height: 32px;
+  padding: 6px 12px;
+  color: #f3f0e8;
+  background: #111;
+  border-color: #4a4a4a;
+}
+
+.loadMoreMessages[hidden] {
+  display: none;
+}
+
+.scrollJump {
+  position: fixed;
+  left: 50%;
+  z-index: 9;
+  width: 38px;
+  height: 38px;
+  min-height: 38px;
+  padding: 0;
+  transform: translateX(-50%);
+  opacity: 0.5;
+  border-color: rgba(124, 58, 237, 0.5);
+  background: rgba(49, 46, 129, 0.5);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.scrollJump:hover {
+  opacity: 0.7;
+}
+
+.scrollJumpTop {
+  top: 76px;
+}
+
+.scrollJumpBottom {
+  bottom: 76px;
+}
+
+.scrollJump[hidden] {
+  display: none;
+}
+
+.remoteEvent {
+  align-self: center;
+  max-width: 92%;
+  color: #b9b3a8;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.remoteComposer {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto auto;
+  align-items: end;
+  gap: 8px;
+  padding: 4px 10px;
+  border-top: 1px solid #2f2f2f;
+  background: #111;
+  position: sticky;
+  bottom: 0;
+  z-index: 8;
+}
+
+.remoteComposer textarea {
+  height: 38px;
+  min-height: 38px;
+  max-height: 180px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.remoteComposer button {
+  height: 38px;
+  min-height: 38px;
+}
+
+.remoteComposer > .primary {
+  min-width: 42px;
+}
+
+.fileButton {
+  width: 38px;
+  min-width: 38px;
+  padding: 0;
+}
+
+.uploadList {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 0;
+}
+
+.uploadList[hidden] {
+  display: none;
+}
+
+.uploadChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 3px 4px 3px 7px;
+  color: #f3f0e8;
+  background: #111;
+  font-size: 12px;
+}
+
+.uploadChipText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.uploadRemove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  padding: 0;
+  border-color: #4a4a4a;
+  color: #ffbeb3;
+  background: transparent;
+  line-height: 1;
+}
+
+.uploadRemove:hover {
+  background: #4a2f2a;
+}
+
+.commandPicker {
+  position: relative;
+  align-self: end;
+  width: 38px;
+}
+
+.commandQuickList {
+  display: block;
+  width: 38px;
+}
+
+.commandQuickList button {
+  min-width: 38px;
+  white-space: nowrap;
+  min-height: 38px;
+}
+
+.slashButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  font-weight: 800;
+  font-size: 16px;
+  background: #111;
+  border-color: #4a4a4a;
+}
+
+.commandQuick {
+  color: #f3f0e8;
+}
+
+.commandMenu {
+  position: absolute;
+  left: 0;
+  bottom: 44px;
+  z-index: 14;
+  width: min(520px, calc(100vw - 24px));
+  max-height: min(520px, calc(100vh - 120px));
+  overflow: auto;
+  border: 1px solid #333;
+  border-radius: 8px;
+  background: #111;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
+  padding: 10px;
+}
+
+.commandMenuTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+  padding: 4px 2px 10px;
+}
+
+.commandMenuTop span {
+  color: #b9b3a8;
+  font-size: 12px;
+}
+
+.commandList {
+  display: grid;
+  gap: 8px;
+}
+
+.commandItem {
+  display: grid;
+  grid-template-columns: 96px 68px minmax(0, 1fr);
+  gap: 8px;
+  width: 100%;
+  align-items: center;
+  text-align: left;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.commandItem > * {
+  min-width: 0;
+}
+
+.commandItem strong {
+  color: #f3f0e8;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commandItem span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commandItem small {
+  color: #b9b3a8;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.loginBody {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  padding: 20px;
+  background: radial-gradient(circle at top, #171717, #0b0b0b 58%);
+}
+
+.loginShell {
+  width: min(420px, 100%);
+}
+
+.loginCard {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #333;
+  border-radius: 10px;
+  background: #111;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
+  padding: 26px;
+}
+
+.loginIcon {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #4a4a4a;
+  border-radius: 10px;
+  background: #171717;
+  font-size: 24px;
+}
+
+.loginCard h1 {
+  font-size: 24px;
+}
+
+.loginCard p {
+  margin: 0;
+  color: #b9b3a8;
+  line-height: 1.5;
+}
+
+.loginInput {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #050505;
+  color: #f3f0e8;
+  outline: none;
+  padding: 0 12px;
+  font: inherit;
+}
+
+.loginInput:focus {
+  border-color: #f3f0e8;
+}
+
+.sshConnectForm {
+  display: grid;
+  gap: 12px;
+}
+
+.sshConnectForm[hidden],
+#sshFilesView[hidden] {
+  display: none !important;
+}
+
+.sshConnectForm label {
+  display: grid;
+  gap: 6px;
+  color: #b9b3a8;
+  font-size: 12px;
+}
+
+.sshEditor {
+  display: grid;
+  gap: 8px;
+}
+
+.sshEditor textarea {
+  min-height: 240px;
+}
+
+.loginSubmit {
+  min-height: 44px;
+}
+
+.loginError {
+  border: 1px solid rgba(255, 190, 179, 0.45);
+  border-radius: 6px;
+  background: rgba(120, 40, 32, 0.22);
+  color: #ffbeb3;
+  padding: 10px 12px;
+}
+
+.loginError[hidden] {
+  display: none;
+}
+
+@media (max-width: 700px) {
+  :root {
+    --mobile-top-height: 47px;
+    --mobile-composer-height: 47px;
+    --keyboard-offset: 0px;
+    --visual-viewport-height: 100dvh;
+  }
+
+  .message {
+    max-width: 100%;
+  }
+
+  .remoteApp {
+    display: block;
+    height: 100vh;
+    height: 100dvh;
+    padding-top: var(--mobile-top-height);
+    padding-bottom: var(--mobile-composer-height);
+  }
+
+  .remoteTop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    min-height: var(--mobile-top-height);
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .topActions {
+    gap: 6px;
+  }
+
+  .iconButton {
+    width: 38px;
+    min-width: 38px;
+  }
+
+  .threadPanel,
+  .filePanel {
+    inset: calc(var(--mobile-top-height) + 8px) 8px auto 8px;
+    width: auto;
+    max-height: calc(100dvh - var(--mobile-top-height) - 18px);
+  }
+
+  .remoteLogWrap {
+    height: calc(var(--visual-viewport-height) - var(--mobile-top-height) - var(--mobile-composer-height));
+    overflow: auto;
+  }
+
+  .remoteComposer {
+    grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: var(--keyboard-offset);
+    min-height: var(--mobile-composer-height);
+    padding-bottom: max(4px, env(safe-area-inset-bottom));
+  }
+
+  .scrollJumpTop {
+    top: calc(var(--mobile-top-height) + 14px);
+  }
+
+  .scrollJumpBottom {
+    bottom: calc(var(--mobile-composer-height) + var(--keyboard-offset) + 14px);
+  }
+
+  .commandMenu {
+    width: calc(100vw - 24px);
+    max-height: calc(var(--visual-viewport-height) - var(--mobile-top-height) - var(--mobile-composer-height) - 28px);
+  }
+
+  .commandItem {
+    grid-template-columns: 88px minmax(0, 1fr);
+  }
+
+  .commandItem small {
+    grid-column: 1 / -1;
+  }
+}

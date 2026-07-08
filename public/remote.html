@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#111827" />
+    <title>服务器Codex</title>
+    <link rel="manifest" href="site.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="icon.svg" />
+    <link rel="apple-touch-icon" href="icon.svg" />
+    <link rel="stylesheet" href="styles.css?v=20260708-remote2" />
+  </head>
+  <body>
+    <main class="remoteApp">
+      <header class="remoteTop">
+        <div class="remoteTitle">
+          <span id="remoteStatusIcon" class="remoteStatusIcon" title="连接中">🔵</span>
+          <span class="remoteMetaStack">
+            <span id="remoteMeta">连接中...</span>
+            <span class="remoteSubline">
+              <span id="remoteMode" class="remoteMode">队列模式</span>
+              <span class="queueWrap">
+                <button id="queueRemote" class="queueButton" type="button" hidden>队列 0</button>
+                <div id="queuePanel" class="queuePanel" hidden></div>
+              </span>
+            </span>
+          </span>
+        </div>
+        <div class="topActions">
+          <button id="sshConnectRemote" class="iconButton" type="button" title="ssh连接" aria-label="ssh连接">🔌</button>
+          <button id="filesRemote" class="iconButton" type="button" title="项目文件夹" aria-label="项目文件夹">💻</button>
+          <button id="connectorsRemote" class="iconButton" type="button" title="被控电脑" aria-label="被控电脑">PC</button>
+
+          <button id="threadRemote" class="iconButton" type="button" title="会话" aria-label="会话">📄</button>
+        </div>
+      </header>
+
+      <aside id="sshConnectPanel" class="filePanel" hidden>
+        <div class="filePanelTop">
+          <strong id="sshPanelTitle">ssh连接</strong>
+          <div class="panelActions">
+            <button id="toggleSshView" type="button">ssh电脑</button>
+            <button id="closeSshConnect" type="button">关闭</button>
+          </div>
+        </div>
+        <form id="sshConnectForm" class="sshConnectForm" data-ssh-view="config">
+          <label>
+            <span>用户</span>
+            <input id="sshTarget" class="loginInput" type="text" placeholder="ssh 用户名@主机名" autocomplete="off" />
+          </label>
+          <label>
+            <span>密码</span>
+            <input id="sshPassword" class="loginInput" type="password" placeholder="SSH 密码" autocomplete="current-password" />
+          </label>
+          <div class="panelActions">
+            <button id="sshConnectSubmit" class="primary" type="submit">连接</button>
+            <button id="sshDisconnect" type="button">断开</button>
+            <span id="sshStatus" class="remoteEvent">未连接</span>
+          </div>
+        </form>
+        <div id="sshFilesView" data-ssh-view="files" hidden>
+          <div class="panelActions">
+            <button id="createSshFolder" type="button">新建文件夹</button>
+            <button id="createSshFile" type="button">新建文件</button>
+          </div>
+          <div id="sshPath" class="filePath"></div>
+          <div id="sshList" class="fileList"></div>
+          <div id="sshPreview" class="filePreview" hidden></div>
+        </div>
+      </aside>
+      <aside id="connectorPanel" class="filePanel" hidden>
+        <div class="filePanelTop">
+          <strong>被控电脑</strong>
+          <div class="panelActions">
+            <button id="refreshConnectors" type="button">刷新</button>
+            <button id="closeConnectors" type="button">关闭</button>
+          </div>
+        </div>
+        <div class="connectorHint">选择要控制的电脑，切换后会话与文件随之切换。</div>
+        <div id="connectorList" class="connectorList"></div>
+      </aside>
+
+
+
+      <aside id="threadPanel" class="threadPanel" hidden>
+        <div class="threadPanelTop">
+          <strong id="threadPanelTitle">选择已有会话</strong>
+          <div class="panelActions">
+            <button id="toggleThreadView" type="button">新建会话</button>
+            <button id="closeThreads" type="button">关闭</button>
+          </div>
+        </div>
+        <div id="threadExistingView">
+          <div id="threadList" class="threadList"></div>
+        </div>
+        <div id="threadNewView" hidden>
+          <div id="newPath" class="filePath"></div>
+          <div id="newList" class="fileList"></div>
+          <div class="newSessionActions">
+            <button id="createSessionRemote" class="primary" type="button">在当前文件夹创建会话</button>
+          </div>
+        </div>
+      </aside>
+
+      <aside id="filePanel" class="filePanel" hidden>
+        <div class="filePanelTop">
+          <strong>项目文件夹</strong>
+          <div class="panelActions">
+            <button id="createFolderRemote" type="button">新建文件夹</button>
+            <button id="createFileRemote" type="button">新建文件</button>
+            <button id="closeFiles" type="button">关闭</button>
+          </div>
+        </div>
+        <div id="filePath" class="filePath"></div>
+        <div id="fileList" class="fileList"></div>
+        <div id="filePreview" class="filePreview" hidden></div>
+      </aside>
+
+      <section class="remoteLogWrap">
+        <button id="loadMoreMessages" class="loadMoreMessages" type="button" hidden>加载更多</button>
+        <button id="scrollTopRemote" class="scrollJump scrollJumpTop" type="button" title="回到顶部" aria-label="回到顶部" hidden>↑</button>
+        <button id="scrollBottomRemote" class="scrollJump scrollJumpBottom" type="button" title="回到底部" aria-label="回到底部" hidden>↓</button>
+        <div id="remoteLog" class="remoteLog" aria-live="polite"></div>
+      </section>
+
+      <form id="remoteForm" class="remoteComposer">
+        <div class="commandPicker">
+          <div class="commandQuickList" aria-label="Codex 快捷命令">
+            <button id="slashRemote" class="slashButton" type="button" title="显示 Codex / 命令" aria-label="显示 Codex / 命令">/</button>
+          </div>
+          <div id="commandMenu" class="commandMenu" hidden>
+            <div class="commandMenuTop">
+              <strong>Codex / 命令</strong>
+              <span>点击后填入输入框</span>
+            </div>
+            <div id="commandList" class="commandList"></div>
+          </div>
+        </div>
+        <button id="uploadRemote" class="fileButton" type="button" title="上传文件" aria-label="上传文件">📁</button>
+        <input id="fileRemote" type="file" multiple hidden />
+        <textarea id="remoteInput" rows="1" spellcheck="false" placeholder="输入内容"></textarea>
+        <button id="sendQueueRemote" class="primary iconButton" type="submit" title="队列模式发送" aria-label="队列模式发送">🔀</button>
+        <button id="sendSteerRemote" class="primary iconButton" type="button" title="引导模式发送" aria-label="引导模式发送">🔁</button>
+        <div id="uploadList" class="uploadList" hidden></div>
+      </form>
+    </main>
+    <script src="pwa.js"></script>
+    <script src="remote.js?v=20260708-remote2"></script>
+  </body>
+</html>

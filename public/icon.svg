@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="服务器Codex">
+  <rect width="512" height="512" rx="112" fill="#111827"/>
+  <rect x="94" y="114" width="324" height="104" rx="24" fill="#1f2937" stroke="#38bdf8" stroke-width="14"/>
+  <rect x="94" y="294" width="324" height="104" rx="24" fill="#1f2937" stroke="#a7f3d0" stroke-width="14"/>
+  <circle cx="142" cy="166" r="15" fill="#22c55e"/>
+  <circle cx="142" cy="346" r="15" fill="#38bdf8"/>
+  <path d="M198 166h120M198 346h120" stroke="#e5e7eb" stroke-width="22" stroke-linecap="round"/>
+  <path d="M204 256h104" stroke="#64748b" stroke-width="20" stroke-linecap="round"/>
+  <path d="M256 218v76" stroke="#64748b" stroke-width="20" stroke-linecap="round"/>
+</svg>
