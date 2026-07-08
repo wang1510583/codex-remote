@@ -21,7 +21,7 @@ import {
 import { projectPath, relativeProjectPath, isAllowedDownload } from "./paths.js";
 import * as ssh from "./ssh.js";
 import { webPushPublicKey, savePushSubscription, sendWebPushTaskDone } from "./webpush.js";
-import { registerConnector, remoteConnectorsPayload, connectorFileOp } from "./connectors.js";
+import { registerConnector, remoteConnectorsPayload, connectorFileOp, setConnectorRemark } from "./connectors.js";
 import { followModeForState } from "./store.js";
 import { threadName } from "./store.js";
 
@@ -126,6 +126,7 @@ export async function handle(req, res) {
       }
       setSelectedRunnerKey(runner ? runner.key : runnerKeyForState(state));
       const payload = runner?.running ? runner.state : state;
+      const connectorsPayload = await remoteConnectorsPayload();
       return json(res, 200, {
         ...payload,
         connectorId,
@@ -138,7 +139,8 @@ export async function handle(req, res) {
         steerLength: runner?.steerMessages.length || 0,
         followMode: runner?.followMode || await followModeForState(state, connectorId),
         runningThreads: runningThreads(),
-        connectors: (await remoteConnectorsPayload()).devices,
+        connectors: connectorsPayload.devices,
+        localRemark: connectorsPayload.localRemark || "",
         disableLocal
       });
     }
@@ -150,6 +152,11 @@ export async function handle(req, res) {
 
     if (req.method === "GET" && url.pathname === "/api/remote/connectors") {
       return json(res, 200, await remoteConnectorsPayload());
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/remote/connectors/remark") {
+      const body = await readBody(req);
+      return json(res, 200, await setConnectorRemark(body.connectorId || "", body.remark || ""));
     }
 
     if (req.method === "GET" && url.pathname === "/api/remote/threads") {

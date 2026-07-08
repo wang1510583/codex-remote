@@ -30,6 +30,7 @@ export function publicConnectorDevice(device) {
     arch: device.arch || "",
     version: device.version || "",
     codexVersion: device.codexVersion || "",
+    remark: device.remark || "",
     registeredAt: device.registeredAt || "",
     lastSeen: device.lastSeen || "",
     online: lastSeenMs > 0 && Date.now() - lastSeenMs < 30000,
@@ -43,13 +44,14 @@ async function readConnectorState() {
     const parsed = JSON.parse(await readFile(connectorStatePath, "utf8"));
     return {
       devices: parsed && typeof parsed.devices === "object" && !Array.isArray(parsed.devices) ? parsed.devices : {},
-      jobs: Array.isArray(parsed?.jobs) ? parsed.jobs : []
+      jobs: Array.isArray(parsed?.jobs) ? parsed.jobs : [],
+      localRemark: typeof parsed?.localRemark === "string" ? parsed.localRemark : ""
     };
   } catch (error) {
-    if (error.code === "ENOENT") return { devices: {}, jobs: [] };
+    if (error.code === "ENOENT") return { devices: {}, jobs: [], localRemark: "" };
     if (error instanceof SyntaxError) {
       console.error(`failed to parse ${connectorStatePath}; resetting connector state`, error.message);
-      return { devices: {}, jobs: [] };
+      return { devices: {}, jobs: [], localRemark: "" };
     }
     throw error;
   }
@@ -58,7 +60,7 @@ async function readConnectorState() {
 async function writeConnectorState(state) {
   await mkdir(dataDir, { recursive: true });
   const jobs = Array.isArray(state.jobs) ? state.jobs.slice(-200) : [];
-  await writeFile(connectorStatePath, `${JSON.stringify({ devices: state.devices || {}, jobs }, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(connectorStatePath, `${JSON.stringify({ devices: state.devices || {}, jobs, localRemark: state.localRemark || "" }, null, 2)}\n`, { mode: 0o600 });
 }
 
 async function authenticateConnectorById(id, token) {
@@ -108,7 +110,27 @@ export async function remoteConnectorsPayload() {
   for (const device of devices) {
     device.tunnelConnected = tunnels.has(device.id);
   }
-  return { devices, jobs: [] };
+  return { devices, jobs: [], localRemark: state.localRemark || "" };
+}
+
+export async function setConnectorRemark(connectorIdValue, remarkValue) {
+  const id = cleanConnectorId(connectorIdValue);
+  const state = await readConnectorState();
+  const remark = cleanText(remarkValue, 120).trim();
+  if (id) {
+    const device = state.devices[id];
+    if (!device) {
+      const error = new Error("被控端不存在。");
+      error.statusCode = 404;
+      throw error;
+    }
+    device.remark = remark;
+  } else {
+    state.localRemark = remark;
+  }
+  await writeConnectorState(state);
+  broadcast({ type: "connectors_changed" });
+  return { ok: true, id, remark };
 }
 
 export function isConnectorOnline(connectorId) {

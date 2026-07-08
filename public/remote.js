@@ -38,6 +38,7 @@ const state = {
   connectors: [],
   connectorJobs: [],
   selectedConnectorId: "",
+  localConnectorRemark: "",
   disableLocal: false
 };
 const basePath = ["/codexremote", "/codex-remote"].find((path) => location.pathname === path || location.pathname.startsWith(`${path}/`)) || "";
@@ -849,6 +850,7 @@ async function loadState() {
 function renderState(data) {
   saveDraft();
   if (Array.isArray(data.connectors)) state.connectors = data.connectors;
+  if (data.localRemark !== undefined) state.localConnectorRemark = data.localRemark || "";
   if (data.disableLocal !== undefined) state.disableLocal = data.disableLocal;
   const shouldFollow = isNearBottom();
   const previousTop = els.logWrap.scrollTop;
@@ -1324,18 +1326,26 @@ function currentConnectorLabel() {
 }
 
 function connectorRemark(id = "") {
-  try { return localStorage.getItem(`codex-remote-connector-remark:${id}`) || ""; } catch { return ""; }
+  if (!id) return state.localConnectorRemark || "";
+  const device = state.connectors.find((item) => item.id === id);
+  return device?.remark || "";
 }
 
-function promptConnectorRemark(device) {
+async function promptConnectorRemark(device) {
   const current = connectorRemark(device.id);
   const input = prompt(`为「${device.name || device.hostname || device.id}」设置备注名：`, current);
   if (input === null) return;
   const trimmed = input.trim();
-  try {
-    if (trimmed) localStorage.setItem(`codex-remote-connector-remark:${device.id}`, trimmed);
-    else localStorage.removeItem(`codex-remote-connector-remark:${device.id}`);
-  } catch {}
+  const data = await request("/api/remote/connectors/remark", {
+    method: "POST",
+    body: JSON.stringify({ connectorId: device.id || "", remark: trimmed })
+  });
+  if (device.id) {
+    const target = state.connectors.find((item) => item.id === device.id);
+    if (target) target.remark = data.remark || "";
+  } else {
+    state.localConnectorRemark = data.remark || "";
+  }
   renderConnectors();
   updateMeta();
 }
@@ -1371,7 +1381,7 @@ function appendConnectorRow(device) {
   remarkBtn.addEventListener("click", (event) => {
     event.stopPropagation();
     event.preventDefault();
-    promptConnectorRemark(device);
+    promptConnectorRemark(device).catch((error) => upsertAssistantMessage(`备注保存失败：${error.message}`, true));
   });
   row.appendChild(remarkBtn);
   els.connectorList.appendChild(row);
@@ -1406,6 +1416,7 @@ async function loadConnectors() {
   if (!els.connectorPanel) return;
   const data = await request("/api/remote/connectors");
   state.connectors = Array.isArray(data.devices) ? data.devices : [];
+  state.localConnectorRemark = data.localRemark || "";
   renderConnectors();
   updateMeta();
 }
