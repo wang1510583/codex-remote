@@ -5,7 +5,9 @@ const state = {
   cwd: "",
   absoluteCwd: "",
   fileCwd: "",
+  fileCwdConnectorId: "",
   newCwd: "",
+  newCwdConnectorId: "",
   loadedCount: 0,
   messageCount: 0,
   activeAssistant: null,
@@ -923,12 +925,18 @@ function displayProjectPath(cwd = "", absoluteCwd = "") {
 }
 
 async function openFiles(dir = "") {
+  const connectorId = state.selectedConnectorId || "";
+  if (state.fileCwdConnectorId !== connectorId) {
+    state.fileCwd = "";
+    state.fileCwdConnectorId = connectorId;
+  }
   els.filePanel.hidden = false;
   els.filePreview.hidden = true;
   els.fileList.innerHTML = '<div class="remoteEvent">加载中...</div>';
   try {
     const data = await request(`/api/remote/files?dir=${encodeURIComponent(dir)}`);
     state.fileCwd = data.cwd || "";
+    state.fileCwdConnectorId = connectorId;
     els.filePath.textContent = displayProjectPath(data.cwd, data.absoluteCwd);
     els.fileList.innerHTML = "";
     if (data.cwd) {
@@ -1031,8 +1039,14 @@ async function deleteProjectItem(file = "", name = "", type = "") {
   await openFiles(state.fileCwd);
 }
 
-async function openNewSessionPicker(dir = state.cwd || "") {
-  state.newCwd = dir || "";
+async function openNewSessionPicker(dir = undefined) {
+  const connectorId = state.selectedConnectorId || "";
+  if (state.newCwdConnectorId !== connectorId) {
+    state.newCwd = "";
+    state.newCwdConnectorId = connectorId;
+  }
+  const nextDir = dir === undefined ? (state.newCwd || state.cwd || "") : dir;
+  state.newCwd = nextDir || "";
   els.threadPanel.hidden = false;
   setThreadView("new");
   els.newList.innerHTML = '<div class="remoteEvent">加载中...</div>';
@@ -1414,6 +1428,10 @@ async function switchConnector(id = "") {
   state.threadName = "";
   state.cwd = "";
   state.absoluteCwd = "";
+  state.fileCwd = "";
+  state.fileCwdConnectorId = id;
+  state.newCwd = "";
+  state.newCwdConnectorId = id;
   state.messages = [];
   state.activeAssistant = null;
   state.assistantBubbles.clear();
@@ -1855,7 +1873,7 @@ els.closeThreads.addEventListener("click", () => {
   els.threadPanel.hidden = true;
 });
 els.toggleThreadView.addEventListener("click", () => {
-  if (els.threadNewView.hidden) openNewSessionPicker(state.newCwd || state.cwd || "");
+  if (els.threadNewView.hidden) openNewSessionPicker();
   else openThreads();
 });
 
@@ -1884,7 +1902,7 @@ window.addEventListener("online", resyncWhenActive);
 
 els.newChat?.addEventListener("click", () => {
   if (state.running) return;
-  openNewSessionPicker(state.cwd || "");
+  openNewSessionPicker();
 });
 
 renderCommandList();
