@@ -925,6 +925,12 @@ textarea:focus {
   padding-top: 8px;
   padding-bottom: 8px;
 }
+.remoteComposer textarea::-webkit-scrollbar {
+  display: none;
+}
+.remoteComposer textarea {
+  scrollbar-width: none;
+}
 
 .remoteComposer button {
   height: 38px;
