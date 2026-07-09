@@ -39,7 +39,8 @@ const state = {
   connectorJobs: [],
   selectedConnectorId: "",
   localConnectorRemark: "",
-  disableLocal: false
+  disableLocal: false,
+  localNotices: []
 };
 const basePath = ["/codexremote", "/codex-remote"].find((path) => location.pathname === path || location.pathname.startsWith(`${path}/`)) || "";
 const draftPrefix = "codex-remote-draft:";
@@ -752,20 +753,83 @@ function appendCompletionEvent(data) {
   }
 }
 
+function shouldPersistLocalAssistantBubble(final, meta = {}) {
+  if (!final || meta.persist === false) return false;
+  if (meta.type === "message" || meta.seq !== undefined || meta.at) return false;
+  return true;
+}
+
+function persistAssistantNotice(text, messageId) {
+  rememberLocalNotice(text, messageId);
+  request("/api/remote/notice", {
+    method: "POST",
+    body: JSON.stringify({ message: text, messageId })
+  }).then(() => {
+    requestAnimationFrame(() => replayLocalNotices());
+  }).catch((error) => console.error("failed to persist assistant notice", error));
+}
+
+function assistantBubbleByMessageId(messageId) {
+  if (!messageId) return null;
+  return [...els.log.querySelectorAll(".message.assistant")]
+    .find((item) => item.dataset.messageId === String(messageId)) || null;
+}
+
+function localNoticeContext() {
+  return {
+    connectorId: currentConnectorId(),
+    threadId: state.threadId || "",
+    cwd: state.cwd || ""
+  };
+}
+
+function sameNoticeContext(left = {}, right = localNoticeContext()) {
+  return (left.connectorId || "") === (right.connectorId || "") &&
+    (left.threadId || "") === (right.threadId || "") &&
+    (left.cwd || "") === (right.cwd || "");
+}
+
+function rememberLocalNotice(text, messageId) {
+  const id = String(messageId || `notice-${Date.now()}`);
+  const existing = state.localNotices.find((item) => item.messageId === id);
+  const row = {
+    ...localNoticeContext(),
+    messageId: id,
+    content: text,
+    at: new Date().toISOString()
+  };
+  if (existing) Object.assign(existing, row);
+  else state.localNotices.push(row);
+  state.localNotices = state.localNotices.slice(-40);
+}
+
+function replayLocalNotices(messages = []) {
+  const current = localNoticeContext();
+  const persisted = new Set((messages || []).map((message) => `${message.role || ""}\n${message.content || ""}`));
+  for (const notice of state.localNotices) {
+    if (!sameNoticeContext(notice, current)) continue;
+    if (persisted.has(`assistant\n${notice.content || ""}`)) continue;
+    upsertAssistantMessage(notice.content, true, notice.messageId, { at: notice.at, persist: false });
+  }
+}
+
 function upsertAssistantMessage(text, final = false, messageId = "assistant", meta = {}) {
   if (!text) return;
-  let bubble = state.assistantBubbles.get(messageId);
+  let bubble = state.assistantBubbles.get(messageId) || assistantBubbleByMessageId(messageId);
   if (final && /^✅\s/.test(text || "")) {
     if (bubble?.isConnected) {
       const container = bubble.closest(".messageBlock") || bubble;
       container.remove();
     }
-    appendMessage("assistant", text, { ...meta, at: meta.at || new Date().toISOString() });
+    const nextBubble = appendMessage("assistant", text, { ...meta, at: meta.at || new Date().toISOString() });
+    if (nextBubble) nextBubble.dataset.messageId = String(messageId);
     state.assistantBubbles.delete(messageId);
+    if (shouldPersistLocalAssistantBubble(final, meta)) persistAssistantNotice(text, messageId);
     return;
   }
   if (!bubble?.isConnected) {
     bubble = appendMessage("assistant", text);
+    if (bubble) bubble.dataset.messageId = String(messageId);
     state.assistantBubbles.set(messageId, bubble);
   } else {
     const shouldFollow = isNearBottom();
@@ -773,7 +837,10 @@ function upsertAssistantMessage(text, final = false, messageId = "assistant", me
     if (shouldFollow) scrollToLatest(true);
     else requestAnimationFrame(updateScrollJumps);
   }
-  if (final) state.assistantBubbles.delete(messageId);
+  if (final) {
+    if (shouldPersistLocalAssistantBubble(final, meta)) persistAssistantNotice(text, messageId);
+    state.assistantBubbles.delete(messageId);
+  }
 }
 
 function closeCommandMenu() {
@@ -900,6 +967,7 @@ function renderState(data) {
       appendMessage(message.role, message.content, message);
     }
   }
+  replayLocalNotices(data.messages || []);
   appendCompletionEvent(data);
   if (shouldFollow) scrollToLatest(true);
   else els.logWrap.scrollTop = previousTop;

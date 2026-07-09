@@ -2,7 +2,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { publicDir } from "./config.js";
-import { json, readBody, mimeType, safeCompare } from "./utils.js";
+import { json, readBody, mimeType, safeCompare, cleanText } from "./utils.js";
 import { isAuthenticated, routePath, routeBase, isPublicPath, redirectToLogin, authCookie } from "./auth.js";
 import { remotePassword, authToken, codexWorkDir, disableLocal } from "./config.js";
 import { clients, broadcast, sendEvent, changesSince } from "./sse.js";
@@ -52,6 +52,29 @@ function connectorIdFrom(req, body = {}) {
 
 function cleanConnectorIdValue(value) {
   return String(value || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80);
+}
+
+function messageMergeKey(message = {}) {
+  return [message.role || "", message.content || "", message.at || ""].join("\n");
+}
+
+function mergeStateMessages(sessionMessages = [], stateMessages = []) {
+  const rows = [];
+  const seen = new Set();
+  for (const message of [...sessionMessages, ...stateMessages]) {
+    if (!message?.role || !message?.content) continue;
+    const key = messageMergeKey(message);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push(message);
+  }
+  rows.sort((left, right) => {
+    const leftTime = left.at ? Date.parse(left.at) : 0;
+    const rightTime = right.at ? Date.parse(right.at) : 0;
+    if (!Number.isNaN(leftTime) && !Number.isNaN(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
+    return 0;
+  });
+  return rows.slice(-80);
 }
 
 async function dispatchFileList(req, res, connectorId) {
@@ -124,8 +147,9 @@ export async function handle(req, res) {
         const thread = await loadThreadPage(state.threadId, connectorId).catch(() => null);
         if (thread) {
           loadedThread = thread;
-          const messages = await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages);
-          state = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: thread.messageCount, inflight: null };
+          const sessionMessages = await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages);
+          const messages = mergeStateMessages(sessionMessages, state.messages);
+          state = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length), inflight: null };
           await writeState(state, connectorId);
         }
       }
@@ -321,6 +345,20 @@ export async function handle(req, res) {
       return json(res, result.local ? 200 : 202, result);
     }
 
+    if (req.method === "POST" && url.pathname === "/api/remote/notice") {
+      const body = await readBody(req);
+      const connectorId = cleanConnectorIdValue(body.connectorId || "");
+      const content = cleanText(body.message || body.content || "", 20000).trim();
+      if (!content) return json(res, 400, { error: "提示内容不能为空。" });
+      const state = await readState(connectorId);
+      const message = { role: "assistant", content, at: new Date().toISOString() };
+      state.messages.push(message);
+      state.messages = state.messages.slice(-80);
+      await writeState(syncLoadedCounts(state), connectorId);
+      broadcast({ type: "message", connectorId, ...message, messageId: cleanText(body.messageId || "", 120).trim() || `notice-${Date.now()}`, final: true });
+      return json(res, 200, { ok: true, message });
+    }
+
     if (req.method === "POST" && url.pathname === "/api/remote/select") {
       const body = await readBody(req);
       const connectorId = cleanConnectorIdValue(body.connectorId || "");
@@ -334,7 +372,9 @@ export async function handle(req, res) {
       const state = await readState(connectorId);
       if (!state.threadId) return json(res, 400, { error: "当前没有会话。" });
       const thread = await loadThreadPage(state.threadId, connectorId);
-      const nextState = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages: await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages), loadedCount: thread.messages.length, messageCount: thread.messageCount };
+      const sessionMessages = await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages);
+      const messages = mergeStateMessages(sessionMessages, state.messages);
+      const nextState = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length) };
       await writeState(nextState, connectorId);
       const name = await threadName(state.threadId);
       const draft = await draftForState(nextState, connectorId);
