@@ -252,13 +252,13 @@ function setContextUsage(contextUsage) {
 
 function updateStatusIcon() {
   if (!state.connected) {
-    els.statusIcon.textContent = "🔵";
+    els.statusIcon.className = "remoteStatusIcon status-connecting";
     els.statusIcon.title = "断开连接，正在连接";
   } else if (state.running) {
-    els.statusIcon.textContent = "🔴";
+    els.statusIcon.className = "remoteStatusIcon status-running";
     els.statusIcon.title = "Codex 正在处理";
   } else {
-    els.statusIcon.textContent = "🟢";
+    els.statusIcon.className = "remoteStatusIcon status-idle";
     els.statusIcon.title = "Codex 空闲";
   }
 }

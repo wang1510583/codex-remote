@@ -317,10 +317,17 @@ textarea:focus {
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 14px;
-  height: 14px;
-  font-size: 12px;
-  line-height: 1;
+  width: 20px;
+  height: 20px;
+}
+.remoteStatusIcon.status-connecting {
+  color: #3b82f6;
+}
+.remoteStatusIcon.status-running {
+  color: #ef4444;
+}
+.remoteStatusIcon.status-idle {
+  color: #22c55e;
 }
 
 .queueWrap {
