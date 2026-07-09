@@ -929,6 +929,10 @@ textarea:focus {
 }
 
 .fileButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
   width: 38px;
   min-width: 38px;
   padding: 0;
