@@ -120,7 +120,7 @@ export async function handle(req, res) {
         if (thread) {
           loadedThread = thread;
           const messages = await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages);
-          state = { ...state, cwd: thread.cwd || state.cwd || "", messages, loadedCount: messages.length, messageCount: thread.messageCount, inflight: null };
+          state = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: thread.messageCount, inflight: null };
           await writeState(state, connectorId);
         }
       }
@@ -319,7 +319,7 @@ export async function handle(req, res) {
       const state = await readState(connectorId);
       if (!state.threadId) return json(res, 400, { error: "当前没有会话。" });
       const thread = await loadThreadPage(state.threadId, connectorId);
-      const nextState = { ...state, cwd: thread.cwd || state.cwd || "", messages: await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages), loadedCount: thread.messages.length, messageCount: thread.messageCount };
+      const nextState = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages: await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages), loadedCount: thread.messages.length, messageCount: thread.messageCount };
       await writeState(nextState, connectorId);
       const name = await threadName(state.threadId);
       const draft = await draftForState(nextState, connectorId);

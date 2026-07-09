@@ -284,11 +284,12 @@ export function attachConnectorWebSocket(server) {
     });
 
     ws.on("close", async () => {
-      tunnels.delete(id);
+      const isCurrentTunnel = tunnels.get(id) === tunnel;
+      if (isCurrentTunnel) tunnels.delete(id);
       if (tunnel.appServer) {
         try { tunnel.appServer.rejectAll(new Error("被控端连接断开")); } catch {}
       }
-      await updateDeviceOnline(id, false, "disconnected");
+      if (isCurrentTunnel) await updateDeviceOnline(id, false, "disconnected");
       console.log(`connector ${id} disconnected`);
     });
 

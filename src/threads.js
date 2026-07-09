@@ -133,13 +133,20 @@ export function contextUsageFromEvent(payload = {}, threadId = "") {
 async function listLocalSessionFiles(dir = sessionsDir, out = []) {
   let rows;
   try { rows = await readdir(dir, { withFileTypes: true }); }
-  catch (error) { if (error.code === "ENOENT") return out; throw error; }
+  catch (error) {
+    if (["ENOENT", "EPERM", "EACCES"].includes(error.code)) return out;
+    throw error;
+  }
   for (const row of rows) {
     const file = path.join(dir, row.name);
     if (row.isDirectory()) await listLocalSessionFiles(file, out);
     else if (row.isFile() && row.name.endsWith(".jsonl")) {
-      const info = await stat(file);
-      out.push({ file, mtimeMs: info.mtimeMs });
+      try {
+        const info = await stat(file);
+        out.push({ file, mtimeMs: info.mtimeMs });
+      } catch (error) {
+        if (!["ENOENT", "EPERM", "EACCES"].includes(error.code)) throw error;
+      }
     }
   }
   return out;

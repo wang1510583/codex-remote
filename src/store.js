@@ -35,9 +35,10 @@ async function writeJson(file, data) {
 
 export async function readState(connectorId = "") {
   const parsed = await readJson(statePathFor(connectorId), null);
-  if (!parsed) return { threadId: "", cwd: "", messages: [], inflight: null };
+  if (!parsed) return { threadId: "", connectorId, cwd: "", messages: [], inflight: null };
   return {
     threadId: typeof parsed.threadId === "string" ? parsed.threadId : "",
+    connectorId: connectorId || (typeof parsed.connectorId === "string" ? parsed.connectorId : ""),
     cwd: typeof parsed.cwd === "string" ? parsed.cwd : "",
     messages: Array.isArray(parsed.messages) ? parsed.messages : [],
     inflight: parsed.inflight && typeof parsed.inflight === "object" ? parsed.inflight : null
