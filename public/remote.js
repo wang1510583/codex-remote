@@ -812,19 +812,29 @@ function renderCommandList() {
   }
 }
 
+function currentConnectorId() {
+  return state.selectedConnectorId || "";
+}
+
+function connectorMatchesCurrent(data = {}) {
+  return data.connectorId === undefined || data.connectorId === currentConnectorId();
+}
+
 async function request(url, options = {}) {
   const method = (options.method || (options.body ? "POST" : "GET")).toUpperCase();
   let finalUrl = url;
-  const connectorParam = `connector=${encodeURIComponent(state.selectedConnectorId || "")}`;
+  const requestConnectorId = options.connectorId !== undefined ? options.connectorId || "" : currentConnectorId();
+  const connectorParam = `connector=${encodeURIComponent(requestConnectorId)}`;
   if (!options.body) {
     finalUrl += (url.includes("?") ? "&" : "?") + connectorParam;
   }
   let finalOptions = { ...options };
+  delete finalOptions.connectorId;
   if (options.body && method !== "GET") {
     try {
       const parsed = JSON.parse(options.body);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.connectorId === undefined) {
-        parsed.connectorId = state.selectedConnectorId || "";
+        parsed.connectorId = requestConnectorId;
         finalOptions.body = JSON.stringify(parsed);
       }
     } catch {}
@@ -842,13 +852,16 @@ async function request(url, options = {}) {
   return response.json();
 }
 
-async function loadState() {
-  const data = await request("/api/remote/state");
+async function loadState(connectorId = currentConnectorId()) {
+  const data = await request("/api/remote/state", { connectorId });
+  if (connectorId !== currentConnectorId()) return;
   renderState(data);
 }
 
 function renderState(data) {
+  if (!connectorMatchesCurrent(data)) return;
   saveDraft();
+  if (data.connectorId !== undefined) state.selectedConnectorId = data.connectorId || "";
   if (Array.isArray(data.connectors)) state.connectors = data.connectors;
   if (data.localRemark !== undefined) state.localConnectorRemark = data.localRemark || "";
   if (data.disableLocal !== undefined) state.disableLocal = data.disableLocal;
@@ -903,8 +916,10 @@ function updateLoadMore() {
 
 async function loadMoreMessages() {
   if (!state.threadId || state.running) return;
+  const connectorId = currentConnectorId();
   const previousHeight = els.logWrap.scrollHeight;
-  const data = await request("/api/remote/more", { method: "POST" });
+  const data = await request("/api/remote/more", { method: "POST", connectorId });
+  if (connectorId !== currentConnectorId()) return;
   renderState(data);
   els.logWrap.scrollTop = Math.max(0, els.logWrap.scrollHeight - previousHeight);
   updateScrollJumps();
@@ -1089,10 +1104,13 @@ async function openNewSessionPicker(dir = undefined) {
 
 async function createSessionInSelectedFolder() {
   if (state.running) return;
+  const connectorId = currentConnectorId();
   const data = await request("/api/remote/new", {
     method: "POST",
+    connectorId,
     body: JSON.stringify({ cwd: state.newCwd || "" })
   });
+  if (connectorId !== currentConnectorId()) return;
   renderState(data);
   els.threadPanel.hidden = true;
 }
@@ -1450,16 +1468,18 @@ async function switchConnector(id = "") {
   els.log.innerHTML = "";
   els.connectorPanel.hidden = true;
   updateMeta();
-  await loadState().catch((error) => upsertAssistantMessage(`切换失败：${error.message}`, true));
+  await loadState(id).catch((error) => upsertAssistantMessage(`切换失败：${error.message}`, true));
   if (!els.filePanel.hidden) loadFiles().catch(() => {});
 }
 
 async function openThreads() {
+  const connectorId = currentConnectorId();
   els.threadPanel.hidden = false;
   setThreadView("existing");
   els.threadList.innerHTML = '<div class="remoteEvent">加载中...</div>';
   try {
-    const data = await request("/api/remote/threads");
+    const data = await request("/api/remote/threads", { connectorId });
+    if (connectorId !== currentConnectorId()) return;
     els.threadList.innerHTML = "";
     if (!data.threads?.length) {
       els.threadList.innerHTML = '<div class="remoteEvent">没有找到会话</div>';
@@ -1541,10 +1561,13 @@ async function deleteThread(thread) {
 }
 
 async function selectThread(threadId) {
+  const connectorId = currentConnectorId();
   const data = await request("/api/remote/select", {
     method: "POST",
+    connectorId,
     body: JSON.stringify({ threadId })
   });
+  if (connectorId !== currentConnectorId()) return;
   state.completedUnreadThreads.delete(threadId);
   renderState(data);
   els.threadPanel.hidden = true;
@@ -1646,9 +1669,10 @@ function restorePushSubscription() {
 }
 
 async function sendMessage(mode = "queue") {
+  const connectorId = currentConnectorId();
   const message = els.input.value.trim();
   if (!message && !state.uploads.length) return;
-  if (state.disableLocal && !state.selectedConnectorId) {
+  if (state.disableLocal && !connectorId) {
     upsertAssistantMessage("当前为纯控制中心模式，请先在「PC 被控电脑」面板添加并切换到一台被控电脑。", true);
     return;
   }
@@ -1664,8 +1688,10 @@ async function sendMessage(mode = "queue") {
   try {
     const result = await request("/api/remote/send", {
       method: "POST",
+      connectorId,
       body: JSON.stringify({ message: outgoingMessage, followMode: sendMode })
     });
+    if (connectorId !== currentConnectorId()) return;
     state.uploads = [];
     renderUploadList();
     if (result?.local) setRunning(result.running, result.queueLength, result.queueMessages, result.followMode, result.steerLength, result.steerMessages, result.contextUsage, result.runningThreads);
