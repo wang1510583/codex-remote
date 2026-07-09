@@ -6,7 +6,10 @@ import { json, readBody, mimeType, safeCompare } from "./utils.js";
 import { isAuthenticated, routePath, routeBase, isPublicPath, redirectToLogin, authCookie } from "./auth.js";
 import { remotePassword, authToken, codexWorkDir, disableLocal } from "./config.js";
 import { clients, broadcast, sendEvent, changesSince } from "./sse.js";
-import { readState, writeState, saveDraftForState, draftForState, syncLoadedCounts } from "./store.js";
+import {
+  readState, writeState, saveDraftForState, draftForState, syncLoadedCounts,
+  readConnectorViewState, writeConnectorViewState
+} from "./store.js";
 import {
   submitRemoteMessage, selectRemoteThread, createRemoteSession, loadThreadPage,
   listThreads, deleteThread, runnerForIncomingState, statusPayload, runnerForState,
@@ -108,7 +111,9 @@ export async function handle(req, res) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/remote/state") {
-      const connectorId = connectorIdFrom(req);
+      const viewState = await readConnectorViewState();
+      const requestedConnectorId = connectorIdFrom(req);
+      const connectorId = requestedConnectorId || viewState.selectedConnectorId || "";
       let state = await readState(connectorId);
       state.connectorId = state.connectorId || connectorId;
       let loadedThread = null;
@@ -141,6 +146,7 @@ export async function handle(req, res) {
         runningThreads: runningThreads(),
         connectors: connectorsPayload.devices,
         localRemark: connectorsPayload.localRemark || "",
+        selectedConnectorId: connectorId,
         disableLocal
       });
     }
@@ -151,7 +157,16 @@ export async function handle(req, res) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/remote/connectors") {
-      return json(res, 200, await remoteConnectorsPayload());
+      const viewState = await readConnectorViewState();
+      return json(res, 200, { ...await remoteConnectorsPayload(), selectedConnectorId: viewState.selectedConnectorId || "" });
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/remote/connectors/select") {
+      const body = await readBody(req);
+      const selectedConnectorId = cleanConnectorIdValue(body.connectorId || "");
+      const viewState = await writeConnectorViewState(selectedConnectorId);
+      broadcast({ type: "connector_selected", selectedConnectorId: viewState.selectedConnectorId, updatedAt: viewState.updatedAt });
+      return json(res, 200, { ok: true, ...viewState });
     }
 
     if (req.method === "POST" && url.pathname === "/api/remote/connectors/remark") {

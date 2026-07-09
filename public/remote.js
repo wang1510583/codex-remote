@@ -1434,6 +1434,7 @@ async function loadConnectors() {
   if (!els.connectorPanel) return;
   const data = await request("/api/remote/connectors");
   state.connectors = Array.isArray(data.devices) ? data.devices : [];
+  if (data.selectedConnectorId !== undefined) state.selectedConnectorId = data.selectedConnectorId || "";
   state.localConnectorRemark = data.localRemark || "";
   renderConnectors();
   updateMeta();
@@ -1452,6 +1453,15 @@ async function switchConnector(id = "") {
     els.connectorPanel.hidden = true;
     return;
   }
+  await request("/api/remote/connectors/select", {
+    method: "POST",
+    connectorId: id,
+    body: JSON.stringify({ connectorId: id })
+  });
+  await applyConnectorSelection(id, { closePanel: true });
+}
+
+async function applyConnectorSelection(id = "", options = {}) {
   state.selectedConnectorId = id;
   state.threadId = "";
   state.threadName = "";
@@ -1466,10 +1476,12 @@ async function switchConnector(id = "") {
   state.assistantBubbles.clear();
   state.replyDone = false;
   els.log.innerHTML = "";
-  els.connectorPanel.hidden = true;
+  if (options.closePanel) els.connectorPanel.hidden = true;
   updateMeta();
   await loadState(id).catch((error) => upsertAssistantMessage(`切换失败：${error.message}`, true));
   if (!els.filePanel.hidden) loadFiles().catch(() => {});
+  if (!els.threadPanel.hidden) openThreads().catch(() => {});
+  if (!els.connectorPanel.hidden) renderConnectors();
 }
 
 async function openThreads() {
@@ -1576,6 +1588,15 @@ async function selectThread(threadId) {
 function handleRemoteEvent(data) {
   if (Number(data.seq) > state.lastEventSeq) state.lastEventSeq = Number(data.seq);
   if (data.type === "connectors_changed") { loadConnectors().catch(() => {}); return; }
+  if (data.type === "connector_selected") {
+    const nextId = data.selectedConnectorId || "";
+    if (nextId !== state.selectedConnectorId) {
+      applyConnectorSelection(nextId).catch((error) => upsertAssistantMessage(`同步被控电脑失败：${error.message}`, true));
+    } else {
+      renderConnectors();
+    }
+    return;
+  }
   if (data.connectorId !== undefined && data.connectorId !== (state.selectedConnectorId || "")) {
     if (data.type === "runner_status") state.runningThreads = Array.isArray(data.runningThreads) ? data.runningThreads : state.runningThreads;
     return;

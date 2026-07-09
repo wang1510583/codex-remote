@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   dataDir, statePath, draftsPath, followModesPath, messageMetaPath,
-  threadNamesPath, threadCompletionsPath
+  threadNamesPath, threadCompletionsPath, connectorsViewStatePath
 } from "./config.js";
 import { cleanText } from "./utils.js";
 
@@ -157,6 +157,20 @@ export async function readThreadCompletions() {
 
 export async function writeThreadCompletions(completions) {
   await writeJson(threadCompletionsPath, completions);
+}
+
+export async function readConnectorViewState() {
+  const parsed = await readJson(connectorsViewStatePath, {});
+  return parsed && typeof parsed === "object" ? {
+    selectedConnectorId: typeof parsed.selectedConnectorId === "string" ? parsed.selectedConnectorId : "",
+    updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : ""
+  } : { selectedConnectorId: "", updatedAt: "" };
+}
+
+export async function writeConnectorViewState(selectedConnectorId = "") {
+  const view = { selectedConnectorId: cleanText(selectedConnectorId, 80).replace(/[^A-Za-z0-9_-]/g, ""), updatedAt: new Date().toISOString() };
+  await writeJson(connectorsViewStatePath, view);
+  return view;
 }
 
 export function syncLoadedCounts(state) {
