@@ -29,8 +29,11 @@ loadEnvFile();
 export const port = Number(process.env.PORT || 5566);
 export const host = process.env.HOST || "0.0.0.0";
 export const codexBin = process.env.CODEX_BIN || "/root/.local/bin/codex";
-export const codexModel = process.env.CODEX_MODEL || "gpt-5.5";
-export const codexReasoningEffort = process.env.CODEX_REASONING_EFFORT || "medium";
+// Empty means "use the effective Codex CLI config". These environment variables
+// are explicit overrides, not defaults: forcing them changes model/list ordering
+// and makes the web UI disagree with the CLI model picker.
+export const codexModel = process.env.CODEX_MODEL || "";
+export const codexReasoningEffort = process.env.CODEX_REASONING_EFFORT || "";
 export const codexWorkDir = process.env.CODEX_WORK_DIR || path.dirname(rootDir);
 export const publicDir = path.join(rootDir, "public");
 export const routePrefix = process.env.CODEX_REMOTE_ROUTE_PREFIX || "/codex-remote";
@@ -44,6 +47,7 @@ export const statePath = path.join(dataDir, "remote-state.json");
 export const threadNamesPath = path.join(dataDir, "thread-names.json");
 export const draftsPath = path.join(dataDir, "drafts.json");
 export const followModesPath = path.join(dataDir, "follow-modes.json");
+export const threadModelSettingsPath = path.join(dataDir, "thread-model-settings.json");
 export const messageMetaPath = path.join(dataDir, "message-meta.json");
 export const threadCompletionsPath = path.join(dataDir, "thread-completions.json");
 export const pushVapidPath = path.join(dataDir, "push-vapid.json");

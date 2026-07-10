@@ -5,11 +5,17 @@ import { projectPath, absoluteStateCwd } from "./paths.js";
 import { assistantBubbleText, saveGeneratedImage, contextUsageFromEvent } from "./threads.js";
 import { createLocalAppServerTransport } from "./transport/local.js";
 
+function normalizeReasoningEffort(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  const compact = normalized.replace(/[\s_-]+/g, "");
+  return compact === "extrahigh" || compact === "xhigh" ? "xhigh" : normalized;
+}
+
 export class CodexAppServer {
   constructor(transport, options = {}) {
     this.transport = transport;
-    this.model = options.model || codexModel;
-    this.reasoningEffort = options.reasoningEffort || codexReasoningEffort;
+    this.model = options.model || "";
+    this.reasoningEffort = options.reasoningEffort || "";
     this.isRemote = Boolean(options.isRemote);
     this.resolveCwd = options.resolveCwd || ((state = {}) => absoluteStateCwd(state));
     this.nextId = 1;
@@ -48,10 +54,14 @@ export class CodexAppServer {
     });
 
     await this.transport.start();
-    await this.request("initialize", {
-      clientInfo: { name: "codex-remote-web", title: "Codex Remote Web", version: "1.0.0" },
-      capabilities: { experimentalApi: true, requestAttestation: false }
-    });
+    try {
+      await this.request("initialize", {
+        clientInfo: { name: "codex-remote-web", title: "Codex Remote Web", version: "1.0.0" },
+        capabilities: { experimentalApi: true, requestAttestation: false }
+      });
+    } catch (error) {
+      if (!/already initialized/i.test(error?.message || "")) throw error;
+    }
     this.initialized = true;
   }
 
@@ -196,15 +206,17 @@ export class CodexAppServer {
     });
   }
 
-  async ensureThread(threadId, cwd = codexWorkDir) {
+  async ensureThread(threadId, cwd = codexWorkDir, settings = {}) {
     await this.ensureStarted();
     const resolvedCwd = this.isRemote ? String(cwd || "") : projectPath(cwd || "");
+    const configured = settings.model ? settings : await this.configuredModelSettings(resolvedCwd);
     if (threadId && threadId === this.activeThreadId && resolvedCwd === this.activeCwd) return threadId;
     const params = {
       cwd: resolvedCwd,
       approvalPolicy: "never",
       sandbox: "danger-full-access",
-      config: { model: this.model, model_reasoning_effort: this.reasoningEffort }
+      model: configured.model || undefined,
+      config: { model_reasoning_effort: configured.reasoningEffort || undefined }
     };
     const result = threadId
       ? await this.request("thread/resume", { ...params, threadId })
@@ -217,7 +229,11 @@ export class CodexAppServer {
   async runTurn(message, state, options = {}) {
     if (this.turn) throw new Error("Codex 正在处理上一条消息。");
     const cwd = this.resolveCwd(state);
-    state.threadId = await this.ensureThread(state.threadId, cwd);
+    const settings = {
+      model: options.model || state.model || "",
+      reasoningEffort: options.reasoningEffort || state.reasoningEffort || ""
+    };
+    state.threadId = await this.ensureThread(state.threadId, cwd, settings);
     if (typeof options.onConnected === "function") options.onConnected();
     if (typeof options.onThreadReady === "function") await options.onThreadReady(state);
     return await new Promise((resolve, reject) => {
@@ -236,6 +252,8 @@ export class CodexAppServer {
       this.request("turn/start", {
         threadId: state.threadId,
         cwd,
+        model: settings.model || undefined,
+        effort: settings.reasoningEffort || undefined,
         input: [{ type: "text", text: message, text_elements: [] }]
       }, (result) => {
         turn.turnId = result.turn.id;
@@ -249,6 +267,69 @@ export class CodexAppServer {
   async listModels() {
     await this.ensureStarted();
     return await this.request("model/list", { limit: 30, includeHidden: false });
+  }
+
+  async configuredModelSettings(cwd = "") {
+    await this.ensureStarted();
+    const targetCwd = cwd
+      ? (this.isRemote ? String(cwd) : projectPath(cwd))
+      : null;
+    const result = await this.request("config/read", { cwd: targetCwd, includeLayers: false });
+    return {
+      model: result?.config?.model || this.model || "",
+      reasoningEffort: result?.config?.model_reasoning_effort || this.reasoningEffort || ""
+    };
+  }
+
+  async modelOptions() {
+    const result = await this.listModels();
+    return Array.isArray(result?.data) ? result.data : [];
+  }
+
+  async updateThreadModelSettings({ model, effort, threadId = "", cwd = codexWorkDir }) {
+    if (this.turn) throw new Error("当前回合正在运行，请结束或中断后再切换模型设置。");
+    if (threadId) {
+      const id = await this.ensureThread(threadId, cwd, { model, reasoningEffort: effort });
+      await this.request("thread/settings/update", { threadId: id, model, effort });
+    }
+    return { model, effort };
+  }
+
+  async selectModel(requestedModel, currentEffort = "", threadId = "", cwd = codexWorkDir) {
+    const models = await this.modelOptions();
+    const wanted = String(requestedModel || "").trim().toLowerCase();
+    const selected = models.find((item) =>
+      [item.model, item.id].some((value) => String(value || "").toLowerCase() === wanted)
+    );
+    if (!selected) throw new Error(`不支持的模型：${requestedModel}`);
+    const efforts = (selected.supportedReasoningEfforts || [])
+      .map((item) => item.reasoningEffort)
+      .filter(Boolean);
+    const effort = efforts.includes(currentEffort)
+      ? currentEffort
+      : (selected.defaultReasoningEffort || efforts[0] || currentEffort);
+    await this.updateThreadModelSettings({ model: selected.model || selected.id, effort, threadId, cwd });
+    return { selected, effort, effortChanged: effort !== currentEffort };
+  }
+
+  async selectReasoningEffort(requestedEffort, currentModel = "", threadId = "", cwd = codexWorkDir) {
+    const models = await this.modelOptions();
+    const selected = models.find((item) => [item.model, item.id].includes(currentModel))
+      || models.find((item) => item.isDefault)
+      || models[0];
+    if (!selected) throw new Error("当前 Codex CLI 没有返回可用模型。");
+    const wanted = normalizeReasoningEffort(requestedEffort);
+    const option = (selected.supportedReasoningEfforts || []).find(
+      (item) => String(item.reasoningEffort || "").toLowerCase() === wanted
+    );
+    if (!option) throw new Error(`模型 ${selected.model || selected.id} 不支持思考强度：${requestedEffort}`);
+    await this.updateThreadModelSettings({
+      model: selected.model || selected.id,
+      effort: option.reasoningEffort,
+      threadId,
+      cwd
+    });
+    return { selected, option };
   }
 
   async readConfig(cwd = codexWorkDir) {

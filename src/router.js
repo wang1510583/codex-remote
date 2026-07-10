@@ -14,9 +14,10 @@ import {
   submitRemoteMessage, selectRemoteThread, createRemoteSession, loadThreadPage,
   listThreads, deleteThread, runnerForIncomingState, statusPayload, runnerForState,
   selectedRunner, setSelectedRunnerKey, clearThreadCompletedUnread, markInterruptedInflight,
-  runningThreads, runnerKeyForState
+  runningThreads, runnerKeyForState, ensureStateModelSettings,
+  sessionModelSettingsPayload, updateSessionModelSettings
 } from "./runner.js";
-import { mergeLocalMessageMeta } from "./threads.js";
+import { isInternalMessage, mergeLocalMessageMeta } from "./threads.js";
 import {
   listProjectFiles, createProjectFolder, deleteProjectFolder, createProjectFile,
   deleteProjectFile, writeProjectFile, renameProjectPath, saveUploadedFiles
@@ -55,7 +56,7 @@ function cleanConnectorIdValue(value) {
 }
 
 function messageMergeKey(message = {}) {
-  return [message.role || "", message.content || "", message.at || ""].join("\n");
+  return [message.role || "", message.content || ""].join("\n");
 }
 
 function mergeStateMessages(sessionMessages = [], stateMessages = []) {
@@ -63,6 +64,7 @@ function mergeStateMessages(sessionMessages = [], stateMessages = []) {
   const seen = new Set();
   for (const message of [...sessionMessages, ...stateMessages]) {
     if (!message?.role || !message?.content) continue;
+    if (message.role === "user" && isInternalMessage(message.content)) continue;
     const key = messageMergeKey(message);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -153,6 +155,7 @@ export async function handle(req, res) {
           await writeState(state, connectorId);
         }
       }
+      state = await ensureStateModelSettings(state).catch(() => state);
       setSelectedRunnerKey(runner ? runner.key : runnerKeyForState(state));
       const payload = runner?.running ? runner.state : state;
       const connectorsPayload = await remoteConnectorsPayload();
@@ -178,6 +181,17 @@ export async function handle(req, res) {
     if (req.method === "GET" && url.pathname === "/api/remote/changes") {
       const afterSeq = Number(url.searchParams.get("afterSeq") || 0);
       return json(res, 200, changesSince(afterSeq));
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/remote/model-settings") {
+      const connectorId = connectorIdFrom(req);
+      return json(res, 200, await sessionModelSettingsPayload(connectorId));
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/remote/model-settings") {
+      const body = await readBody(req);
+      const connectorId = cleanConnectorIdValue(body.connectorId || "");
+      return json(res, 200, { ok: true, ...await updateSessionModelSettings(body, connectorId) });
     }
 
     if (req.method === "GET" && url.pathname === "/api/remote/connectors") {

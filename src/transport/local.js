@@ -66,13 +66,12 @@ export class LocalTransport {
 }
 
 export function createLocalAppServerTransport({ bin, model, reasoningEffort, cwd, env }) {
+  const args = ["app-server", "--stdio"];
+  if (model) args.push("-c", `model="${model}"`);
+  if (reasoningEffort) args.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
   return new LocalTransport({
     bin,
-    args: [
-      "app-server", "--stdio",
-      "-c", `model="${model}"`,
-      "-c", `model_reasoning_effort="${reasoningEffort}"`
-    ],
+    args,
     cwd,
     env
   });

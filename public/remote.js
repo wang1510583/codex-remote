@@ -38,6 +38,9 @@ const state = {
   connectors: [],
   connectorJobs: [],
   selectedConnectorId: "",
+  model: "",
+  reasoningEffort: "",
+  modelOptions: [],
   localConnectorRemark: "",
   disableLocal: false,
   localNotices: []
@@ -45,10 +48,14 @@ const state = {
 const basePath = ["/codexremote", "/codex-remote"].find((path) => location.pathname === path || location.pathname.startsWith(`${path}/`)) || "";
 const draftPrefix = "codex-remote-draft:";
 let draftTimer = 0;
+let modelSettingsChanging = false;
 const slashCommands = [
   { command: "/help", title: "帮助", detail: "显示当前已接入的 Codex 命令" },
   { command: "/status", title: "状态", detail: "读取 app-server、线程、模型和目录状态" },
-  { command: "/model", title: "模型", detail: "通过 model/list 查看可用模型" },
+  { command: "/model", title: "查看模型", detail: "通过 Codex CLI model/list 查看可用模型" },
+  { command: "/model ", title: "切换模型", detail: "输入 /model <模型ID>，只接受 CLI 返回的可用选项" },
+  { command: "/effort", title: "查看思考强度", detail: "查看当前模型在 Codex CLI 中支持的强度" },
+  { command: "/effort ", title: "切换思考强度", detail: "输入 /effort <强度>，只接受当前模型支持的选项" },
   { command: "/diff", title: "改动", detail: "通过 gitDiffToRemote 查看当前 Git diff" },
   { command: "/compact", title: "压缩上下文", detail: "通过 thread/compact/start 压缩当前线程" },
   { command: "/restart", title: "重启服务", detail: "重启 Caddy 端口和 Codex Remote 后端服务" },
@@ -60,6 +67,10 @@ const slashCommands = [
   { command: "/mine", title: "只看自己", detail: () => state.onlyMine ? "当前只显示自己发送的气泡，点击后显示全部" : "只显示自己发送的消息气泡", action: toggleOnlyMine },
   { command: "/stop", title: "中断", detail: "通过 turn/interrupt 中断当前回合" }
 ];
+
+function reasoningEffortLabel(value = "") {
+  return ({ low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra" })[String(value).toLowerCase()] || String(value);
+}
 
 const els = {
   log: document.querySelector("#remoteLog"),
@@ -79,6 +90,13 @@ const els = {
   refreshConnectors: document.querySelector("#refreshConnectors"),
   closeConnectors: document.querySelector("#closeConnectors"),
   sshConnectButton: document.querySelector("#sshConnectRemote"),
+  modelSettingsButton: document.querySelector("#modelSettingsRemote"),
+  modelSettingsPanel: document.querySelector("#modelSettingsPanel"),
+  closeModelSettings: document.querySelector("#closeModelSettings"),
+  modelSettingsCurrent: document.querySelector("#modelSettingsCurrent"),
+  modelSettingsModels: document.querySelector("#modelSettingsModels"),
+  modelSettingsEfforts: document.querySelector("#modelSettingsEfforts"),
+  modelSettingsStatus: document.querySelector("#modelSettingsStatus"),
   onlyMineButton: document.querySelector("#onlyMineRemote"),
   sshConnectPanel: document.querySelector("#sshConnectPanel"),
   sshPanelTitle: document.querySelector("#sshPanelTitle"),
@@ -753,6 +771,10 @@ function appendCompletionEvent(data) {
   }
 }
 
+function renderedMessageKey(message = {}) {
+  return `${message.role || ""}\n${message.content || ""}`;
+}
+
 function shouldPersistLocalAssistantBubble(final, meta = {}) {
   if (!final || meta.persist === false) return false;
   if (meta.type === "message" || meta.seq !== undefined || meta.at) return false;
@@ -944,6 +966,8 @@ function renderState(data) {
   }
   state.cwd = data.cwd || "";
   state.absoluteCwd = data.absoluteCwd || "";
+  if (data.model !== undefined) state.model = data.model || "";
+  if (data.reasoningEffort !== undefined) state.reasoningEffort = data.reasoningEffort || "";
   restoreDraftForCurrentState(data.draft);
   state.loadedCount = Number(data.loadedCount || data.messages?.length || 0);
   state.messageCount = Number(data.messageCount || state.loadedCount);
@@ -957,10 +981,13 @@ function renderState(data) {
   state.replyDone = false;
   els.log.innerHTML = "";
   applyMessageFilter();
+  const renderedMessages = new Set();
   for (const message of data.messages || []) {
     appendMessage(message.role, message.content, message);
+    renderedMessages.add(renderedMessageKey(message));
   }
   for (const message of data.liveMessages || []) {
+    if (message.final && renderedMessages.has(renderedMessageKey(message))) continue;
     if (message.role === "assistant") {
       upsertAssistantMessage(message.content, message.final, message.messageId || "assistant", message);
     } else {
@@ -973,7 +1000,88 @@ function renderState(data) {
   else els.logWrap.scrollTop = previousTop;
   updateLoadMore();
   setRunning(data.running, data.queueLength, data.queueMessages, data.followMode, data.steerLength, data.steerMessages, data.contextUsage, data.runningThreads);
+  if (!els.modelSettingsPanel.hidden && state.threadId !== previousThreadId) {
+    queueMicrotask(() => openModelSettings().catch((error) => {
+      els.modelSettingsStatus.textContent = `读取失败：${error.message}`;
+    }));
+  }
   requestAnimationFrame(updateScrollJumps);
+}
+
+function renderModelSettings(data = {}) {
+  state.model = data.model || "";
+  state.reasoningEffort = data.reasoningEffort || "";
+  state.modelOptions = Array.isArray(data.models) ? data.models : [];
+  const selected = state.modelOptions.find((item) => item.model === state.model || item.id === state.model);
+  const sessionLabel = data.threadId ? "当前会话" : "新会话";
+  els.modelSettingsCurrent.textContent = `${sessionLabel}：${state.model || "默认模型"} · ${reasoningEffortLabel(state.reasoningEffort) || "默认强度"}`;
+  els.modelSettingsModels.innerHTML = "";
+  for (const item of state.modelOptions) {
+    const button = document.createElement("button");
+    const active = item.model === state.model || item.id === state.model;
+    button.className = `modelOption${active ? " active" : ""}`;
+    button.type = "button";
+    button.dataset.model = item.model || item.id || "";
+    button.disabled = Boolean(data.running || active);
+    button.innerHTML = "<strong></strong><small></small>";
+    button.querySelector("strong").textContent = item.displayName || item.model || item.id;
+    button.querySelector("small").textContent = item.description || item.model || item.id;
+    button.addEventListener("click", () => changeModelSettings({ model: button.dataset.model }));
+    els.modelSettingsModels.appendChild(button);
+  }
+  els.modelSettingsEfforts.innerHTML = "";
+  for (const option of selected?.supportedReasoningEfforts || []) {
+    const button = document.createElement("button");
+    const active = option.reasoningEffort === state.reasoningEffort;
+    const isDefault = option.reasoningEffort === selected.defaultReasoningEffort;
+    button.className = `effortOption${active ? " active" : ""}`;
+    button.type = "button";
+    button.dataset.effort = option.reasoningEffort || "";
+    button.disabled = Boolean(data.running || active);
+    button.textContent = `${option.label || reasoningEffortLabel(option.reasoningEffort)}${isDefault ? " · 默认" : ""}`;
+    button.title = option.description || "";
+    button.addEventListener("click", () => changeModelSettings({ reasoningEffort: button.dataset.effort }));
+    els.modelSettingsEfforts.appendChild(button);
+  }
+  els.modelSettingsStatus.textContent = data.running ? "当前会话正在处理，结束或中断后可切换。" : "";
+}
+
+async function openModelSettings() {
+  els.modelSettingsPanel.hidden = false;
+  els.filePanel.hidden = true;
+  els.threadPanel.hidden = true;
+  els.sshConnectPanel.hidden = true;
+  els.connectorPanel.hidden = true;
+  els.modelSettingsCurrent.textContent = "正在读取当前会话...";
+  els.modelSettingsModels.innerHTML = "";
+  els.modelSettingsEfforts.innerHTML = "";
+  els.modelSettingsStatus.textContent = "";
+  renderModelSettings(await request("/api/remote/model-settings"));
+}
+
+async function changeModelSettings(update = {}) {
+  if (modelSettingsChanging) return;
+  modelSettingsChanging = true;
+  const connectorId = currentConnectorId();
+  els.modelSettingsStatus.textContent = "正在切换...";
+  for (const button of els.modelSettingsPanel.querySelectorAll(".modelOption, .effortOption")) button.disabled = true;
+  try {
+    const data = await request("/api/remote/model-settings", {
+      method: "POST",
+      connectorId,
+      body: JSON.stringify(update)
+    });
+    if (connectorId !== currentConnectorId()) return;
+    renderModelSettings(data);
+    els.modelSettingsStatus.textContent = "已为当前会话保存。";
+  } catch (error) {
+    els.modelSettingsStatus.textContent = `切换失败：${error.message}`;
+    for (const button of els.modelSettingsPanel.querySelectorAll(".modelOption, .effortOption")) {
+      button.disabled = button.classList.contains("active");
+    }
+  } finally {
+    modelSettingsChanging = false;
+  }
 }
 
 function updateLoadMore() {
@@ -1015,6 +1123,7 @@ async function openFiles(dir = "") {
     state.fileCwd = "";
     state.fileCwdConnectorId = connectorId;
   }
+  els.modelSettingsPanel.hidden = true;
   els.filePanel.hidden = false;
   els.filePreview.hidden = true;
   els.fileList.innerHTML = '<div class="remoteEvent">加载中...</div>';
@@ -1235,6 +1344,7 @@ async function loadSshStatus() {
 }
 
 async function openSshConnect() {
+  els.modelSettingsPanel.hidden = true;
   els.sshConnectPanel.hidden = false;
   setSshView("config");
   try {
@@ -1509,6 +1619,7 @@ async function loadConnectors() {
 }
 
 async function openConnectors() {
+  els.modelSettingsPanel.hidden = true;
   els.connectorPanel.hidden = false;
   els.filePanel.hidden = true;
   els.threadPanel.hidden = true;
@@ -1535,6 +1646,9 @@ async function applyConnectorSelection(id = "", options = {}) {
   state.threadName = "";
   state.cwd = "";
   state.absoluteCwd = "";
+  state.model = "";
+  state.reasoningEffort = "";
+  state.modelOptions = [];
   state.fileCwd = "";
   state.fileCwdConnectorId = id;
   state.newCwd = "";
@@ -1544,6 +1658,7 @@ async function applyConnectorSelection(id = "", options = {}) {
   state.assistantBubbles.clear();
   state.replyDone = false;
   els.log.innerHTML = "";
+  els.modelSettingsPanel.hidden = true;
   if (options.closePanel) els.connectorPanel.hidden = true;
   updateMeta();
   await loadState(id).catch((error) => upsertAssistantMessage(`切换失败：${error.message}`, true));
@@ -1553,6 +1668,7 @@ async function applyConnectorSelection(id = "", options = {}) {
 }
 
 async function openThreads() {
+  els.modelSettingsPanel.hidden = true;
   const connectorId = currentConnectorId();
   els.threadPanel.hidden = false;
   setThreadView("existing");
@@ -1847,6 +1963,13 @@ document.addEventListener("click", (event) => {
     els.threadPanel.hidden = true;
   }
   if (
+    !els.modelSettingsPanel.hidden &&
+    !event.target.closest("#modelSettingsPanel") &&
+    !event.target.closest("#modelSettingsRemote")
+  ) {
+    els.modelSettingsPanel.hidden = true;
+  }
+  if (
     !els.filePanel.hidden &&
     !event.target.closest("#filePanel") &&
     !event.target.closest("#filesRemote")
@@ -1876,6 +1999,7 @@ document.addEventListener("keydown", (event) => {
     els.filePanel.hidden = true;
     els.sshConnectPanel.hidden = true;
     els.connectorPanel.hidden = true;
+    els.modelSettingsPanel.hidden = true;
     els.queuePanel.hidden = true;
   }
 });
@@ -1887,6 +2011,14 @@ if (window.visualViewport) {
 }
 
 els.filesButton.addEventListener("click", () => openFiles());
+els.modelSettingsButton.addEventListener("click", () => {
+  openModelSettings().catch((error) => {
+    els.modelSettingsStatus.textContent = `读取失败：${error.message}`;
+  });
+});
+els.closeModelSettings.addEventListener("click", () => {
+  els.modelSettingsPanel.hidden = true;
+});
 els.connectorsButton?.addEventListener("click", () => {
   openConnectors().catch((error) => upsertAssistantMessage(`被控电脑错误： ${error.message}`, true));
 });

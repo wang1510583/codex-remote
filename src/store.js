@@ -1,9 +1,9 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   dataDir, statePath, draftsPath, followModesPath, messageMetaPath,
-  threadNamesPath, threadCompletionsPath, connectorsViewStatePath
+  threadNamesPath, threadCompletionsPath, connectorsViewStatePath, threadModelSettingsPath
 } from "./config.js";
 import { cleanText } from "./utils.js";
 
@@ -30,16 +30,20 @@ async function readJson(file, fallback) {
 
 async function writeJson(file, data) {
   await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+  const temp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+  await writeFile(temp, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+  await rename(temp, file);
 }
 
 export async function readState(connectorId = "") {
   const parsed = await readJson(statePathFor(connectorId), null);
-  if (!parsed) return { threadId: "", connectorId, cwd: "", messages: [], inflight: null };
+  if (!parsed) return { threadId: "", connectorId, cwd: "", model: "", reasoningEffort: "", messages: [], inflight: null };
   return {
     threadId: typeof parsed.threadId === "string" ? parsed.threadId : "",
     connectorId: connectorId || (typeof parsed.connectorId === "string" ? parsed.connectorId : ""),
     cwd: typeof parsed.cwd === "string" ? parsed.cwd : "",
+    model: typeof parsed.model === "string" ? parsed.model : "",
+    reasoningEffort: typeof parsed.reasoningEffort === "string" ? parsed.reasoningEffort : "",
     messages: Array.isArray(parsed.messages) ? parsed.messages : [],
     inflight: parsed.inflight && typeof parsed.inflight === "object" ? parsed.inflight : null
   };
@@ -101,6 +105,39 @@ export async function saveFollowModeForState(state = {}, mode = "queue", connect
   const modes = await readFollowModes();
   modes[`${connectorPrefix(connectorId)}${stateKeyFor(state)}`] = mode === "steer" ? "steer" : "queue";
   await writeFollowModes(modes);
+}
+
+async function readAllThreadModelSettings() {
+  const parsed = await readJson(threadModelSettingsPath, {});
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+}
+
+export async function modelSettingsForThread(threadId = "", connectorId = "") {
+  if (!threadId) return null;
+  const settings = await readAllThreadModelSettings();
+  const value = settings[`${connectorPrefix(connectorId)}${threadId}`];
+  if (!value || typeof value !== "object") return null;
+  const model = typeof value.model === "string" ? value.model : "";
+  const reasoningEffort = typeof value.reasoningEffort === "string" ? value.reasoningEffort : "";
+  return model ? { model, reasoningEffort } : null;
+}
+
+export async function saveThreadModelSettings(threadId = "", value = {}, connectorId = "") {
+  if (!threadId || !value.model) return;
+  const settings = await readAllThreadModelSettings();
+  settings[`${connectorPrefix(connectorId)}${threadId}`] = {
+    model: String(value.model),
+    reasoningEffort: String(value.reasoningEffort || ""),
+    updatedAt: new Date().toISOString()
+  };
+  await writeJson(threadModelSettingsPath, settings);
+}
+
+export async function deleteThreadModelSettings(threadId = "", connectorId = "") {
+  if (!threadId) return;
+  const settings = await readAllThreadModelSettings();
+  delete settings[`${connectorPrefix(connectorId)}${threadId}`];
+  await writeJson(threadModelSettingsPath, settings);
 }
 
 export async function readMessageMeta() {

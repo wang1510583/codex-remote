@@ -54,8 +54,8 @@ cp .env.example .env
 | `PORT` | `5566` | 监听端口 |
 | `HOST` | `0.0.0.0` | 监听地址 |
 | `CODEX_BIN` | `/root/.local/bin/codex` | codex 可执行文件路径 |
-| `CODEX_MODEL` | `gpt-5.5` | 默认模型 |
-| `CODEX_REASONING_EFFORT` | `medium` | 推理强度 |
+| `CODEX_MODEL` | Codex CLI 当前配置 | 可选的模型覆盖值 |
+| `CODEX_REASONING_EFFORT` | Codex CLI 当前配置 | 可选的推理强度覆盖值 |
 | `CODEX_WORK_DIR` | 项目父目录 | 工作目录根（网页端文件管理限制在此目录下） |
 | `CODEX_REMOTE_PASSWORD` | — | **必填**，网页登录密码 |
 | `CODEX_REMOTE_CONNECTOR_TOKEN` | =登录密码 | 被控端配对令牌（建议单独设置，与登录密码不同） |
@@ -167,7 +167,7 @@ CODEX_REMOTE_DISABLE_LOCAL=1
 - `remote-state.json` — 本机会话状态
 - `remote-state-<connectorId>.json` — 各被控端会话状态
 - `connectors.json` — 被控端设备注册信息
-- `drafts.json` / `follow-modes.json` / `thread-names.json` / `message-meta.json`
+- `drafts.json` / `follow-modes.json` / `thread-model-settings.json` / `thread-names.json` / `message-meta.json`
 - `push-vapid.json` / `push-subscriptions.json`
 - `generated-images/` / `uploads/`
 

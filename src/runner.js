@@ -8,7 +8,8 @@ import {
   readState, writeState, draftForState, saveDraftForState,
   followModeForState, saveFollowModeForState, rememberMessageMeta,
   readThreadNames, writeThreadNames, threadName,
-  readThreadCompletions, writeThreadCompletions, syncLoadedCounts
+  readThreadCompletions, writeThreadCompletions, syncLoadedCounts,
+  modelSettingsForThread, saveThreadModelSettings, deleteThreadModelSettings
 } from "./store.js";
 import { stateAbsoluteCwd, safeStateCwdValue, stateCwdValue, assertProjectDirectory } from "./paths.js";
 import {
@@ -25,6 +26,37 @@ export let selectedRunnerKey = "";
 export let followMode = "queue";
 export let contextUsage = null;
 
+const reasoningEffortLabels = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra high",
+  max: "Max",
+  ultra: "Ultra"
+};
+
+function reasoningEffortLabel(value) {
+  return reasoningEffortLabels[String(value || "").toLowerCase()] || String(value || "");
+}
+
+const modelDescriptionsZh = {
+  "gpt-5.6-sol": "最新的前沿智能体编程模型，适合复杂任务。",
+  "gpt-5.6-terra": "能力与速度均衡，适合日常开发工作。",
+  "gpt-5.6-luna": "快速且经济，适合较轻量的编程任务。",
+  "gpt-5.5": "适合复杂编程、研究和综合工作的前沿模型。",
+  "gpt-5.4": "能力稳定，适合常规编程任务。",
+  "gpt-5.4-mini": "小型、快速且成本较低，适合简单任务。"
+};
+
+const reasoningEffortDescriptionsZh = {
+  low: "响应更快，使用较少推理。",
+  medium: "在速度和推理深度之间取得平衡。",
+  high: "提供更深入的推理，适合复杂问题。",
+  xhigh: "使用超高推理深度处理复杂问题。",
+  max: "使用最大推理深度处理高难度问题。",
+  ultra: "最大推理强度，并可自动分派任务。"
+};
+
 export function setSelectedRunnerKey(key) { selectedRunnerKey = key; }
 export function setFollowMode(mode) { followMode = mode; }
 
@@ -37,6 +69,107 @@ function getLocalAppServer() {
 export function appServerForState(state = {}) {
   if (state.connectorId) return getConnectorAppServer(state.connectorId);
   return getLocalAppServer();
+}
+
+async function sessionModelSettings(state = {}) {
+  if (state.threadId) {
+    const saved = await modelSettingsForThread(state.threadId, state.connectorId || "");
+    if (saved?.model) return saved;
+    const provider = state.connectorId ? remoteSessionProvider(state.connectorId) : localSessionProvider;
+    const thread = await loadThreadFromProvider(state.threadId, provider).catch(() => null);
+    if (thread?.model) {
+      const inferred = { model: thread.model, reasoningEffort: thread.reasoningEffort || "" };
+      await saveThreadModelSettings(state.threadId, inferred, state.connectorId || "");
+      return inferred;
+    }
+  }
+  const server = appServerForState(state);
+  const cwd = state.connectorId ? String(state.cwd || "") : stateAbsoluteCwd(state.cwd || "");
+  return server.configuredModelSettings(cwd);
+}
+
+export async function ensureStateModelSettings(state = {}) {
+  if (state.threadId) {
+    const saved = await modelSettingsForThread(state.threadId, state.connectorId || "");
+    if (saved?.model) {
+      state.model = saved.model;
+      state.reasoningEffort = saved.reasoningEffort || "";
+      return state;
+    }
+  }
+  if (state.model && state.reasoningEffort) {
+    if (state.threadId) await saveThreadModelSettings(state.threadId, state, state.connectorId || "");
+    return state;
+  }
+  const settings = await sessionModelSettings(state);
+  state.model = state.model || settings.model || "";
+  state.reasoningEffort = state.reasoningEffort || settings.reasoningEffort || "";
+  return state;
+}
+
+async function saveStateModelSettings(state = {}, runner = null) {
+  if (state.threadId) await saveThreadModelSettings(state.threadId, state, state.connectorId || "");
+  if (runner) {
+    runner.state.model = state.model || "";
+    runner.state.reasoningEffort = state.reasoningEffort || "";
+  }
+  await writeState(syncLoadedCounts(state), state.connectorId || "");
+}
+
+function publicModelSettings(state = {}, models = [], running = false) {
+  return {
+    threadId: state.threadId || "",
+    model: state.model || "",
+    reasoningEffort: state.reasoningEffort || "",
+    running,
+    models: models.map((item) => ({
+      id: item.id || item.model,
+      model: item.model || item.id,
+      displayName: item.displayName || item.model || item.id,
+      description: modelDescriptionsZh[item.model || item.id] || "Codex CLI 当前可用的模型。",
+      defaultReasoningEffort: item.defaultReasoningEffort || "",
+      supportedReasoningEfforts: (item.supportedReasoningEfforts || []).map((option) => ({
+        reasoningEffort: option.reasoningEffort,
+        label: reasoningEffortLabel(option.reasoningEffort),
+        description: reasoningEffortDescriptionsZh[option.reasoningEffort] || ""
+      }))
+    }))
+  };
+}
+
+export async function sessionModelSettingsPayload(connectorId = "") {
+  const state = await readState(connectorId);
+  state.connectorId = state.connectorId || connectorId;
+  const runner = await runnerForState(state, false);
+  const selectedState = runner?.state || state;
+  await ensureStateModelSettings(selectedState);
+  const server = runner?.appServer || appServerForState(selectedState);
+  return publicModelSettings(selectedState, await server.modelOptions(), Boolean(runner?.running));
+}
+
+export async function updateSessionModelSettings(update = {}, connectorId = "") {
+  const state = await readState(connectorId);
+  state.connectorId = state.connectorId || connectorId;
+  const runner = await runnerForState(state, false);
+  if (runner?.running) throw Object.assign(new Error("当前会话正在处理，请结束或中断后再切换。"), { statusCode: 409 });
+  await ensureStateModelSettings(state);
+  const server = runner?.appServer || appServerForState(state);
+  const cwd = state.connectorId ? String(state.cwd || "") : stateAbsoluteCwd(state.cwd || "");
+  if (update.model) {
+    const result = await server.selectModel(update.model, state.reasoningEffort, state.threadId, cwd);
+    state.model = result.selected.model || result.selected.id;
+    state.reasoningEffort = result.effort;
+  }
+  if (update.reasoningEffort) {
+    const result = await server.selectReasoningEffort(update.reasoningEffort, state.model, state.threadId, cwd);
+    state.model = result.selected.model || result.selected.id;
+    state.reasoningEffort = result.option.reasoningEffort;
+  }
+  if (!update.model && !update.reasoningEffort) {
+    throw Object.assign(new Error("请选择模型或思考强度。"), { statusCode: 400 });
+  }
+  await saveStateModelSettings(state, runner);
+  return publicModelSettings(state, await server.modelOptions(), false);
 }
 
 function resolveAbsoluteCwd(state = {}) {
@@ -126,13 +259,14 @@ export function runnerStatePayload(runner, extra = {}) {
 }
 
 export async function createRunner(state = {}) {
+  await ensureStateModelSettings(state);
   const key = runnerKeyForState(state);
   const appServer = appServerForState(state);
   const runner = {
     key,
     connectorId: state.connectorId || "",
     cwd: state.cwd || "",
-    state: syncLoadedCounts({ threadId: state.threadId || "", connectorId: state.connectorId || "", cwd: state.cwd || "", messages: Array.isArray(state.messages) ? state.messages : [], inflight: state.inflight || null }),
+    state: syncLoadedCounts({ threadId: state.threadId || "", connectorId: state.connectorId || "", cwd: state.cwd || "", model: state.model || "", reasoningEffort: state.reasoningEffort || "", messages: Array.isArray(state.messages) ? state.messages : [], inflight: state.inflight || null }),
     appServer,
     running: false,
     followMode: await followModeForState(state, state.connectorId || ""),
@@ -161,6 +295,7 @@ export async function runnerForState(state = {}, create = false) {
 export async function rememberRunnerThread(runner, state = runner.state) {
   if (!runner || !state.threadId) return;
   runner.state.threadId = state.threadId;
+  await saveThreadModelSettings(state.threadId, runner.state, runner.connectorId || "");
   runners.set(`${runner.connectorId ? `${runner.connectorId}:` : ""}thread:${state.threadId}`, runner);
 }
 
@@ -202,6 +337,9 @@ async function localCommandResponse(message, connectorId = "") {
       "- `/help`：显示命令列表",
       "- `/status`：读取当前 app-server/线程状态",
       "- `/model`：通过 `model/list` 查看当前可用模型",
+      "- `/model <模型ID>`：切换到 Codex CLI 提供的模型",
+      "- `/effort`：查看当前模型支持的思考强度",
+      "- `/effort <强度>`：切换思考强度（`/reasoning` 是别名）",
       "- `/diff`：通过 `gitDiffToRemote` 查看当前 Git diff",
       "- `/compact`：通过 `thread/compact/start` 压缩当前线程上下文",
       "- `/stop`：通过 `turn/interrupt` 中断当前回合；无回合时重启 app-server",
@@ -215,7 +353,7 @@ async function localCommandResponse(message, connectorId = "") {
     ].join("\n");
   }
   if (command === "/status") {
-    const config = await commandServer.readConfig(currentCwd).catch(() => null);
+    await ensureStateModelSettings(state);
     return [
       "当前状态：", "",
       `- Web 服务 PID：${process.pid}`,
@@ -225,16 +363,70 @@ async function localCommandResponse(message, connectorId = "") {
       `- 跟随模式：${(currentRunner?.followMode || followMode) === "steer" ? "引导" : "队列"}`,
       `- 工作目录：${currentCwdLabel}`,
       `- 被控端：${state.connectorId || "本机"}`,
-      `- 模型：${config?.config?.model || commandServer.model}`
+      `- 模型：${state.model || "默认"}`,
+      `- 思考强度：${reasoningEffortLabel(state.reasoningEffort) || "默认"}`
     ].join("\n");
   }
   if (command === "/model") {
-    const result = await commandServer.listModels();
-    const models = (result.data || []).slice(0, 30).map((item) => {
-      const marker = item.isDefault ? " 当前" : "";
-      return `- ${item.displayName || item.model || item.id} (${item.model || item.id})${marker}`;
+    await ensureStateModelSettings(state);
+    const options = await commandServer.modelOptions();
+    const models = options.slice(0, 30).map((item, index) => {
+      const marker = [item.model, item.id].includes(state.model) ? " ← 当前" : "";
+      return `${index + 1}. ${item.model || item.id}${marker}`;
     });
-    return ["可用模型：", "", ...models].join("\n");
+    return ["可用模型（来自 Codex CLI `model/list`）：", "", ...models, "", "切换用法：`/model <模型ID>`"].join("\n");
+  }
+  if (/^\/model\s+/i.test(raw)) {
+    if (currentRunner?.running) return "Codex 正在处理，请结束或中断后再切换模型。";
+    const requestedModel = raw.replace(/^\/model\s+/i, "").trim();
+    await ensureStateModelSettings(state);
+    const previousEffort = state.reasoningEffort;
+    try {
+      const { selected, effort } = await commandServer.selectModel(requestedModel, state.reasoningEffort, state.threadId, currentCwd);
+      state.model = selected.model || selected.id;
+      state.reasoningEffort = effort;
+      await saveStateModelSettings(state, currentRunner);
+      const effortNote = effort !== previousEffort ? `\n思考强度已自动调整为该模型的可用选项：\`${reasoningEffortLabel(effort)}\`` : "";
+      return `已切换模型：\`${selected.model || selected.id}\`${effortNote}`;
+    } catch (error) {
+      const options = await commandServer.modelOptions().catch(() => []);
+      const available = options.map((item) => item.model || item.id).filter(Boolean).join("、");
+      return [`切换模型失败：${error.message || error}`, available ? `可用选项：${available}` : ""].filter(Boolean).join("\n\n");
+    }
+  }
+  if (command === "/effort" || command === "/reasoning") {
+    await ensureStateModelSettings(state);
+    const options = await commandServer.modelOptions();
+    const selected = options.find((item) => [item.model, item.id].includes(state.model))
+      || options.find((item) => item.isDefault)
+      || options[0];
+    const efforts = (selected?.supportedReasoningEfforts || []).map((item, index) => {
+      const markers = [];
+      if (item.reasoningEffort === selected?.defaultReasoningEffort) markers.push("默认");
+      if (item.reasoningEffort === state.reasoningEffort) markers.push("当前");
+      return `${index + 1}. ${reasoningEffortLabel(item.reasoningEffort)}${markers.length ? ` (${markers.join("、")})` : ""}`;
+    });
+    return [
+      `模型 \`${selected?.model || state.model}\` 可用的思考强度（来自 Codex CLI \`model/list\`）：`,
+      "", ...efforts, "", "切换用法：`/effort <强度>`"
+    ].join("\n");
+  }
+  if (/^\/(?:effort|reasoning)\s+/i.test(raw)) {
+    if (currentRunner?.running) return "Codex 正在处理，请结束或中断后再切换思考强度。";
+    const requestedEffort = raw.replace(/^\/(?:effort|reasoning)\s+/i, "").trim();
+    await ensureStateModelSettings(state);
+    try {
+      const { selected, option } = await commandServer.selectReasoningEffort(requestedEffort, state.model, state.threadId, currentCwd);
+      state.model = selected.model || selected.id;
+      state.reasoningEffort = option.reasoningEffort;
+      await saveStateModelSettings(state, currentRunner);
+      return `已将模型 \`${selected.model || selected.id}\` 的思考强度切换为：\`${reasoningEffortLabel(option.reasoningEffort)}\``;
+    } catch (error) {
+      const options = await commandServer.modelOptions().catch(() => []);
+      const selected = options.find((item) => [item.model, item.id].includes(state.model));
+      const available = (selected?.supportedReasoningEfforts || []).map((item) => reasoningEffortLabel(item.reasoningEffort)).filter(Boolean).join("、");
+      return [`切换思考强度失败：${error.message || error}`, available ? `可用选项：${available}` : ""].filter(Boolean).join("\n\n");
+    }
   }
   if (command === "/diff") {
     const result = await commandServer.gitDiff(currentCwd).catch((error) => { throw error; });
@@ -295,8 +487,10 @@ async function localCommandResponse(message, connectorId = "") {
     commandServer.activeThreadId = "";
     commandServer.activeCwd = "";
     contextUsage = freshContextUsage();
-    await writeState({ threadId: "", connectorId: state.connectorId || "", cwd: state.cwd || "", messages: [] }, state.connectorId || "");
-    broadcast({ type: "state", connectorId: state.connectorId || "", threadId: "", cwd: state.cwd || "", absoluteCwd: stateAbsoluteCwd(state.cwd), messages: [], contextUsage });
+    const defaults = await commandServer.configuredModelSettings(currentCwd);
+    const nextState = { threadId: "", connectorId: state.connectorId || "", cwd: state.cwd || "", model: defaults.model || "", reasoningEffort: defaults.reasoningEffort || "", messages: [] };
+    await writeState(nextState, state.connectorId || "");
+    broadcast({ type: "state", ...nextState, absoluteCwd: stateAbsoluteCwd(state.cwd), contextUsage });
     return "已新建线程。";
   }
   if (command === "/resume") {
@@ -337,6 +531,8 @@ export async function runRemoteTask(message, runner) {
       });
       answers = await Promise.race([
         runner.appServer.runTurn(message, state, {
+          model: runner.state.model,
+          reasoningEffort: runner.state.reasoningEffort,
           onConnected: markConnected,
           onThreadReady: async (st) => {
             runner.state.threadId = st.threadId;
@@ -599,7 +795,8 @@ export async function selectRemoteThread(rawThreadId, connectorId = "") {
   const thread = await loadThreadFromProvider(threadId, provider);
   await clearThreadCompletedUnread(threadId);
   const messages = await mergeLocalMessageMeta(thread.threadId, thread.messages, []);
-  const state = { threadId: thread.threadId, connectorId, cwd: thread.cwd || "", messages, loadedCount: messages.length, messageCount: thread.messageCount, inflight: null };
+  const state = { threadId: thread.threadId, connectorId, cwd: thread.cwd || "", model: thread.model || "", reasoningEffort: thread.reasoningEffort || "", messages, loadedCount: messages.length, messageCount: thread.messageCount, inflight: null };
+  await ensureStateModelSettings(state);
   selectedRunnerKey = runnerKeyForState(state);
   contextUsage = thread.contextUsage || null;
   const name = await threadName(thread.threadId);
@@ -619,6 +816,7 @@ export async function loadThreadPage(threadId, connectorId = "") {
 export async function deleteThread(threadId, connectorId = "") {
   const provider = connectorId ? remoteSessionProvider(connectorId) : localSessionProvider;
   await deleteThreadFromProvider(threadId, provider);
+  await deleteThreadModelSettings(threadId, connectorId);
 }
 
 export async function createRemoteSession(rawCwd = "", connectorId = "") {
@@ -636,7 +834,9 @@ export async function createRemoteSession(rawCwd = "", connectorId = "") {
   appServer.activeThreadId = "";
   appServer.activeCwd = "";
   contextUsage = freshContextUsage();
-  const state = { threadId: "", connectorId, cwd, messages: [], inflight: null };
+  const absoluteCwd = connectorId ? cwd : stateAbsoluteCwd(cwd);
+  const defaults = await appServer.configuredModelSettings(absoluteCwd);
+  const state = { threadId: "", connectorId, cwd, model: defaults.model || "", reasoningEffort: defaults.reasoningEffort || "", messages: [], inflight: null };
   selectedRunnerKey = runnerKeyForState(state);
   await writeState(state, connectorId);
   const draft = await draftForState(state, connectorId);

@@ -13,7 +13,17 @@ export function threadIdFromFile(file = "") {
 
 export function isInternalMessage(text = "") {
   const trimmed = text.trim();
-  return !trimmed || trimmed.startsWith("<environment_context>") || trimmed.startsWith("# AGENTS.md instructions") || trimmed.startsWith("<permissions instructions>");
+  const internalPrefixes = [
+    "<recommended_plugins>",
+    "<environment_context>",
+    "<permissions instructions>",
+    "<collaboration_mode>",
+    "<skills_instructions>",
+    "<apps_instructions>",
+    "<plugins_instructions>",
+    "# AGENTS.md instructions"
+  ];
+  return !trimmed || internalPrefixes.some((prefix) => trimmed.startsWith(prefix));
 }
 
 export function messageText(payload = {}) {
@@ -87,7 +97,7 @@ function saveGeneratedImageSync(item = {}, threadId = "") {
 
 export function parseSessionFile(text, file = "", limit = defaultMessageLimit) {
   const messages = [];
-  const meta = { threadId: threadIdFromFile(file), cwd: "", updatedAt: "", contextUsage: null };
+  const meta = { threadId: threadIdFromFile(file), cwd: "", updatedAt: "", contextUsage: null, model: "", reasoningEffort: "" };
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let row;
@@ -101,6 +111,12 @@ export function parseSessionFile(text, file = "", limit = defaultMessageLimit) {
     if (row.type === "event_msg" && row.payload?.type === "token_count") {
       const usage = contextUsageFromTokenInfo(row.payload.info, meta.threadId, row.timestamp || meta.updatedAt);
       if (usage) meta.contextUsage = usage;
+      meta.updatedAt = row.timestamp || meta.updatedAt;
+      continue;
+    }
+    if (row.type === "turn_context") {
+      meta.model = row.payload?.model || row.payload?.collaboration_mode?.settings?.model || meta.model;
+      meta.reasoningEffort = row.payload?.effort || row.payload?.reasoning_effort || row.payload?.collaboration_mode?.settings?.reasoning_effort || meta.reasoningEffort;
       meta.updatedAt = row.timestamp || meta.updatedAt;
       continue;
     }
