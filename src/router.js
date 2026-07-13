@@ -15,7 +15,7 @@ import {
   listThreads, deleteThread, runnerForIncomingState, statusPayload, runnerForState,
   selectedRunner, setSelectedRunnerKey, clearThreadCompletedUnread, markInterruptedInflight,
   runningThreads, runnerKeyForState, ensureStateModelSettings,
-  sessionModelSettingsPayload, updateSessionModelSettings
+  sessionModelSettingsPayload, updateSessionModelSettings, usagePayload, resetUsageLimit
 } from "./runner.js";
 import { isInternalMessage, mergeLocalMessageMeta } from "./threads.js";
 import {
@@ -192,6 +192,17 @@ export async function handle(req, res) {
       const body = await readBody(req);
       const connectorId = cleanConnectorIdValue(body.connectorId || "");
       return json(res, 200, { ok: true, ...await updateSessionModelSettings(body, connectorId) });
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/remote/usage") {
+      const connectorId = connectorIdFrom(req);
+      return json(res, 200, await usagePayload(connectorId));
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/remote/usage/reset") {
+      const body = await readBody(req);
+      const connectorId = cleanConnectorIdValue(body.connectorId || "");
+      return json(res, 200, { ok: true, ...await resetUsageLimit(body.creditId || "", connectorId) });
     }
 
     if (req.method === "GET" && url.pathname === "/api/remote/connectors") {

@@ -90,6 +90,11 @@ const els = {
   refreshConnectors: document.querySelector("#refreshConnectors"),
   closeConnectors: document.querySelector("#closeConnectors"),
   sshConnectButton: document.querySelector("#sshConnectRemote"),
+  usageButton: document.querySelector("#usageRemote"),
+  usagePanel: document.querySelector("#usagePanel"),
+  closeUsage: document.querySelector("#closeUsage"),
+  usageContent: document.querySelector("#usageContent"),
+  usageStatus: document.querySelector("#usageStatus"),
   modelSettingsButton: document.querySelector("#modelSettingsRemote"),
   modelSettingsPanel: document.querySelector("#modelSettingsPanel"),
   closeModelSettings: document.querySelector("#closeModelSettings"),
@@ -1048,6 +1053,7 @@ function renderModelSettings(data = {}) {
 
 async function openModelSettings() {
   els.modelSettingsPanel.hidden = false;
+  els.usagePanel.hidden = true;
   els.filePanel.hidden = true;
   els.threadPanel.hidden = true;
   els.sshConnectPanel.hidden = true;
@@ -1081,6 +1087,128 @@ async function changeModelSettings(update = {}) {
     }
   } finally {
     modelSettingsChanging = false;
+  }
+}
+
+function usageResetTime(value = 0) {
+  const time = Number(value) * 1000;
+  if (!Number.isFinite(time) || time <= 0) return "重置时间未知";
+  const date = new Date(time);
+  const now = new Date();
+  const timeText = date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const sameDay = date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+  return sameDay ? `将于 ${timeText} 重置` : `将于 ${date.getMonth() + 1}月${date.getDate()}日 ${timeText} 重置`;
+}
+
+function usageQuotaTitle(limit = {}) {
+  const minutes = Math.round(Number(limit.windowDurationMins));
+  if (!Number.isFinite(minutes) || minutes <= 0) return "使用限额";
+  if (minutes % (7 * 24 * 60) === 0) return minutes === 7 * 24 * 60 ? "每周使用限额" : `${minutes / (7 * 24 * 60)} 周使用限额`;
+  if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)} 天使用限额`;
+  if (minutes % 60 === 0) return `${minutes / 60} 小时使用限制`;
+  return `${minutes} 分钟使用限制`;
+}
+
+function usageQuotaItem(limit = {}) {
+  const used = Math.max(0, Math.min(100, Number(limit.usedPercent) || 0));
+  const item = document.createElement("section");
+  item.className = "usageQuota";
+  const heading = document.createElement("strong");
+  heading.textContent = usageQuotaTitle(limit);
+  const row = document.createElement("div");
+  row.className = "usageQuotaRow";
+  const reset = document.createElement("span");
+  reset.textContent = usageResetTime(limit.resetsAt);
+  const progress = document.createElement("div");
+  progress.className = "usageProgress";
+  const fill = document.createElement("span");
+  fill.style.width = `${100 - used}%`;
+  progress.appendChild(fill);
+  const remaining = document.createElement("span");
+  remaining.className = "usageRemaining";
+  remaining.textContent = `剩余 ${100 - used}%`;
+  row.append(reset, progress, remaining);
+  item.append(heading, row);
+  return item;
+}
+
+function renderUsage(data = {}) {
+  els.usageContent.innerHTML = "";
+  const quotaCard = document.createElement("div");
+  quotaCard.className = "usageCard";
+  if (data.primary) quotaCard.appendChild(usageQuotaItem(data.primary));
+  if (data.secondary) quotaCard.appendChild(usageQuotaItem(data.secondary));
+  if (!quotaCard.childElementCount) quotaCard.textContent = "暂时无法读取使用限额。";
+  els.usageContent.appendChild(quotaCard);
+
+  const resetCard = document.createElement("details");
+  resetCard.className = "usageCard usageResetCard";
+  const head = document.createElement("summary");
+  head.className = "usageResetHead";
+  const title = document.createElement("strong");
+  title.textContent = "重置次数";
+  const count = Number(data.resetCredits?.availableCount) || 0;
+  const badge = document.createElement("span");
+  badge.className = "usageBadge";
+  badge.textContent = count ? `可用 ${count} 次` : "暂无可用次数";
+  head.append(title, badge);
+  resetCard.appendChild(head);
+  const credits = Array.isArray(data.resetCredits?.credits) ? data.resetCredits.credits : [];
+  const body = document.createElement("div");
+  body.className = credits.length ? "usageResetBody usageResetList" : "usageResetBody";
+  if (!credits.length) {
+    body.textContent = "没有可用的重置额度";
+  }
+  for (const [index, credit] of credits.entries()) {
+    const row = document.createElement("div");
+    row.className = "usageResetItem";
+    const detail = document.createElement("div");
+    const creditTitle = document.createElement("strong");
+    creditTitle.textContent = credit.title || `重置额度 ${index + 1}`;
+    const expires = document.createElement("small");
+    const expiresAt = Number(credit.expiresAt) * 1000;
+    expires.textContent = Number.isFinite(expiresAt) && expiresAt > 0
+      ? `到期：${new Date(expiresAt).toLocaleString("zh-CN", { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}`
+      : "到期时间未知";
+    detail.append(creditTitle, expires);
+    const button = document.createElement("button");
+    button.className = "usageResetButton";
+    button.type = "button";
+    button.textContent = "使用重置";
+    button.disabled = credit.status !== "available";
+    button.addEventListener("click", () => resetUsageCredit(credit));
+    row.append(detail, button);
+    body.appendChild(row);
+  }
+  resetCard.appendChild(body);
+  els.usageContent.appendChild(resetCard);
+}
+
+async function openUsagePanel() {
+  els.usagePanel.hidden = false;
+  els.modelSettingsPanel.hidden = true;
+  els.filePanel.hidden = true;
+  els.threadPanel.hidden = true;
+  els.sshConnectPanel.hidden = true;
+  els.connectorPanel.hidden = true;
+  els.usageContent.innerHTML = '<div class="remoteEvent">正在刷新使用量...</div>';
+  els.usageStatus.textContent = "";
+  renderUsage(await request("/api/remote/usage"));
+}
+
+async function resetUsageCredit(credit = {}) {
+  if (!credit.id) return;
+  if (!confirm("确定使用这一次完整额度重置吗？这会重置当前全部使用额度。")) return;
+  els.usageStatus.textContent = "正在重置...";
+  try {
+    const data = await request("/api/remote/usage/reset", {
+      method: "POST",
+      body: JSON.stringify({ creditId: credit.id })
+    });
+    renderUsage(data);
+    els.usageStatus.textContent = "使用额度已重置。";
+  } catch (error) {
+    els.usageStatus.textContent = `重置失败：${error.message}`;
   }
 }
 
@@ -1124,6 +1252,7 @@ async function openFiles(dir = "") {
     state.fileCwdConnectorId = connectorId;
   }
   els.modelSettingsPanel.hidden = true;
+  els.usagePanel.hidden = true;
   els.filePanel.hidden = false;
   els.filePreview.hidden = true;
   els.fileList.innerHTML = '<div class="remoteEvent">加载中...</div>';
@@ -1345,6 +1474,7 @@ async function loadSshStatus() {
 
 async function openSshConnect() {
   els.modelSettingsPanel.hidden = true;
+  els.usagePanel.hidden = true;
   els.sshConnectPanel.hidden = false;
   setSshView("config");
   try {
@@ -1620,6 +1750,7 @@ async function loadConnectors() {
 
 async function openConnectors() {
   els.modelSettingsPanel.hidden = true;
+  els.usagePanel.hidden = true;
   els.connectorPanel.hidden = false;
   els.filePanel.hidden = true;
   els.threadPanel.hidden = true;
@@ -1659,6 +1790,7 @@ async function applyConnectorSelection(id = "", options = {}) {
   state.replyDone = false;
   els.log.innerHTML = "";
   els.modelSettingsPanel.hidden = true;
+  els.usagePanel.hidden = true;
   if (options.closePanel) els.connectorPanel.hidden = true;
   updateMeta();
   await loadState(id).catch((error) => upsertAssistantMessage(`切换失败：${error.message}`, true));
@@ -1669,6 +1801,7 @@ async function applyConnectorSelection(id = "", options = {}) {
 
 async function openThreads() {
   els.modelSettingsPanel.hidden = true;
+  els.usagePanel.hidden = true;
   const connectorId = currentConnectorId();
   els.threadPanel.hidden = false;
   setThreadView("existing");
@@ -1963,11 +2096,19 @@ document.addEventListener("click", (event) => {
     els.threadPanel.hidden = true;
   }
   if (
+    !els.usagePanel.hidden &&
+    !event.target.closest("#usagePanel") &&
+    !event.target.closest("#usageRemote")
+  ) {
+    els.usagePanel.hidden = true;
+  }
+  if (
     !els.modelSettingsPanel.hidden &&
     !event.target.closest("#modelSettingsPanel") &&
     !event.target.closest("#modelSettingsRemote")
   ) {
     els.modelSettingsPanel.hidden = true;
+    els.usagePanel.hidden = true;
   }
   if (
     !els.filePanel.hidden &&
@@ -2011,6 +2152,15 @@ if (window.visualViewport) {
 }
 
 els.filesButton.addEventListener("click", () => openFiles());
+els.usageButton.addEventListener("click", () => {
+  openUsagePanel().catch((error) => {
+    els.usageContent.innerHTML = "";
+    els.usageStatus.textContent = `读取失败：${error.message}`;
+  });
+});
+els.closeUsage.addEventListener("click", () => {
+  els.usagePanel.hidden = true;
+});
 els.modelSettingsButton.addEventListener("click", () => {
   openModelSettings().catch((error) => {
     els.modelSettingsStatus.textContent = `读取失败：${error.message}`;

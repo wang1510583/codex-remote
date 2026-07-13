@@ -71,6 +71,9 @@ export const defaultMessageLimit = 10;
 export const messagePageSize = 10;
 export const codexConnectWaitMs = Number(process.env.CODEX_CONNECT_WAIT_MS || 5000);
 export const codexConnectTimeoutMs = Number(process.env.CODEX_CONNECT_TIMEOUT_MS || 60000);
+// A turn can legitimately take a while, but it must not leave the web session
+// permanently busy when app-server fails to emit turn/completed.
+export const codexTurnTimeoutMs = Number(process.env.CODEX_TURN_TIMEOUT_MS || 20 * 60 * 1000);
 export const connectorPollMs = Number(process.env.CODEX_REMOTE_CONNECTOR_POLL_MS || 3000);
-export const connectorHeartbeatTimeoutMs = Number(process.env.CODEX_REMOTE_CONNECTOR_HEARTBEAT_MS || 45000);
+export const connectorHeartbeatTimeoutMs = Number(process.env.CODEX_REMOTE_CONNECTOR_HEARTBEAT_MS || 180000);
 export const disableLocal = /^(1|true|yes|on)$/i.test(process.env.CODEX_REMOTE_DISABLE_LOCAL || "");

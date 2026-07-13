@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { codexBin, codexModel, codexReasoningEffort, codexWorkDir } from "./config.js";
 import { broadcast } from "./sse.js";
 import { rpcErrorMessage } from "./utils.js";
@@ -68,7 +69,9 @@ export class CodexAppServer {
   rejectAll(error) {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
-    if (this.turn) this.turn.reject(error);
+    const turn = this.turn;
+    this.turn = null;
+    if (turn) turn.reject(error);
   }
 
   onLine(line) {
@@ -269,6 +272,19 @@ export class CodexAppServer {
     return await this.request("model/list", { limit: 30, includeHidden: false });
   }
 
+  async readRateLimits() {
+    await this.ensureStarted();
+    return await this.request("account/rateLimits/read");
+  }
+
+  async consumeRateLimitResetCredit(creditId = "") {
+    await this.ensureStarted();
+    return await this.request("account/rateLimitResetCredit/consume", {
+      idempotencyKey: randomUUID(),
+      creditId: creditId || null
+    });
+  }
+
   async configuredModelSettings(cwd = "") {
     await this.ensureStarted();
     const targetCwd = cwd
@@ -284,6 +300,19 @@ export class CodexAppServer {
   async modelOptions() {
     const result = await this.listModels();
     return Array.isArray(result?.data) ? result.data : [];
+  }
+
+  async readThreadSettings(threadId, cwd = codexWorkDir) {
+    if (!threadId) return null;
+    await this.ensureStarted();
+    const resolvedCwd = this.isRemote ? String(cwd || "") : projectPath(cwd || "");
+    const result = await this.request("thread/resume", { threadId, cwd: resolvedCwd });
+    this.activeThreadId = result.thread.id;
+    this.activeCwd = resolvedCwd;
+    return {
+      model: result.model || "",
+      reasoningEffort: result.reasoningEffort || ""
+    };
   }
 
   async updateThreadModelSettings({ model, effort, threadId = "", cwd = codexWorkDir }) {
@@ -356,6 +385,33 @@ export class CodexAppServer {
       return true;
     }
     return false;
+  }
+
+  async abortCurrentTurn(error = new Error("Codex 回合已中断。")) {
+    const turn = this.turn;
+    if (!turn) return false;
+    this.turn = null;
+    turn.reject(error);
+
+    if (!turn.threadId || !turn.turnId) {
+      this.transport.kill?.();
+      this.initialized = false;
+      return true;
+    }
+    try {
+      await Promise.race([
+        this.request("turn/interrupt", { threadId: turn.threadId, turnId: turn.turnId }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("中断请求超时")), 5000))
+      ]);
+    } catch {
+      // A stuck app-server cannot be reused safely. It will be created again on
+      // the next message instead of keeping the browser in a running state.
+      this.transport.kill?.();
+      this.initialized = false;
+      this.activeThreadId = "";
+      this.activeCwd = "";
+    }
+    return true;
   }
 
   async steerCurrentTurn(message) {

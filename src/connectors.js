@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { WebSocketServer } from "ws";
 import {
   connectorStatePath, connectorPairToken, codexModel, codexReasoningEffort,
@@ -60,7 +60,10 @@ async function readConnectorState() {
 async function writeConnectorState(state) {
   await mkdir(dataDir, { recursive: true });
   const jobs = Array.isArray(state.jobs) ? state.jobs.slice(-200) : [];
-  await writeFile(connectorStatePath, `${JSON.stringify({ devices: state.devices || {}, jobs, localRemark: state.localRemark || "" }, null, 2)}\n`, { mode: 0o600 });
+  const content = `${JSON.stringify({ devices: state.devices || {}, jobs, localRemark: state.localRemark || "" }, null, 2)}\n`;
+  const temporaryPath = `${connectorStatePath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temporaryPath, content, { mode: 0o600 });
+  await rename(temporaryPath, connectorStatePath);
 }
 
 async function authenticateConnectorById(id, token) {
@@ -175,7 +178,7 @@ export function getConnectorAppServer(connectorIdValue) {
   return tunnel.appServer;
 }
 
-async function tunnelRequest(tunnel, type, op, params, timeoutMs = 30000) {
+async function tunnelRequest(tunnel, type, op, params, timeoutMs = 120000) {
   const reqId = `r_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -283,14 +286,14 @@ export function attachConnectorWebSocket(server) {
       }
     });
 
-    ws.on("close", async () => {
+    ws.on("close", async (code, reason) => {
       const isCurrentTunnel = tunnels.get(id) === tunnel;
       if (isCurrentTunnel) tunnels.delete(id);
       if (tunnel.appServer) {
         try { tunnel.appServer.rejectAll(new Error("被控端连接断开")); } catch {}
       }
       if (isCurrentTunnel) await updateDeviceOnline(id, false, "disconnected");
-      console.log(`connector ${id} disconnected`);
+      console.log(`connector ${id} disconnected (code=${code}${reason?.length ? `, reason=${reason.toString()}` : ""})`);
     });
 
     ws.on("error", () => { try { ws.close(); } catch {} });

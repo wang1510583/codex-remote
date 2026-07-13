@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { rootDir, restartScript, codexConnectWaitMs, codexConnectTimeoutMs, codexWorkDir } from "./config.js";
+import { rootDir, restartScript, codexConnectWaitMs, codexConnectTimeoutMs, codexTurnTimeoutMs, codexWorkDir } from "./config.js";
 import { cleanText } from "./utils.js";
 import { broadcast } from "./sse.js";
 import {
@@ -144,6 +144,15 @@ export async function sessionModelSettingsPayload(connectorId = "") {
   const selectedState = runner?.state || state;
   await ensureStateModelSettings(selectedState);
   const server = runner?.appServer || appServerForState(selectedState);
+  if (selectedState.threadId && !runner?.running && !server.turn) {
+    const cwd = selectedState.connectorId ? String(selectedState.cwd || "") : stateAbsoluteCwd(selectedState.cwd || "");
+    const external = await server.readThreadSettings(selectedState.threadId, cwd).catch(() => null);
+    if (external?.model) {
+      selectedState.model = external.model;
+      selectedState.reasoningEffort = external.reasoningEffort || selectedState.reasoningEffort;
+      await saveStateModelSettings(selectedState, runner);
+    }
+  }
   return publicModelSettings(selectedState, await server.modelOptions(), Boolean(runner?.running));
 }
 
@@ -170,6 +179,49 @@ export async function updateSessionModelSettings(update = {}, connectorId = "") 
   }
   await saveStateModelSettings(state, runner);
   return publicModelSettings(state, await server.modelOptions(), false);
+}
+
+function publicUsagePayload(result = {}) {
+  const limits = result.rateLimits || {};
+  const resetCredits = result.rateLimitResetCredits || {};
+  const credits = Array.isArray(resetCredits.credits) ? resetCredits.credits : [];
+  return {
+    planType: limits.planType || "",
+    primary: limits.primary || null,
+    secondary: limits.secondary || null,
+    resetCredits: {
+      availableCount: Number(resetCredits.availableCount) || 0,
+      credits: credits.map((credit) => ({
+        id: credit.id || "",
+        title: credit.title || "",
+        description: credit.description || "",
+        expiresAt: Number(credit.expiresAt) || 0,
+        status: credit.status || ""
+      }))
+    }
+  };
+}
+
+export async function usagePayload(connectorId = "") {
+  const state = await readState(connectorId);
+  state.connectorId = state.connectorId || connectorId;
+  const runner = await runnerForState(state, false);
+  const server = runner?.appServer || appServerForState(state);
+  return publicUsagePayload(await server.readRateLimits());
+}
+
+export async function resetUsageLimit(creditId = "", connectorId = "") {
+  const state = await readState(connectorId);
+  state.connectorId = state.connectorId || connectorId;
+  const runner = await runnerForState(state, false);
+  const server = runner?.appServer || appServerForState(state);
+  const before = await server.readRateLimits();
+  const credits = before.rateLimitResetCredits?.credits || [];
+  const credit = credits.find((item) => item.id === creditId && item.status === "available")
+    || credits.find((item) => item.status === "available");
+  if (!credit) throw Object.assign(new Error("没有可用的使用限额重置次数。"), { statusCode: 409 });
+  await server.consumeRateLimitResetCredit(credit.id);
+  return publicUsagePayload(await server.readRateLimits());
 }
 
 function resolveAbsoluteCwd(state = {}) {
@@ -317,9 +369,17 @@ function scheduleServiceRestart() {
 }
 
 function taskFailureMessage(error) {
+  const detail = String(error?.message || "Codex 调用失败");
+  if (/Selected model is at capacity/i.test(detail)) {
+    return [
+      cleanText(error?.partialAnswer || "", 20000).trim(),
+      "❌ 当前模型暂时无可用容量，请切换模型后重试。",
+      `Codex 提示：${detail}`
+    ].filter(Boolean).join("\n\n");
+  }
   return [
     cleanText(error?.partialAnswer || "", 20000).trim(),
-    `❌ 执行失败：${error?.message || "Codex 调用失败"}`
+    `❌ 执行失败：${detail}`
   ].filter(Boolean).join("\n\n");
 }
 
@@ -511,7 +571,9 @@ export async function runRemoteTask(message, runner) {
   let connected = false;
   let waitTimer = null;
   let timeoutTimer = null;
+  let turnTimeoutTimer = null;
   const clearConnectionTimers = () => { if (waitTimer) clearTimeout(waitTimer); if (timeoutTimer) clearTimeout(timeoutTimer); waitTimer = null; timeoutTimer = null; };
+  const clearTurnTimeout = () => { if (turnTimeoutTimer) clearTimeout(turnTimeoutTimer); turnTimeoutTimer = null; };
   const markConnected = () => { connected = true; clearConnectionTimers(); };
   try {
     let ok = true;
@@ -528,6 +590,13 @@ export async function runRemoteTask(message, runner) {
           error.connectionTimeout = true;
           reject(error);
         }, Math.max(1000, codexConnectTimeoutMs));
+      });
+      const turnTimeout = new Promise((_, reject) => {
+        turnTimeoutTimer = setTimeout(() => {
+          const error = new Error(`Codex 回合超过 ${Math.round(codexTurnTimeoutMs / 60000)} 分钟仍未结束，已自动中断。`);
+          error.turnTimeout = true;
+          reject(error);
+        }, Math.max(1000, codexTurnTimeoutMs));
       });
       answers = await Promise.race([
         runner.appServer.runTurn(message, state, {
@@ -548,17 +617,21 @@ export async function runRemoteTask(message, runner) {
             });
           }
         }),
-        connectionTimeout
+        connectionTimeout,
+        turnTimeout
       ]);
       markConnected();
+      clearTurnTimeout();
       await rememberRunnerThread(runner, state);
     } catch (error) {
       clearConnectionTimers();
+      clearTurnTimeout();
       if (error.connectionTimeout) {
         runner.appServer.rejectAll(error);
         answers = [`❌ 连接失败：${error.message}`];
         broadcastRunner(runner, { type: "message", role: "assistant", content: `❌ 连接失败：${error.message}`, messageId: connectionMessageId, final: true });
       } else {
+        if (error.turnTimeout) await runner.appServer.abortCurrentTurn(error);
         answers = [taskFailureMessage(error)];
       }
       ok = false;
