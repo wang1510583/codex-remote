@@ -1,6 +1,6 @@
 # Codex Remote Web（总控端）
 
-自托管的 Codex 远程网页控制台。通过浏览器远程操控服务器上的 Codex CLI（`codex app-server`），支持多会话、实时流式输出、文件管理、被控端远程控制、任务完成通知。
+自托管的 Codex 远程网页控制台。通过浏览器远程操控服务器上的 Codex CLI（`codex app-server`），支持多会话、实时流式输出、Codex Desktop/CLI 外部会话同步、文件管理、被控端远程控制、任务完成通知。
 
 被控端 agent 是另一个独立仓库：[codex-remote-connector](./)。
 
@@ -57,6 +57,8 @@ cp .env.example .env
 | `CODEX_MODEL` | Codex CLI 当前配置 | 可选的模型覆盖值 |
 | `CODEX_REASONING_EFFORT` | Codex CLI 当前配置 | 可选的推理强度覆盖值 |
 | `CODEX_WORK_DIR` | 项目父目录 | 工作目录根（网页端文件管理限制在此目录下） |
+| `CODEX_EXTERNAL_SESSION_POLL_MS` | `1000` | 本机/被控端 Codex Desktop/CLI 外部会话同步间隔 |
+| `CODEX_EXTERNAL_SESSION_STALE_MS` | `7200000` | 无 `task_complete` 且长时间无文件活动时的故障兜底 |
 | `CODEX_REMOTE_PASSWORD` | — | **必填**，网页登录密码 |
 | `CODEX_REMOTE_CONNECTOR_TOKEN` | =登录密码 | 被控端配对令牌（建议单独设置，与登录密码不同） |
 | `CODEX_REMOTE_ROUTE_PREFIX` | `/codex-remote` | 路由前缀，用于反向代理子路径 |

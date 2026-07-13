@@ -1,6 +1,10 @@
 import path from "node:path";
 import { stat } from "node:fs/promises";
-import { codexWorkDir, uploadDir } from "./config.js";
+import { codexWorkDir, uploadDir, generatedImageDir } from "./config.js";
+
+export function allowedDownloadRoots() {
+  return [...new Set([codexWorkDir, uploadDir, generatedImageDir].map((root) => path.resolve(root)))];
+}
 
 export function projectPath(input = "") {
   const raw = String(input || "");
@@ -48,6 +52,5 @@ export function stateAbsoluteCwd(cwd = "") {
 
 export function isAllowedDownload(file) {
   const resolved = path.resolve(file);
-  const roots = [path.resolve(codexWorkDir), path.resolve(uploadDir)];
-  return roots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
+  return allowedDownloadRoots().some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
 }

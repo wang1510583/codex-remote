@@ -71,7 +71,10 @@ export class CodexAppServer {
     this.pending.clear();
     const turn = this.turn;
     this.turn = null;
-    if (turn) turn.reject(error);
+    if (turn) {
+      this.setTurnReconnecting(turn, false);
+      turn.reject(error);
+    }
   }
 
   onLine(line) {
@@ -106,12 +109,21 @@ export class CodexAppServer {
     const method = message.method;
     const params = message.params || {};
     const payload = params.payload || params.event || params;
-    if (this.updateContextUsage(payload)) {
-      this.emit({ type: "status" });
-      return;
+    const notificationTurnId = params.turnId || params.turn?.id || "";
+    const notificationMatchesTurn = Boolean(this.turn
+      && (!params.threadId || params.threadId === this.turn.threadId)
+      && (!notificationTurnId || !this.turn.turnId || notificationTurnId === this.turn.turnId));
+    if (notificationMatchesTurn && notificationTurnId && !this.turn.turnId) {
+      this.turn.turnId = notificationTurnId;
     }
-    if (!this.runner && this.updateContextUsage(payload)) {
-      broadcast({ type: "status" });
+    if (notificationMatchesTurn) this.turn.onActivity?.();
+    if (notificationMatchesTurn && this.turn.reconnecting && method !== "error" && notificationTurnId) {
+      this.setTurnReconnecting(this.turn, false);
+    }
+    if (this.updateContextUsage(payload)) {
+      // A runner's onContextUpdate callback emits a complete status payload.
+      // Do not emit a second, incomplete status event: the browser would read
+      // its missing `running` field as false and appear to end the task.
       return;
     }
     if (method === "thread/status/changed" || method === "turn/started") return;
@@ -173,13 +185,24 @@ export class CodexAppServer {
       turn.pendingImages.push(pending);
       return;
     }
-    if (method === "turn/completed" && this.turn && params.turn?.id === this.turn.turnId) {
+    if (method === "turn/completed" && notificationMatchesTurn) {
       const turn = this.turn;
+      const status = params.turn?.status || "completed";
+      if (status === "inProgress") return;
       Promise.allSettled(turn.pendingImages)
         .then(() => {
           const answers = turn.answers.length ? turn.answers : [turn.currentMessage?.text || ""].filter(Boolean);
           if (this.turn === turn) this.turn = null;
-          turn.resolve(answers.map((answer) => answer.trim()).filter(Boolean));
+          this.setTurnReconnecting(turn, false);
+          if (status === "completed") {
+            turn.resolve(answers.map((answer) => answer.trim()).filter(Boolean));
+            return;
+          }
+          const detail = params.turn?.error || turn.lastError || {};
+          const error = new Error(detail.message || (status === "interrupted" ? "Codex 回合已中断。" : "Codex 回合执行失败。"));
+          error.codexErrorInfo = detail.codexErrorInfo || null;
+          error.partialAnswer = answers.map((answer) => answer.trim()).filter(Boolean).join("\n\n");
+          turn.reject(error);
         })
         .catch((error) => {
           if (this.turn === turn) this.turn = null;
@@ -187,13 +210,27 @@ export class CodexAppServer {
         });
       return;
     }
-    if (method === "error" && this.turn) {
-      const error = new Error(rpcErrorMessage(params.error));
-      error.partialAnswer = this.turn.answers.concat(this.turn.currentMessage?.text || "").filter(Boolean).join("\n\n").trim();
-      const reject = this.turn.reject;
-      this.turn = null;
-      reject(error);
+    if (method === "error" && notificationMatchesTurn) {
+      this.turn.lastError = params.error || null;
+      if (params.willRetry) {
+        this.setTurnReconnecting(this.turn, true, rpcErrorMessage(params.error));
+      } else {
+        this.setTurnReconnecting(this.turn, false);
+      }
+      // Error notifications are followed by turn/completed. In particular,
+      // willRetry=true is a recoverable stream interruption, so the turn must
+      // remain active until app-server reports its final status.
     }
+  }
+
+  setTurnReconnecting(turn, reconnecting, message = "") {
+    if (!turn) return;
+    const next = Boolean(reconnecting);
+    if (turn.reconnecting === next && (!next || turn.reconnectMessage === message)) return;
+    turn.reconnecting = next;
+    turn.reconnectMessage = next ? String(message || "") : "";
+    if (this.runner) this.runner.reconnecting = next;
+    this.emit({ type: "reconnecting", reconnecting: next, message: turn.reconnectMessage, running: true });
   }
 
   request(method, params, onResult = null) {
@@ -248,6 +285,10 @@ export class CodexAppServer {
         currentMessage: null,
         imageIds: new Set(),
         pendingImages: [],
+        reconnecting: false,
+        reconnectMessage: "",
+        lastError: null,
+        onActivity: typeof options.onActivity === "function" ? options.onActivity : null,
         resolve,
         reject
       };
@@ -261,7 +302,10 @@ export class CodexAppServer {
       }, (result) => {
         turn.turnId = result.turn.id;
       }).catch((error) => {
-        if (this.turn === turn) this.turn = null;
+        if (this.turn === turn) {
+          this.turn = null;
+          this.setTurnReconnecting(turn, false);
+        }
         reject(error);
       });
     });
@@ -391,6 +435,7 @@ export class CodexAppServer {
     const turn = this.turn;
     if (!turn) return false;
     this.turn = null;
+    this.setTurnReconnecting(turn, false);
     turn.reject(error);
 
     if (!turn.threadId || !turn.turnId) {

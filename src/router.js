@@ -8,7 +8,7 @@ import { remotePassword, authToken, codexWorkDir, disableLocal } from "./config.
 import { clients, broadcast, sendEvent, changesSince } from "./sse.js";
 import {
   readState, writeState, saveDraftForState, draftForState, syncLoadedCounts,
-  readConnectorViewState, writeConnectorViewState
+  readConnectorViewState, writeConnectorViewState, setThreadName
 } from "./store.js";
 import {
   submitRemoteMessage, selectRemoteThread, createRemoteSession, loadThreadPage,
@@ -22,12 +22,16 @@ import {
   listProjectFiles, createProjectFolder, deleteProjectFolder, createProjectFile,
   deleteProjectFile, writeProjectFile, renameProjectPath, saveUploadedFiles
 } from "./files.js";
-import { projectPath, relativeProjectPath, isAllowedDownload } from "./paths.js";
+import { projectPath, relativeProjectPath, isAllowedDownload, allowedDownloadRoots } from "./paths.js";
 import * as ssh from "./ssh.js";
 import { webPushPublicKey, savePushSubscription, sendWebPushTaskDone } from "./webpush.js";
 import { registerConnector, remoteConnectorsPayload, connectorFileOp, setConnectorRemark } from "./connectors.js";
 import { followModeForState } from "./store.js";
 import { threadName } from "./store.js";
+import {
+  externalSessionSnapshot, externalSnapshotFromThread,
+  monitorExternalSession, stopExternalSessionMonitor
+} from "./external-sessions.js";
 
 function serveStatic(req, res) {
   const url = new URL(req.url, "http://localhost");
@@ -142,18 +146,24 @@ export async function handle(req, res) {
       let state = await readState(connectorId);
       state.connectorId = state.connectorId || connectorId;
       let loadedThread = null;
+      let external = null;
       let runner = await runnerForIncomingState(state);
       if (runner?.running) {
+        stopExternalSessionMonitor(connectorId);
         state = runner.state;
       } else if (state.threadId) {
         const thread = await loadThreadPage(state.threadId, connectorId).catch(() => null);
         if (thread) {
           loadedThread = thread;
+          external = externalSnapshotFromThread(thread, connectorId);
+          monitorExternalSession(state.threadId, connectorId, external);
           const sessionMessages = await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages);
           const messages = mergeStateMessages(sessionMessages, state.messages);
           state = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length), inflight: null };
           await writeState(state, connectorId);
         }
+      } else {
+        stopExternalSessionMonitor(connectorId);
       }
       state = await ensureStateModelSettings(state).catch(() => state);
       setSelectedRunnerKey(runner ? runner.key : runnerKeyForState(state));
@@ -163,13 +173,18 @@ export async function handle(req, res) {
         ...payload,
         connectorId,
         absoluteCwd: state.connectorId ? (state.cwd || "") : absoluteCwdLocal(state.cwd || ""),
+        fileLinkRoots: allowedDownloadRoots(),
         threadName: state.threadId ? await threadName(state.threadId) : "",
         draft: await draftForState(state, connectorId),
-        running: Boolean(runner?.running),
+        running: Boolean(runner?.running || external?.running),
+        externalRunning: Boolean(!runner?.running && external?.running),
+        externalTaskStartedAt: external?.externalTaskStartedAt || "",
+        reconnecting: Boolean(runner?.reconnecting),
         queueLength: runner?.messageQueue.length || 0,
         queueMessages: (runner?.messageQueue || []).map((item, i) => ({ index: i + 1, message: item.message })),
         steerLength: runner?.steerMessages.length || 0,
         followMode: runner?.followMode || await followModeForState(state, connectorId),
+        contextUsage: runner?.contextUsage || external?.contextUsage || loadedThread?.contextUsage || null,
         runningThreads: runningThreads(),
         connectors: connectorsPayload.devices,
         localRemark: connectorsPayload.localRemark || "",
@@ -340,7 +355,20 @@ export async function handle(req, res) {
         if (res.destroyed || res.writableEnded) { clearInterval(heartbeat); clients.delete(res); return; }
         res.write(": keep-alive\n\n");
       }, 15000);
-      sendEvent(res, statusPayload(selectedRunner()));
+      const initialStatus = statusPayload(selectedRunner());
+      if (!initialStatus.running) {
+        const viewState = await readConnectorViewState();
+        const connectorId = viewState.selectedConnectorId || "";
+        const state = await readState(connectorId);
+        const external = externalSessionSnapshot(state.threadId || "", connectorId);
+        if (external?.running) {
+          initialStatus.running = true;
+          initialStatus.externalRunning = true;
+          initialStatus.externalTaskStartedAt = external.externalTaskStartedAt || "";
+          initialStatus.contextUsage = external.contextUsage || initialStatus.contextUsage;
+        }
+      }
+      sendEvent(res, initialStatus);
       const cleanup = () => { clearInterval(heartbeat); clients.delete(res); };
       res.on("error", cleanup);
       req.on("close", cleanup);
@@ -417,12 +445,9 @@ export async function handle(req, res) {
 
     if (req.method === "POST" && url.pathname === "/api/remote/name") {
       const body = await readBody(req);
-      const { writeThreadNames, readThreadNames: rtn } = await import("./store.js");
       const threadId = cleanConnectorIdValue(body.threadId) || String(body.threadId || "");
       const name = String(body.name || "").trim();
-      const names = await rtn();
-      if (name) names[threadId] = name; else delete names[threadId];
-      await writeThreadNames(names);
+      await setThreadName(threadId, name);
       const state = await readState(cleanConnectorIdValue(body.connectorId || ""));
       if (state.threadId === threadId) broadcast({ type: "thread_name", threadId, name });
       return json(res, 200, { ok: true, threadId, name });
@@ -449,12 +474,19 @@ export async function handle(req, res) {
     if (req.method === "GET" || req.method === "HEAD") return serveStatic(req, res);
     json(res, 404, { error: "Not found" });
   } catch (error) {
-    broadcast({ type: "error", text: error.message || "Server error" });
     if (res.headersSent || res.writableEnded) {
       console.error("request failed after response was sent", error.message || error);
       return;
     }
-    json(res, error.statusCode || 500, { error: error.message || "Server error" });
+    const statusCode = Number(error.statusCode) || 500;
+    if (statusCode >= 500) {
+      const pathname = (() => {
+        try { return new URL(req.url, "http://localhost").pathname; }
+        catch { return "unknown"; }
+      })();
+      console.error(`request failed: ${req.method || "UNKNOWN"} ${pathname}`, error.message || error);
+    }
+    json(res, statusCode, { error: error.message || "Server error" });
   }
 }
 

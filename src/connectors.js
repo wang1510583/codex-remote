@@ -1,14 +1,14 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { WebSocketServer } from "ws";
 import {
   connectorStatePath, connectorPairToken, codexModel, codexReasoningEffort,
-  connectorHeartbeatTimeoutMs, dataDir
+  connectorHeartbeatTimeoutMs
 } from "./config.js";
 import { cleanText, safeCompare, hashSecret, connectorNow } from "./utils.js";
 import { broadcast } from "./sse.js";
 import { CodexAppServer } from "./codex-server.js";
 import { RemoteTransport } from "./transport/remote.js";
+import { readJsonFile, updateJsonFile } from "./json-file.js";
 
 const tunnels = new Map();
 
@@ -39,31 +39,27 @@ export function publicConnectorDevice(device) {
   };
 }
 
-async function readConnectorState() {
-  try {
-    const parsed = JSON.parse(await readFile(connectorStatePath, "utf8"));
-    return {
-      devices: parsed && typeof parsed.devices === "object" && !Array.isArray(parsed.devices) ? parsed.devices : {},
-      jobs: Array.isArray(parsed?.jobs) ? parsed.jobs : [],
-      localRemark: typeof parsed?.localRemark === "string" ? parsed.localRemark : ""
-    };
-  } catch (error) {
-    if (error.code === "ENOENT") return { devices: {}, jobs: [], localRemark: "" };
-    if (error instanceof SyntaxError) {
-      console.error(`failed to parse ${connectorStatePath}; resetting connector state`, error.message);
-      return { devices: {}, jobs: [], localRemark: "" };
-    }
-    throw error;
-  }
+function emptyConnectorState() {
+  return { devices: {}, jobs: [], localRemark: "" };
 }
 
-async function writeConnectorState(state) {
-  await mkdir(dataDir, { recursive: true });
-  const jobs = Array.isArray(state.jobs) ? state.jobs.slice(-200) : [];
-  const content = `${JSON.stringify({ devices: state.devices || {}, jobs, localRemark: state.localRemark || "" }, null, 2)}\n`;
-  const temporaryPath = `${connectorStatePath}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(temporaryPath, content, { mode: 0o600 });
-  await rename(temporaryPath, connectorStatePath);
+function normalizeConnectorState(parsed) {
+  return {
+    devices: parsed && typeof parsed.devices === "object" && !Array.isArray(parsed.devices) ? parsed.devices : {},
+    jobs: Array.isArray(parsed?.jobs) ? parsed.jobs.slice(-200) : [],
+    localRemark: typeof parsed?.localRemark === "string" ? parsed.localRemark : ""
+  };
+}
+
+async function readConnectorState() {
+  return normalizeConnectorState(await readJsonFile(connectorStatePath, emptyConnectorState));
+}
+
+async function updateConnectorState(update) {
+  return updateJsonFile(connectorStatePath, emptyConnectorState, async (parsed) => {
+    const state = normalizeConnectorState(parsed);
+    return normalizeConnectorState(await update(state));
+  });
 }
 
 async function authenticateConnectorById(id, token) {
@@ -86,25 +82,27 @@ export async function registerConnector(body) {
     error.statusCode = 401;
     throw error;
   }
-  const state = await readConnectorState();
   const id = connectorId();
   const token = randomBytes(32).toString("hex");
   const now = connectorNow();
-  state.devices[id] = {
-    id,
-    tokenHash: hashSecret(token),
-    name: cleanText(body.name, 120).trim() || cleanText(body.hostname, 120).trim() || id,
-    hostname: cleanText(body.hostname, 120).trim(),
-    platform: cleanText(body.platform, 40).trim(),
-    arch: cleanText(body.arch, 40).trim(),
-    version: cleanText(body.version, 40).trim(),
-    codexVersion: cleanText(body.codexVersion, 120).trim(),
-    registeredAt: now,
-    lastSeen: now,
-    lastStatus: "registered"
-  };
-  await writeConnectorState(state);
-  return { connectorId: id, connectorToken: token, device: publicConnectorDevice(state.devices[id]) };
+  let device;
+  await updateConnectorState((state) => {
+    device = state.devices[id] = {
+      id,
+      tokenHash: hashSecret(token),
+      name: cleanText(body.name, 120).trim() || cleanText(body.hostname, 120).trim() || id,
+      hostname: cleanText(body.hostname, 120).trim(),
+      platform: cleanText(body.platform, 40).trim(),
+      arch: cleanText(body.arch, 40).trim(),
+      version: cleanText(body.version, 40).trim(),
+      codexVersion: cleanText(body.codexVersion, 120).trim(),
+      registeredAt: now,
+      lastSeen: now,
+      lastStatus: "registered"
+    };
+    return state;
+  });
+  return { connectorId: id, connectorToken: token, device: publicConnectorDevice(device) };
 }
 
 export async function remoteConnectorsPayload() {
@@ -118,20 +116,21 @@ export async function remoteConnectorsPayload() {
 
 export async function setConnectorRemark(connectorIdValue, remarkValue) {
   const id = cleanConnectorId(connectorIdValue);
-  const state = await readConnectorState();
   const remark = cleanText(remarkValue, 120).trim();
-  if (id) {
-    const device = state.devices[id];
-    if (!device) {
-      const error = new Error("被控端不存在。");
-      error.statusCode = 404;
-      throw error;
+  await updateConnectorState((state) => {
+    if (id) {
+      const device = state.devices[id];
+      if (!device) {
+        const error = new Error("被控端不存在。");
+        error.statusCode = 404;
+        throw error;
+      }
+      device.remark = remark;
+    } else {
+      state.localRemark = remark;
     }
-    device.remark = remark;
-  } else {
-    state.localRemark = remark;
-  }
-  await writeConnectorState(state);
+    return state;
+  });
   broadcast({ type: "connectors_changed" });
   return { ok: true, id, remark };
 }
@@ -226,11 +225,15 @@ export function remoteSessionProvider(connectorIdValue) {
 }
 
 async function updateDeviceOnline(id, online, status = "") {
-  const state = await readConnectorState();
-  if (!state.devices[id]) return;
-  state.devices[id].lastSeen = connectorNow();
-  state.devices[id].lastStatus = online ? (status || "connected") : "disconnected";
-  await writeConnectorState(state);
+  let updated = false;
+  await updateConnectorState((state) => {
+    if (!state.devices[id]) return state;
+    state.devices[id].lastSeen = connectorNow();
+    state.devices[id].lastStatus = online ? (status || "connected") : "disconnected";
+    updated = true;
+    return state;
+  });
+  if (!updated) return;
   broadcast({ type: "connectors_changed" });
 }
 

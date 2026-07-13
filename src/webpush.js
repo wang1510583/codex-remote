@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { dataDir, pushVapidPath, pushSubscriptionsPath, externalBasePath, wechatGatewayUrl, wechatGatewayToken, wechatTarget, wechatSource } from "./config.js";
 import { cleanText } from "./utils.js";
+import { readJsonFile, updateJsonFile } from "./json-file.js";
 
 export let webPushPublicKey = "";
 
@@ -45,22 +46,8 @@ export async function setupWebPush() {
 }
 
 async function readPushSubscriptions() {
-  try {
-    const parsed = JSON.parse(await readFile(pushSubscriptionsPath, "utf8"));
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (error) {
-    if (error.code === "ENOENT") return [];
-    if (error instanceof SyntaxError) {
-      console.error(`failed to parse ${pushSubscriptionsPath}; resetting saved push subscriptions`, error.message);
-      return [];
-    }
-    throw error;
-  }
-}
-
-async function writePushSubscriptions(subscriptions) {
-  await mkdir(dataDir, { recursive: true });
-  await writeFile(pushSubscriptionsPath, `${JSON.stringify(subscriptions, null, 2)}\n`, { mode: 0o600 });
+  const parsed = await readJsonFile(pushSubscriptionsPath, []);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 function pushSubscriptionKey(subscription = {}) {
@@ -73,11 +60,12 @@ export async function savePushSubscription(subscription = {}) {
     error.statusCode = 400;
     throw error;
   }
-  const subscriptions = await readPushSubscriptions();
   const key = pushSubscriptionKey(subscription);
   const row = { key, subscription, updatedAt: new Date().toISOString() };
-  const next = [row, ...subscriptions.filter((item) => item?.key !== key)].slice(0, 20);
-  await writePushSubscriptions(next);
+  const next = await updateJsonFile(pushSubscriptionsPath, [], (parsed) => {
+    const subscriptions = Array.isArray(parsed) ? parsed : [];
+    return [row, ...subscriptions.filter((item) => item?.key !== key)].slice(0, 20);
+  });
   console.log(`web push subscription saved: ${key} (${next.length} total)`);
   return { key, count: next.length };
 }
@@ -95,6 +83,7 @@ export async function sendWebPushTaskDone(text) {
     badge: "icon.svg"
   });
   const kept = [];
+  const removedKeys = new Set();
   let sent = 0;
   for (const row of rows) {
     try {
@@ -103,12 +92,20 @@ export async function sendWebPushTaskDone(text) {
       kept.push(row);
     } catch (error) {
       const status = Number(error.statusCode || error.status);
-      if (status === 404 || status === 410) continue;
+      if (status === 404 || status === 410) {
+        removedKeys.add(row.key);
+        continue;
+      }
       console.error("web push notification failed", error.message || error);
       kept.push(row);
     }
   }
-  if (kept.length !== rows.length) await writePushSubscriptions(kept);
+  if (removedKeys.size) {
+    await updateJsonFile(pushSubscriptionsPath, [], (parsed) => {
+      const current = Array.isArray(parsed) ? parsed : [];
+      return current.filter((row) => !removedKeys.has(row?.key));
+    });
+  }
   return { sent, removed: rows.length - kept.length, total: rows.length };
 }
 

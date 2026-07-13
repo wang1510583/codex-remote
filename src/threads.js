@@ -4,7 +4,7 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { sessionsDir, generatedImageDir, defaultMessageLimit } from "./config.js";
 import { cleanText, safeName } from "./utils.js";
-import { readMessageMeta, readThreadNames, readThreadCompletions, messageMetaKey } from "./store.js";
+import { readMessageMeta, readThreadNames, readThreadCompletions, messageMetaKey, setThreadName } from "./store.js";
 
 export function threadIdFromFile(file = "") {
   const match = path.basename(file).match(/rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i);
@@ -97,7 +97,19 @@ function saveGeneratedImageSync(item = {}, threadId = "") {
 
 export function parseSessionFile(text, file = "", limit = defaultMessageLimit) {
   const messages = [];
-  const meta = { threadId: threadIdFromFile(file), cwd: "", updatedAt: "", contextUsage: null, model: "", reasoningEffort: "" };
+  const taskDurations = new Map();
+  const meta = {
+    threadId: threadIdFromFile(file),
+    cwd: "",
+    updatedAt: "",
+    contextUsage: null,
+    model: "",
+    reasoningEffort: "",
+    taskRunning: false,
+    activeTurnId: "",
+    taskStartedAt: "",
+    taskCompletedAt: ""
+  };
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let row;
@@ -111,6 +123,27 @@ export function parseSessionFile(text, file = "", limit = defaultMessageLimit) {
     if (row.type === "event_msg" && row.payload?.type === "token_count") {
       const usage = contextUsageFromTokenInfo(row.payload.info, meta.threadId, row.timestamp || meta.updatedAt);
       if (usage) meta.contextUsage = usage;
+      meta.updatedAt = row.timestamp || meta.updatedAt;
+      continue;
+    }
+    if (row.type === "event_msg" && row.payload?.type === "task_started") {
+      meta.taskRunning = true;
+      meta.activeTurnId = row.payload.turn_id || "";
+      meta.taskStartedAt = row.timestamp || (row.payload.started_at ? new Date(Number(row.payload.started_at) * 1000).toISOString() : "");
+      meta.taskCompletedAt = "";
+      meta.updatedAt = row.timestamp || meta.updatedAt;
+      continue;
+    }
+    if (row.type === "event_msg" && row.payload?.type === "task_complete") {
+      const completedTurnId = row.payload.turn_id || "";
+      if (!meta.activeTurnId || !completedTurnId || completedTurnId === meta.activeTurnId) {
+        meta.taskRunning = false;
+        meta.activeTurnId = "";
+        meta.taskCompletedAt = row.timestamp || (row.payload.completed_at ? new Date(Number(row.payload.completed_at) * 1000).toISOString() : "");
+      }
+      if (completedTurnId && Number.isFinite(Number(row.payload.duration_ms))) {
+        taskDurations.set(completedTurnId, Number(row.payload.duration_ms));
+      }
       meta.updatedAt = row.timestamp || meta.updatedAt;
       continue;
     }
@@ -135,10 +168,20 @@ export function parseSessionFile(text, file = "", limit = defaultMessageLimit) {
     if (role === "user" && isInternalMessage(content)) continue;
     if (!content) continue;
     const displayContent = role === "assistant" ? assistantBubbleText(content, row.payload.phase) : content;
-    messages.push({ role, content: cleanText(displayContent, 20000), at: row.timestamp || "" });
+    messages.push({
+      role,
+      content: cleanText(displayContent, 20000),
+      at: row.timestamp || "",
+      _turnId: row.payload.internal_chat_message_metadata_passthrough?.turn_id || meta.activeTurnId || "",
+      _phase: row.payload.phase || ""
+    });
     meta.updatedAt = row.timestamp || meta.updatedAt;
   }
-  return { ...meta, messageCount: messages.length, messages: messages.slice(-limit) };
+  const publicMessages = messages.map(({ _turnId, _phase, ...message }) => {
+    const taskDurationMs = _phase === "final_answer" ? taskDurations.get(_turnId) : null;
+    return taskDurationMs === undefined || taskDurationMs === null ? message : { ...message, taskDurationMs };
+  });
+  return { ...meta, messageCount: publicMessages.length, messages: publicMessages.slice(-limit) };
 }
 
 export function contextUsageFromEvent(payload = {}, threadId = "") {
@@ -186,7 +229,11 @@ export async function loadThreadFromProvider(threadId, provider = localSessionPr
   const files = await provider.listFiles();
   const hit = files.find((item) => threadIdFromFile(item.file) === threadId);
   if (!hit) throw new Error("没有找到这个 Codex 会话。");
-  return parseSessionFile(await provider.readFile(hit.file), hit.file, Math.max(defaultMessageLimit, Math.min(Number(limit) || defaultMessageLimit, 1000)));
+  return {
+    ...parseSessionFile(await provider.readFile(hit.file), hit.file, Math.max(defaultMessageLimit, Math.min(Number(limit) || defaultMessageLimit, 1000))),
+    file: hit.file,
+    mtimeMs: Number(hit.mtimeMs) || 0
+  };
 }
 
 export async function deleteThreadFromProvider(threadId, provider = localSessionProvider) {
@@ -198,11 +245,7 @@ export async function deleteThreadFromProvider(threadId, provider = localSession
   const hits = files.filter((item) => threadIdFromFile(item.file) === threadId);
   if (!hits.length) throw new Error("没有找到这个 Codex 会话。");
   for (const hit of hits) await provider.deleteFile(hit.file);
-  const names = await readThreadNames();
-  delete names[threadId];
-  // note: writeThreadNames imported lazily to avoid cycle
-  const { writeThreadNames } = await import("./store.js");
-  await writeThreadNames(names);
+  await setThreadName(threadId, "");
 }
 
 export async function mergeLocalMessageMeta(threadId = "", messages = [], previousMessages = []) {

@@ -1,9 +1,13 @@
 const state = {
   running: false,
+  reconnecting: false,
+  externalRunning: false,
+  externalTaskStartedAt: "",
   threadId: "",
   threadName: "",
   cwd: "",
   absoluteCwd: "",
+  fileLinkRoots: [],
   fileCwd: "",
   fileCwdConnectorId: "",
   newCwd: "",
@@ -279,16 +283,20 @@ function updateStatusIcon() {
     els.statusIcon.className = "remoteStatusIcon status-connecting";
     els.statusIcon.title = "断开连接，正在连接";
   } else if (state.running) {
-    els.statusIcon.className = "remoteStatusIcon status-running";
-    els.statusIcon.title = "Codex 正在处理";
+    els.statusIcon.className = `remoteStatusIcon ${state.externalRunning ? "status-external" : "status-running"}`;
+    els.statusIcon.title = state.externalRunning
+      ? "Codex Desktop/CLI 正在执行，网页端正在实时同步"
+      : (state.reconnecting ? "Codex 正在重新连接，任务继续等待" : "Codex 正在处理");
   } else {
     els.statusIcon.className = "remoteStatusIcon status-idle";
     els.statusIcon.title = "Codex 空闲";
   }
 }
 
-function setRunning(running, queueLength = state.queueLength, queueMessages = state.queueMessages, followMode = state.followMode, steerLength = state.steerLength, steerMessages = state.steerMessages, contextUsage = state.contextUsage, runningThreads = state.runningThreads) {
+function setRunning(running, queueLength = state.queueLength, queueMessages = state.queueMessages, followMode = state.followMode, steerLength = state.steerLength, steerMessages = state.steerMessages, contextUsage = state.contextUsage, runningThreads = state.runningThreads, reconnecting = false, externalRunning = false) {
   state.running = Boolean(running);
+  state.externalRunning = state.running && Boolean(externalRunning);
+  state.reconnecting = state.running && !state.externalRunning && Boolean(reconnecting);
   state.queueLength = Number(queueLength) || 0;
   state.queueMessages = Array.isArray(queueMessages) ? queueMessages : [];
   state.runningThreads = Array.isArray(runningThreads) ? runningThreads : [];
@@ -297,8 +305,10 @@ function setRunning(running, queueLength = state.queueLength, queueMessages = st
   state.followMode = followMode === "steer" ? "steer" : "queue";
   setContextUsage(contextUsage);
   if (state.running) state.replyDone = false;
-  els.sendQueue.disabled = false;
-  els.sendSteer.disabled = false;
+  els.sendQueue.disabled = state.externalRunning;
+  els.sendSteer.disabled = state.externalRunning;
+  els.sendQueue.title = state.externalRunning ? "Codex Desktop/CLI 正在执行，网页端当前为只读同步" : "队列模式发送";
+  els.sendSteer.title = state.externalRunning ? "外部 Codex 任务不能从网页端引导" : "引导模式发送";
   if (els.newChat) els.newChat.disabled = state.running;
   els.threadButton.disabled = false;
   updateMeta();
@@ -311,7 +321,11 @@ function updateMeta() {
   const title = state.threadId ? (state.threadName || `会话 ${state.threadId.slice(0, 8)}`) : "新会话";
   const mode = state.followMode === "steer" ? "引导模式" : "队列模式";
   const percent = state.contextUsage ? Math.max(0, Math.min(100, Math.round(Number(state.contextUsage.remainingPercent)))) : null;
-  const modeText = Number.isFinite(percent) ? `${mode} · 上下文 ${percent}%` : mode;
+  const normalModeText = Number.isFinite(percent) ? `${mode} · 上下文 ${percent}%` : mode;
+  const externalLabel = state.selectedConnectorId ? "被控电脑 Codex 正在执行 · 实时同步中" : "本机 Codex Desktop/CLI 正在执行 · 实时同步中";
+  const modeText = state.externalRunning
+    ? externalLabel
+    : (state.reconnecting ? "Codex 正在重新连接 · 任务继续等待" : normalModeText);
   els.meta.textContent = `${connectorTag}${title}`;
   els.meta.title = `${connectorTag}${title}`;
   els.mode.textContent = modeText;
@@ -442,6 +456,38 @@ function renderFileLink(file, label = file) {
   return `<a href="${href}" target="_blank" rel="noopener noreferrer" download>${escapeHtml(label)}</a>`;
 }
 
+function normalizedFilePath(value = "") {
+  const normalized = String(value || "").trim().replaceAll("\\", "/");
+  if (normalized === "/" || /^[A-Za-z]:\/$/.test(normalized)) return normalized;
+  return normalized.replace(/\/+$/, "");
+}
+
+function isLinkableFilePath(file = "") {
+  const candidate = normalizedFilePath(file);
+  if (!candidate) return false;
+  return state.fileLinkRoots.some((root) => {
+    const normalizedRoot = normalizedFilePath(root);
+    if (!normalizedRoot) return false;
+    if (normalizedRoot === "/") return candidate.startsWith("/");
+    return candidate === normalizedRoot || candidate.startsWith(`${normalizedRoot}/`);
+  });
+}
+
+function escapeRegExp(text = "") {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replacePlainFilePaths(source, nextPlaceholder) {
+  const roots = state.fileLinkRoots
+    .map(normalizedFilePath)
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)
+    .map(escapeRegExp);
+  if (!roots.length) return source;
+  const pattern = new RegExp(`(^|[\\s(（【「：:])((?:${roots.join("|")})(?:[/\\\\][^\\s<>"'，。；、)]*)?)`, "g");
+  return source.replace(pattern, (_, prefix, file) => `${prefix}${nextPlaceholder(renderFileLink(file))}`);
+}
+
 function renderInlineMarkdown(text) {
   const placeholders = [];
   const nextPlaceholder = (html) => {
@@ -451,15 +497,17 @@ function renderInlineMarkdown(text) {
   };
   let source = String(text);
   source = source.replace(/`([^`]+)`/g, (_, code) => nextPlaceholder(`<code>${escapeHtml(code)}</code>`));
-  source = source.replace(/!\[([^\]]*)\]\((\/root\/codex项目2\/[^)]+)\)/g, (_, label, file) => nextPlaceholder(renderFileLink(file, label || file)));
-  source = source.replace(/\[([^\]]+)\]\((\/root\/codex项目2\/[^)]+)\)/g, (_, label, file) => nextPlaceholder(renderFileLink(file, label)));
+  source = source.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, label, file) => (
+    isLinkableFilePath(file) ? nextPlaceholder(renderFileLink(file, label || file)) : match
+  ));
   source = source.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, href) => {
+    if (isLinkableFilePath(href)) return nextPlaceholder(renderFileLink(href, label));
     const safeHref = escapeHtml(href);
     return nextPlaceholder(`<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`);
   });
   source = source.replace(/\[\[([^\]|]+)\|([^\]]+)\]\]|\[\[([^\]]+)\]\]/g, (_, _target, label, plain) => label || plain || "");
+  source = replacePlainFilePaths(source, nextPlaceholder);
   let html = escapeHtml(source);
-  html = html.replace(/(^|[\s(])((?:\/root\/codex项目2\/)[^\s<>"'，。；、)]+)/g, (_, prefix, file) => `${prefix}${renderFileLink(file)}`);
   html = html.replace(/\*\*\*(.+?)\*\*\*/g, (_, inner) => nextPlaceholder(`<b><i>${inner}</i></b>`));
   html = html.replace(/\*\*(.+?)\*\*/g, (_, inner) => nextPlaceholder(`<b>${inner}</b>`));
   html = html.replace(/__(.+?)__/g, (_, inner) => nextPlaceholder(`<b>${inner}</b>`));
@@ -971,6 +1019,8 @@ function renderState(data) {
   }
   state.cwd = data.cwd || "";
   state.absoluteCwd = data.absoluteCwd || "";
+  if (data.externalTaskStartedAt !== undefined) state.externalTaskStartedAt = data.externalTaskStartedAt || "";
+  if (Array.isArray(data.fileLinkRoots)) state.fileLinkRoots = data.fileLinkRoots.filter((root) => typeof root === "string" && root);
   if (data.model !== undefined) state.model = data.model || "";
   if (data.reasoningEffort !== undefined) state.reasoningEffort = data.reasoningEffort || "";
   restoreDraftForCurrentState(data.draft);
@@ -1004,7 +1054,14 @@ function renderState(data) {
   if (shouldFollow) scrollToLatest(true);
   else els.logWrap.scrollTop = previousTop;
   updateLoadMore();
-  setRunning(data.running, data.queueLength, data.queueMessages, data.followMode, data.steerLength, data.steerMessages, data.contextUsage, data.runningThreads);
+  setRunning(data.running, data.queueLength, data.queueMessages, data.followMode, data.steerLength, data.steerMessages, data.contextUsage, data.runningThreads, data.reconnecting, data.externalRunning);
+  const taskStartedAt = state.externalRunning ? state.externalTaskStartedAt : data.inflight?.startedAt;
+  if (state.running && taskStartedAt) {
+    const startedAtMs = Date.parse(taskStartedAt);
+    if (Number.isFinite(startedAtMs)) state.currentTaskStartedAtMs = startedAtMs;
+  } else if (!state.running) {
+    state.currentTaskStartedAtMs = null;
+  }
   if (!els.modelSettingsPanel.hidden && state.threadId !== previousThreadId) {
     queueMicrotask(() => openModelSettings().catch((error) => {
       els.modelSettingsStatus.textContent = `读取失败：${error.message}`;
@@ -1231,7 +1288,9 @@ async function loadMoreMessages() {
 
 function threadSubtitle(thread) {
   const date = thread.updatedAt ? new Date(thread.updatedAt).toLocaleString() : "";
-  const status = thread.running ? `运行中${thread.queueLength ? ` · 队列 ${thread.queueLength}` : ""}` : "";
+  const status = thread.externalRunning
+    ? "Codex Desktop/CLI 运行中 · 只读同步"
+    : (thread.running ? `运行中${thread.queueLength ? ` · 队列 ${thread.queueLength}` : ""}` : "");
   return [status, date, `${thread.messageCount} 条`].filter(Boolean).join(" · ");
 }
 
@@ -1773,6 +1832,8 @@ async function switchConnector(id = "") {
 
 async function applyConnectorSelection(id = "", options = {}) {
   state.selectedConnectorId = id;
+  state.externalRunning = false;
+  state.externalTaskStartedAt = "";
   state.threadId = "";
   state.threadName = "";
   state.cwd = "";
@@ -1902,6 +1963,15 @@ async function selectThread(threadId) {
   els.threadPanel.hidden = true;
 }
 
+let externalSessionRefreshTimer = null;
+
+function scheduleExternalSessionRefresh(connectorId = currentConnectorId()) {
+  clearTimeout(externalSessionRefreshTimer);
+  externalSessionRefreshTimer = setTimeout(() => {
+    loadState(connectorId).catch((error) => console.warn("外部 Codex 会话刷新失败", error));
+  }, 150);
+}
+
 function handleRemoteEvent(data) {
   if (Number(data.seq) > state.lastEventSeq) state.lastEventSeq = Number(data.seq);
   if (data.type === "connectors_changed") { loadConnectors().catch(() => {}); return; }
@@ -1918,7 +1988,30 @@ function handleRemoteEvent(data) {
     if (data.type === "runner_status") state.runningThreads = Array.isArray(data.runningThreads) ? data.runningThreads : state.runningThreads;
     return;
   }
-  if (data.type === "status") setRunning(data.running, data.queueLength, data.queueMessages, data.followMode, data.steerLength, data.steerMessages, data.contextUsage, data.runningThreads);
+  if (data.type === "external_session_update") {
+    if (data.threadId !== state.threadId) return;
+    state.externalTaskStartedAt = data.externalTaskStartedAt || state.externalTaskStartedAt || "";
+    setRunning(
+      data.running,
+      state.queueLength,
+      state.queueMessages,
+      state.followMode,
+      state.steerLength,
+      state.steerMessages,
+      data.contextUsage || state.contextUsage,
+      state.runningThreads,
+      false,
+      data.externalRunning
+    );
+    scheduleExternalSessionRefresh(currentConnectorId());
+    return;
+  }
+  if (data.type === "status") setRunning(data.running, data.queueLength, data.queueMessages, data.followMode, data.steerLength, data.steerMessages, data.contextUsage, data.runningThreads, data.reconnecting, data.externalRunning);
+  if (data.type === "reconnecting") {
+    state.reconnecting = Boolean(data.reconnecting);
+    updateMeta();
+    updateStatusIcon();
+  }
   if (data.type === "runner_status") state.runningThreads = Array.isArray(data.runningThreads) ? data.runningThreads : [];
   if (data.type === "message") {
     if (data.role === "assistant" && (data.transient || data.final)) {
@@ -1942,7 +2035,7 @@ function handleRemoteEvent(data) {
   }
   if (data.type === "done") {
     state.currentTaskStartedAtMs = null;
-    loadState().catch(() => appendEvent("任务已完成"));
+    loadState().catch((error) => console.warn("任务完成后的状态刷新失败", error));
   }
   if (data.type === "thread_completion" && data.threadId) {
     if (data.completedUnread) state.completedUnreadThreads.add(data.threadId);
@@ -2010,6 +2103,10 @@ async function sendMessage(mode = "queue") {
   const connectorId = currentConnectorId();
   const message = els.input.value.trim();
   if (!message && !state.uploads.length) return;
+  if (state.externalRunning) {
+    upsertAssistantMessage("Codex Desktop/CLI 正在执行这个会话，网页端当前为只读实时同步。请等任务结束后再发送。", true, "external-session-readonly", { persist: false });
+    return;
+  }
   if (state.disableLocal && !connectorId) {
     upsertAssistantMessage("当前为纯控制中心模式，请先在「PC 被控电脑」面板添加并切换到一台被控电脑。", true);
     return;
@@ -2022,7 +2119,7 @@ async function sendMessage(mode = "queue") {
   state.replyDone = false;
   state.currentTaskStartedAtMs = Date.now();
   const followMatch = outgoingMessage.trim().toLowerCase().match(/^\/follow\s+(queue|steer)$/);
-  setRunning(true, state.queueLength, state.queueMessages, followMatch ? followMatch[1] : state.followMode, state.steerLength, state.steerMessages, state.contextUsage, state.runningThreads);
+  setRunning(true, state.queueLength, state.queueMessages, followMatch ? followMatch[1] : state.followMode, state.steerLength, state.steerMessages, state.contextUsage, state.runningThreads, false, false);
   try {
     const result = await request("/api/remote/send", {
       method: "POST",
@@ -2032,8 +2129,8 @@ async function sendMessage(mode = "queue") {
     if (connectorId !== currentConnectorId()) return;
     state.uploads = [];
     renderUploadList();
-    if (result?.local) setRunning(result.running, result.queueLength, result.queueMessages, result.followMode, result.steerLength, result.steerMessages, result.contextUsage, result.runningThreads);
-    if (result?.queued || result?.steered) setRunning(true, result.queueLength, result.queueMessages, result.followMode, result.steerLength, result.steerMessages, result.contextUsage, result.runningThreads);
+    if (result?.local) setRunning(result.running, result.queueLength, result.queueMessages, result.followMode, result.steerLength, result.steerMessages, result.contextUsage, result.runningThreads, result.reconnecting, result.externalRunning);
+    if (result?.queued || result?.steered) setRunning(true, result.queueLength, result.queueMessages, result.followMode, result.steerLength, result.steerMessages, result.contextUsage, result.runningThreads, result.reconnecting, result.externalRunning);
   } catch (error) {
     upsertAssistantMessage(`错误：${error.message}`, true);
     setRunning(false);
