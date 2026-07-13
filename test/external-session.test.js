@@ -43,6 +43,43 @@ test("an unmatched recent task_started is externally running", () => {
   assert.equal(snapshot.externalTurnId, turnId);
 });
 
+test("a fork keeps its canonical file id instead of copied parent session metadata", () => {
+  const childId = "55555555-5555-4555-8555-555555555555";
+  const parentId = "66666666-6666-4666-8666-666666666666";
+  const parsed = parseSessionFile(jsonl([
+    {
+      timestamp: "2026-07-13T01:00:00.000Z",
+      type: "session_meta",
+      payload: { id: childId, parent_thread_id: parentId, thread_source: "subagent", cwd: "/child" }
+    },
+    {
+      timestamp: "2026-07-13T00:00:00.000Z",
+      type: "session_meta",
+      payload: { id: parentId, thread_source: "user", cwd: "/parent" }
+    }
+  ]), `/tmp/rollout-test-${childId}.jsonl`);
+
+  assert.equal(parsed.threadId, childId);
+  assert.equal(parsed.threadSource, "subagent");
+  assert.equal(parsed.parentThreadId, parentId);
+  assert.equal(parsed.cwd, "/child");
+});
+
+test("turn_aborted ends an externally observed task", () => {
+  const threadId = "77777777-7777-4777-8777-777777777777";
+  const turnId = "88888888-8888-4888-8888-888888888888";
+  const parsed = parseSessionFile(jsonl([
+    { timestamp: "2026-07-13T01:00:00.000Z", type: "session_meta", payload: { id: threadId, cwd: "/workspace" } },
+    { timestamp: "2026-07-13T01:00:01.000Z", type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    { timestamp: "2026-07-13T01:00:05.000Z", type: "event_msg", payload: { type: "turn_aborted", turn_id: turnId, reason: "interrupted", completed_at: 1783904405, duration_ms: 4000 } }
+  ]), `/tmp/rollout-test-${threadId}.jsonl`);
+
+  assert.equal(parsed.taskRunning, false);
+  assert.equal(parsed.activeTurnId, "");
+  assert.equal(parsed.taskCompletedAt, "2026-07-13T01:00:05.000Z");
+  assert.equal(isExternalTaskRunning(parsed, Date.now()), false);
+});
+
 test("an abandoned task_started becomes idle after the stale window", () => {
   assert.equal(isExternalTaskRunning({ taskRunning: true }, Date.now() - (3 * 60 * 60 * 1000)), false);
   assert.equal(isExternalTaskRunning({ taskRunning: false }, Date.now()), false);
@@ -61,6 +98,6 @@ test("sending is rejected before a second writer starts on an external session",
     source.indexOf("export async function submitRemoteMessage"),
     source.indexOf("export async function listThreads")
   );
-  assert.match(submit, /if \(!selectedRunner\?\.running\) await assertExternalSessionIdle\(selectedState\)/);
+  assert.match(submit, /if \(!selectedRunner\?\.running\)\s*\{[\s\S]*?await assertExternalSessionIdle\(selectedState\)/);
   assert.ok(submit.indexOf("assertExternalSessionIdle(selectedState)") < submit.indexOf("localCommandResponse(text, connectorId)"));
 });

@@ -29,13 +29,18 @@ async function updateJson(file, fallback, update) {
 
 export async function readState(connectorId = "") {
   const parsed = await readJson(statePathFor(connectorId), null);
-  if (!parsed) return { threadId: "", connectorId, cwd: "", model: "", reasoningEffort: "", messages: [], inflight: null };
+  if (!parsed) return {
+    threadId: "", connectorId, cwd: "", model: "", reasoningEffort: "",
+    modelSettingsUpdatedAt: "", modelSettingsSource: "", messages: [], inflight: null
+  };
   return {
     threadId: typeof parsed.threadId === "string" ? parsed.threadId : "",
     connectorId: connectorId || (typeof parsed.connectorId === "string" ? parsed.connectorId : ""),
     cwd: typeof parsed.cwd === "string" ? parsed.cwd : "",
     model: typeof parsed.model === "string" ? parsed.model : "",
     reasoningEffort: typeof parsed.reasoningEffort === "string" ? parsed.reasoningEffort : "",
+    modelSettingsUpdatedAt: typeof parsed.modelSettingsUpdatedAt === "string" ? parsed.modelSettingsUpdatedAt : "",
+    modelSettingsSource: typeof parsed.modelSettingsSource === "string" ? parsed.modelSettingsSource : "",
     messages: Array.isArray(parsed.messages) ? parsed.messages : [],
     inflight: parsed.inflight && typeof parsed.inflight === "object" ? parsed.inflight : null
   };
@@ -43,6 +48,45 @@ export async function readState(connectorId = "") {
 
 export async function writeState(state, connectorId = "") {
   await writeJson(statePathFor(connectorId), state);
+}
+
+export async function writeStateIfIdle(state, connectorId = "") {
+  await updateJson(statePathFor(connectorId), {}, (current) => {
+    const currentThreadId = typeof current.threadId === "string" ? current.threadId : "";
+    if (currentThreadId !== String(state.threadId || "") || current.inflight) return current;
+    const currentSettingsTime = Date.parse(current.modelSettingsUpdatedAt || "");
+    const nextSettingsTime = Date.parse(state.modelSettingsUpdatedAt || "");
+    if (Number.isFinite(currentSettingsTime) && (!Number.isFinite(nextSettingsTime) || currentSettingsTime > nextSettingsTime)) {
+      return {
+        ...state,
+        model: current.model || "",
+        reasoningEffort: current.reasoningEffort || "",
+        modelSettingsUpdatedAt: current.modelSettingsUpdatedAt || "",
+        modelSettingsSource: current.modelSettingsSource || ""
+      };
+    }
+    return state;
+  });
+}
+
+export async function updateStateModelSettings(expectedState = {}, value = {}, connectorId = "") {
+  await updateJson(statePathFor(connectorId), {}, (current) => {
+    const expectedThreadId = String(expectedState.threadId || "");
+    const currentThreadId = typeof current.threadId === "string" ? current.threadId : "";
+    if (currentThreadId !== expectedThreadId) return current;
+    if (!expectedThreadId) {
+      const expectedCwd = String(expectedState.cwd || "");
+      const currentCwd = typeof current.cwd === "string" ? current.cwd : "";
+      if (currentCwd && currentCwd !== expectedCwd) return current;
+    }
+    return {
+      ...current,
+      model: String(value.model || ""),
+      reasoningEffort: String(value.reasoningEffort || ""),
+      modelSettingsUpdatedAt: String(value.updatedAt || value.modelSettingsUpdatedAt || ""),
+      modelSettingsSource: String(value.source || value.modelSettingsSource || "")
+    };
+  });
 }
 
 export function draftKeyFor(threadId = "", cwd = "") {
@@ -106,17 +150,36 @@ export async function modelSettingsForThread(threadId = "", connectorId = "") {
   if (!value || typeof value !== "object") return null;
   const model = typeof value.model === "string" ? value.model : "";
   const reasoningEffort = typeof value.reasoningEffort === "string" ? value.reasoningEffort : "";
-  return model ? { model, reasoningEffort } : null;
+  const updatedAt = typeof value.updatedAt === "string" ? value.updatedAt : "";
+  const source = typeof value.source === "string" ? value.source : "";
+  return model ? { model, reasoningEffort, updatedAt, source } : null;
+}
+
+export function shouldReplaceThreadModelSettings(existing = {}, incoming = {}) {
+  const existingTime = Date.parse(existing.updatedAt || "");
+  const incomingTime = Date.parse(incoming.updatedAt || "");
+  return !(Number.isFinite(existingTime) && Number.isFinite(incomingTime) && incomingTime < existingTime);
 }
 
 export async function saveThreadModelSettings(threadId = "", value = {}, connectorId = "") {
   if (!threadId || !value.model) return;
   const key = `${connectorPrefix(connectorId)}${threadId}`;
   await updateJson(threadModelSettingsPath, {}, (settings) => {
+    const requestedUpdatedAt = typeof value.updatedAt === "string" && value.updatedAt
+      ? value.updatedAt
+      : (typeof value.modelSettingsUpdatedAt === "string" && value.modelSettingsUpdatedAt
+          ? value.modelSettingsUpdatedAt
+          : new Date().toISOString());
+    if (!shouldReplaceThreadModelSettings(settings[key], { updatedAt: requestedUpdatedAt })) {
+      return settings;
+    }
     settings[key] = {
       model: String(value.model),
       reasoningEffort: String(value.reasoningEffort || ""),
-      updatedAt: new Date().toISOString()
+      updatedAt: requestedUpdatedAt,
+      source: typeof value.source === "string"
+        ? value.source
+        : (typeof value.modelSettingsSource === "string" ? value.modelSettingsSource : "")
     };
     return settings;
   });

@@ -100,24 +100,38 @@ export function parseSessionFile(text, file = "", limit = defaultMessageLimit) {
   const taskDurations = new Map();
   const meta = {
     threadId: threadIdFromFile(file),
+    threadSource: "",
+    parentThreadId: "",
     cwd: "",
     updatedAt: "",
     contextUsage: null,
     model: "",
     reasoningEffort: "",
+    settingsUpdatedAt: "",
     taskRunning: false,
     activeTurnId: "",
     taskStartedAt: "",
     taskCompletedAt: ""
   };
+  let ownerMetaSeen = false;
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let row;
     try { row = JSON.parse(line); } catch { continue; }
     if (row.type === "session_meta") {
-      meta.threadId = row.payload?.id || meta.threadId;
-      meta.cwd = row.payload?.cwd || meta.cwd;
-      meta.updatedAt = row.timestamp || meta.updatedAt;
+      // Fork/subagent rollouts contain their own session_meta first, followed by
+      // copied parent history which can include another session_meta. The file
+      // name (or the first owner meta when no canonical name is available) must
+      // remain authoritative; otherwise child tasks masquerade as the parent.
+      if (!ownerMetaSeen) {
+        const payload = row.payload || {};
+        meta.threadId = meta.threadId || payload.id || "";
+        meta.threadSource = payload.thread_source || (payload.source?.subagent ? "subagent" : "");
+        meta.parentThreadId = payload.parent_thread_id || payload.forked_from_id || "";
+        meta.cwd = payload.cwd || meta.cwd;
+        meta.updatedAt = row.timestamp || meta.updatedAt;
+        ownerMetaSeen = true;
+      }
       continue;
     }
     if (row.type === "event_msg" && row.payload?.type === "token_count") {
@@ -134,7 +148,7 @@ export function parseSessionFile(text, file = "", limit = defaultMessageLimit) {
       meta.updatedAt = row.timestamp || meta.updatedAt;
       continue;
     }
-    if (row.type === "event_msg" && row.payload?.type === "task_complete") {
+    if (row.type === "event_msg" && ["task_complete", "turn_aborted"].includes(row.payload?.type)) {
       const completedTurnId = row.payload.turn_id || "";
       if (!meta.activeTurnId || !completedTurnId || completedTurnId === meta.activeTurnId) {
         meta.taskRunning = false;
@@ -147,9 +161,18 @@ export function parseSessionFile(text, file = "", limit = defaultMessageLimit) {
       meta.updatedAt = row.timestamp || meta.updatedAt;
       continue;
     }
+    if (row.type === "event_msg" && row.payload?.type === "thread_settings_applied") {
+      const settings = row.payload.thread_settings || {};
+      meta.model = settings.model || settings.collaboration_mode?.settings?.model || meta.model;
+      meta.reasoningEffort = settings.reasoning_effort || settings.effort || settings.collaboration_mode?.settings?.reasoning_effort || meta.reasoningEffort;
+      meta.settingsUpdatedAt = row.timestamp || meta.settingsUpdatedAt;
+      meta.updatedAt = row.timestamp || meta.updatedAt;
+      continue;
+    }
     if (row.type === "turn_context") {
       meta.model = row.payload?.model || row.payload?.collaboration_mode?.settings?.model || meta.model;
       meta.reasoningEffort = row.payload?.effort || row.payload?.reasoning_effort || row.payload?.collaboration_mode?.settings?.reasoning_effort || meta.reasoningEffort;
+      meta.settingsUpdatedAt = row.timestamp || meta.settingsUpdatedAt;
       meta.updatedAt = row.timestamp || meta.updatedAt;
       continue;
     }

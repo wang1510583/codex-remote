@@ -44,6 +44,7 @@ const state = {
   selectedConnectorId: "",
   model: "",
   reasoningEffort: "",
+  modelSettingsUpdatedAt: "",
   modelOptions: [],
   localConnectorRemark: "",
   disableLocal: false,
@@ -294,6 +295,9 @@ function updateStatusIcon() {
 }
 
 function setRunning(running, queueLength = state.queueLength, queueMessages = state.queueMessages, followMode = state.followMode, steerLength = state.steerLength, steerMessages = state.steerMessages, contextUsage = state.contextUsage, runningThreads = state.runningThreads, reconnecting = false, externalRunning = false) {
+  const wasRunning = state.running;
+  const wasExternalRunning = state.externalRunning;
+  const previousRunningThreads = runningThreadsSignature(state.runningThreads);
   state.running = Boolean(running);
   state.externalRunning = state.running && Boolean(externalRunning);
   state.reconnecting = state.running && !state.externalRunning && Boolean(reconnecting);
@@ -314,6 +318,11 @@ function setRunning(running, queueLength = state.queueLength, queueMessages = st
   updateMeta();
   renderQueuePanel();
   updateStatusIcon();
+  if (
+    wasRunning !== state.running
+    || wasExternalRunning !== state.externalRunning
+    || previousRunningThreads !== runningThreadsSignature(state.runningThreads)
+  ) scheduleThreadListRefresh();
 }
 
 function updateMeta() {
@@ -1000,6 +1009,13 @@ async function loadState(connectorId = currentConnectorId()) {
   renderState(data);
 }
 
+function settingsResponseIsCurrent(updatedAt = "") {
+  const currentTime = state.modelSettingsUpdatedAt ? Date.parse(state.modelSettingsUpdatedAt) : NaN;
+  if (!Number.isFinite(currentTime)) return true;
+  const incomingTime = updatedAt ? Date.parse(updatedAt) : NaN;
+  return Number.isFinite(incomingTime) && incomingTime >= currentTime;
+}
+
 function renderState(data) {
   if (!connectorMatchesCurrent(data)) return;
   saveDraft();
@@ -1010,8 +1026,11 @@ function renderState(data) {
   const shouldFollow = isNearBottom();
   const previousTop = els.logWrap.scrollTop;
   const previousThreadId = state.threadId;
+  const nextThreadId = data.threadId || "";
+  const applySettings = nextThreadId !== previousThreadId
+    || settingsResponseIsCurrent(data.modelSettingsUpdatedAt || "");
   if (Number(data.eventSeq) > state.lastEventSeq) state.lastEventSeq = Number(data.eventSeq);
-  state.threadId = data.threadId || "";
+  state.threadId = nextThreadId;
   if (Object.prototype.hasOwnProperty.call(data, "threadName")) {
     state.threadName = data.threadName || "";
   } else if (state.threadId !== previousThreadId) {
@@ -1021,8 +1040,11 @@ function renderState(data) {
   state.absoluteCwd = data.absoluteCwd || "";
   if (data.externalTaskStartedAt !== undefined) state.externalTaskStartedAt = data.externalTaskStartedAt || "";
   if (Array.isArray(data.fileLinkRoots)) state.fileLinkRoots = data.fileLinkRoots.filter((root) => typeof root === "string" && root);
-  if (data.model !== undefined) state.model = data.model || "";
-  if (data.reasoningEffort !== undefined) state.reasoningEffort = data.reasoningEffort || "";
+  if (applySettings) {
+    if (nextThreadId !== previousThreadId || data.model !== undefined) state.model = data.model || "";
+    if (nextThreadId !== previousThreadId || data.reasoningEffort !== undefined) state.reasoningEffort = data.reasoningEffort || "";
+    state.modelSettingsUpdatedAt = data.modelSettingsUpdatedAt || "";
+  }
   restoreDraftForCurrentState(data.draft);
   state.loadedCount = Number(data.loadedCount || data.messages?.length || 0);
   state.messageCount = Number(data.messageCount || state.loadedCount);
@@ -1071,8 +1093,12 @@ function renderState(data) {
 }
 
 function renderModelSettings(data = {}) {
-  state.model = data.model || "";
-  state.reasoningEffort = data.reasoningEffort || "";
+  if (data.threadId !== undefined && (data.threadId || "") !== state.threadId) return false;
+  if (settingsResponseIsCurrent(data.modelSettingsUpdatedAt || "")) {
+    state.model = data.model || "";
+    state.reasoningEffort = data.reasoningEffort || "";
+    state.modelSettingsUpdatedAt = data.modelSettingsUpdatedAt || state.modelSettingsUpdatedAt || "";
+  }
   state.modelOptions = Array.isArray(data.models) ? data.models : [];
   const selected = state.modelOptions.find((item) => item.model === state.model || item.id === state.model);
   const sessionLabel = data.threadId ? "当前会话" : "新会话";
@@ -1106,9 +1132,12 @@ function renderModelSettings(data = {}) {
     els.modelSettingsEfforts.appendChild(button);
   }
   els.modelSettingsStatus.textContent = data.running ? "当前会话正在处理，结束或中断后可切换。" : "";
+  return true;
 }
 
 async function openModelSettings() {
+  const connectorId = currentConnectorId();
+  const threadId = state.threadId;
   els.modelSettingsPanel.hidden = false;
   els.usagePanel.hidden = true;
   els.filePanel.hidden = true;
@@ -1119,13 +1148,16 @@ async function openModelSettings() {
   els.modelSettingsModels.innerHTML = "";
   els.modelSettingsEfforts.innerHTML = "";
   els.modelSettingsStatus.textContent = "";
-  renderModelSettings(await request("/api/remote/model-settings"));
+  const data = await request("/api/remote/model-settings", { connectorId });
+  if (connectorId !== currentConnectorId() || threadId !== state.threadId) return;
+  renderModelSettings(data);
 }
 
 async function changeModelSettings(update = {}) {
   if (modelSettingsChanging) return;
   modelSettingsChanging = true;
   const connectorId = currentConnectorId();
+  const threadId = state.threadId;
   els.modelSettingsStatus.textContent = "正在切换...";
   for (const button of els.modelSettingsPanel.querySelectorAll(".modelOption, .effortOption")) button.disabled = true;
   try {
@@ -1134,7 +1166,7 @@ async function changeModelSettings(update = {}) {
       connectorId,
       body: JSON.stringify(update)
     });
-    if (connectorId !== currentConnectorId()) return;
+    if (connectorId !== currentConnectorId() || threadId !== state.threadId) return;
     renderModelSettings(data);
     els.modelSettingsStatus.textContent = "已为当前会话保存。";
   } catch (error) {
@@ -1286,12 +1318,12 @@ async function loadMoreMessages() {
   updateScrollJumps();
 }
 
-function threadSubtitle(thread) {
+function threadSubtitle(thread, isActive = false) {
   const date = thread.updatedAt ? new Date(thread.updatedAt).toLocaleString() : "";
   const status = thread.externalRunning
     ? "Codex Desktop/CLI 运行中 · 只读同步"
     : (thread.running ? `运行中${thread.queueLength ? ` · 队列 ${thread.queueLength}` : ""}` : "");
-  return [status, date, `${thread.messageCount} 条`].filter(Boolean).join(" · ");
+  return [isActive ? "当前会话" : "", status, date, `${thread.messageCount} 条`].filter(Boolean).join(" · ");
 }
 
 function fileIcon(item) {
@@ -1840,6 +1872,7 @@ async function applyConnectorSelection(id = "", options = {}) {
   state.absoluteCwd = "";
   state.model = "";
   state.reasoningEffort = "";
+  state.modelSettingsUpdatedAt = "";
   state.modelOptions = [];
   state.fileCwd = "";
   state.fileCwdConnectorId = id;
@@ -1860,16 +1893,37 @@ async function applyConnectorSelection(id = "", options = {}) {
   if (!els.connectorPanel.hidden) renderConnectors();
 }
 
+let threadListRequestGeneration = 0;
+let threadListRefreshTimer = null;
+
+function runningThreadsSignature(rows = []) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((item) => `${item.connectorId || ""}:${item.threadId || item.runnerKey || ""}:${item.externalRunning ? 1 : 0}`)
+    .sort()
+    .join("|");
+}
+
+function scheduleThreadListRefresh(delay = 150) {
+  if (els.threadPanel.hidden || els.threadExistingView.hidden) return;
+  clearTimeout(threadListRefreshTimer);
+  threadListRefreshTimer = setTimeout(() => {
+    threadListRefreshTimer = null;
+    if (els.threadPanel.hidden || els.threadExistingView.hidden) return;
+    openThreads().catch((error) => console.warn("会话列表刷新失败", error));
+  }, Math.max(0, Number(delay) || 0));
+}
+
 async function openThreads() {
   els.modelSettingsPanel.hidden = true;
   els.usagePanel.hidden = true;
   const connectorId = currentConnectorId();
+  const requestGeneration = ++threadListRequestGeneration;
   els.threadPanel.hidden = false;
   setThreadView("existing");
   els.threadList.innerHTML = '<div class="remoteEvent">加载中...</div>';
   try {
     const data = await request("/api/remote/threads", { connectorId });
-    if (connectorId !== currentConnectorId()) return;
+    if (connectorId !== currentConnectorId() || requestGeneration !== threadListRequestGeneration) return;
     els.threadList.innerHTML = "";
     if (!data.threads?.length) {
       els.threadList.innerHTML = '<div class="remoteEvent">没有找到会话</div>';
@@ -1881,13 +1935,14 @@ async function openThreads() {
 
       const button = document.createElement("button");
       if (thread.completedUnread) state.completedUnreadThreads.add(thread.threadId);
+      else state.completedUnreadThreads.delete(thread.threadId);
       const isActive = thread.threadId === state.threadId;
       const isCompletedUnread = Boolean(thread.completedUnread || state.completedUnreadThreads.has(thread.threadId));
       button.className = `threadItem${isActive ? " active" : ""}${thread.running ? " running" : ""}${!thread.running && isCompletedUnread ? " completedUnread" : ""}`;
       button.type = "button";
       button.innerHTML = '<strong></strong><small class="threadMeta"></small><small class="threadPath"></small>';
       button.querySelector("strong").textContent = thread.name ? `📌 ${thread.title}` : thread.title;
-      button.querySelector(".threadMeta").textContent = threadSubtitle(thread);
+      button.querySelector(".threadMeta").textContent = threadSubtitle(thread, isActive);
       button.querySelector(".threadPath").textContent = thread.cwd || "";
       button.addEventListener("click", () => selectThread(thread.threadId));
 
@@ -1910,6 +1965,7 @@ async function openThreads() {
       els.threadList.appendChild(row);
     }
   } catch (error) {
+    if (connectorId !== currentConnectorId() || requestGeneration !== threadListRequestGeneration) return;
     els.threadList.innerHTML = "";
     els.threadList.innerHTML = `<div class="remoteEvent">错误：${error.message}</div>`;
   }
@@ -1972,6 +2028,29 @@ function scheduleExternalSessionRefresh(connectorId = currentConnectorId()) {
   }, 150);
 }
 
+function applyIncomingModelSettings(data = {}, running = state.running) {
+  const nextUpdatedAt = data.modelSettingsUpdatedAt || data.settingsUpdatedAt || "";
+  if (!settingsResponseIsCurrent(nextUpdatedAt)) return false;
+  const settingsChanged = Boolean(
+    (Object.prototype.hasOwnProperty.call(data, "model") && data.model !== state.model)
+    || (Object.prototype.hasOwnProperty.call(data, "reasoningEffort") && data.reasoningEffort !== state.reasoningEffort)
+  );
+  if (Object.prototype.hasOwnProperty.call(data, "model")) state.model = data.model || "";
+  if (Object.prototype.hasOwnProperty.call(data, "reasoningEffort")) state.reasoningEffort = data.reasoningEffort || "";
+  if (nextUpdatedAt) state.modelSettingsUpdatedAt = nextUpdatedAt;
+  if (settingsChanged && !els.modelSettingsPanel.hidden) {
+    renderModelSettings({
+      threadId: state.threadId,
+      model: state.model,
+      reasoningEffort: state.reasoningEffort,
+      modelSettingsUpdatedAt: state.modelSettingsUpdatedAt,
+      models: state.modelOptions,
+      running
+    });
+  }
+  return settingsChanged;
+}
+
 function handleRemoteEvent(data) {
   if (Number(data.seq) > state.lastEventSeq) state.lastEventSeq = Number(data.seq);
   if (data.type === "connectors_changed") { loadConnectors().catch(() => {}); return; }
@@ -1988,8 +2067,14 @@ function handleRemoteEvent(data) {
     if (data.type === "runner_status") state.runningThreads = Array.isArray(data.runningThreads) ? data.runningThreads : state.runningThreads;
     return;
   }
+  if (data.type === "model_settings_update") {
+    if (data.threadId !== state.threadId) return;
+    applyIncomingModelSettings(data);
+    return;
+  }
   if (data.type === "external_session_update") {
     if (data.threadId !== state.threadId) return;
+    applyIncomingModelSettings(data, Boolean(data.running));
     state.externalTaskStartedAt = data.externalTaskStartedAt || state.externalTaskStartedAt || "";
     setRunning(
       data.running,
@@ -2004,6 +2089,7 @@ function handleRemoteEvent(data) {
       data.externalRunning
     );
     scheduleExternalSessionRefresh(currentConnectorId());
+    scheduleThreadListRefresh();
     return;
   }
   if (data.type === "status") setRunning(data.running, data.queueLength, data.queueMessages, data.followMode, data.steerLength, data.steerMessages, data.contextUsage, data.runningThreads, data.reconnecting, data.externalRunning);
@@ -2012,7 +2098,11 @@ function handleRemoteEvent(data) {
     updateMeta();
     updateStatusIcon();
   }
-  if (data.type === "runner_status") state.runningThreads = Array.isArray(data.runningThreads) ? data.runningThreads : [];
+  if (data.type === "runner_status") {
+    const previousSignature = runningThreadsSignature(state.runningThreads);
+    state.runningThreads = Array.isArray(data.runningThreads) ? data.runningThreads : [];
+    if (previousSignature !== runningThreadsSignature(state.runningThreads)) scheduleThreadListRefresh();
+  }
   if (data.type === "message") {
     if (data.role === "assistant" && (data.transient || data.final)) {
       if (data.final && /^✅\s/.test(data.content || "") && data.taskDurationMs === undefined && state.currentTaskStartedAtMs) {
@@ -2036,11 +2126,12 @@ function handleRemoteEvent(data) {
   if (data.type === "done") {
     state.currentTaskStartedAtMs = null;
     loadState().catch((error) => console.warn("任务完成后的状态刷新失败", error));
+    scheduleThreadListRefresh(250);
   }
   if (data.type === "thread_completion" && data.threadId) {
     if (data.completedUnread) state.completedUnreadThreads.add(data.threadId);
     else state.completedUnreadThreads.delete(data.threadId);
-    if (!els.threadPanel.hidden) openThreads();
+    scheduleThreadListRefresh();
   }
   if (data.type === "error") upsertAssistantMessage(`错误：${data.text}`, true, "error");
   if (data.type === "state") renderState(data);

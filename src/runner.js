@@ -9,7 +9,8 @@ import {
   followModeForState, saveFollowModeForState, rememberMessageMeta,
   readThreadNames, threadName,
   readThreadCompletions, setThreadCompletion, syncLoadedCounts,
-  modelSettingsForThread, saveThreadModelSettings, deleteThreadModelSettings
+  modelSettingsForThread, saveThreadModelSettings, deleteThreadModelSettings,
+  updateStateModelSettings
 } from "./store.js";
 import { stateAbsoluteCwd, safeStateCwdValue, stateCwdValue, assertProjectDirectory } from "./paths.js";
 import {
@@ -66,13 +67,49 @@ export function setSelectedRunnerKey(key) { selectedRunnerKey = key; }
 export function setFollowMode(mode) { followMode = mode; }
 
 let localAppServer = null;
+const settingsBoundServers = new WeakSet();
+
+async function applyAppServerThreadSettings(update = {}, connectorId = "") {
+  if (!update.threadId || !update.model) return;
+  const settings = {
+    model: update.model,
+    reasoningEffort: update.reasoningEffort || "",
+    updatedAt: update.updatedAt || new Date().toISOString(),
+    source: update.source || "app-server"
+  };
+  for (const runner of uniqueRunners()) {
+    if ((runner.connectorId || "") !== connectorId || runner.state.threadId !== update.threadId) continue;
+    runner.state.model = settings.model;
+    runner.state.reasoningEffort = settings.reasoningEffort;
+    runner.state.modelSettingsUpdatedAt = settings.updatedAt;
+    runner.state.modelSettingsSource = settings.source;
+  }
+  broadcast({
+    type: "model_settings_update",
+    connectorId,
+    threadId: update.threadId,
+    model: settings.model,
+    reasoningEffort: settings.reasoningEffort,
+    modelSettingsUpdatedAt: settings.updatedAt,
+    modelSettingsSource: settings.source
+  });
+  await saveThreadModelSettings(update.threadId, settings, connectorId);
+}
+
+function bindAppServerSettings(server, connectorId = "") {
+  if (!server || settingsBoundServers.has(server)) return server;
+  settingsBoundServers.add(server);
+  server.onThreadSettingsUpdate = (update) => applyAppServerThreadSettings(update, connectorId);
+  return server;
+}
+
 function getLocalAppServer() {
-  if (!localAppServer) localAppServer = createLocalAppServer();
+  if (!localAppServer) localAppServer = bindAppServerSettings(createLocalAppServer(), "");
   return localAppServer;
 }
 
 export function appServerForState(state = {}) {
-  if (state.connectorId) return getConnectorAppServer(state.connectorId);
+  if (state.connectorId) return bindAppServerSettings(getConnectorAppServer(state.connectorId), state.connectorId);
   return getLocalAppServer();
 }
 
@@ -83,7 +120,12 @@ async function sessionModelSettings(state = {}) {
     const provider = state.connectorId ? remoteSessionProvider(state.connectorId) : localSessionProvider;
     const thread = await loadThreadFromProvider(state.threadId, provider).catch(() => null);
     if (thread?.model) {
-      const inferred = { model: thread.model, reasoningEffort: thread.reasoningEffort || "" };
+      const inferred = {
+        model: thread.model,
+        reasoningEffort: thread.reasoningEffort || "",
+        updatedAt: thread.settingsUpdatedAt || thread.updatedAt || new Date().toISOString(),
+        source: "session"
+      };
       await saveThreadModelSettings(state.threadId, inferred, state.connectorId || "");
       return inferred;
     }
@@ -93,32 +135,115 @@ async function sessionModelSettings(state = {}) {
   return server.configuredModelSettings(cwd);
 }
 
-export async function ensureStateModelSettings(state = {}) {
+function settingsTime(value = "") {
+  const parsed = value ? Date.parse(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function observedModelSettings(thread = null) {
+  if (!thread?.model) return null;
+  return {
+    model: thread.model,
+    reasoningEffort: thread.reasoningEffort || "",
+    updatedAt: thread.settingsUpdatedAt || "",
+    source: "session"
+  };
+}
+
+export function preferredModelSettings(saved = null, observed = null) {
+  if (!saved?.model) return observed;
+  if (!observed?.model) return saved;
+  const savedAt = settingsTime(saved.updatedAt);
+  const observedAt = settingsTime(observed.updatedAt);
+  if (!observedAt) return saved;
+  if (!savedAt || observedAt >= savedAt) return observed;
+  return saved;
+}
+
+export async function ensureStateModelSettings(state = {}, observedThread = null) {
+  const connectorId = state.connectorId || "";
   if (state.threadId) {
-    const saved = await modelSettingsForThread(state.threadId, state.connectorId || "");
-    if (saved?.model) {
-      state.model = saved.model;
-      state.reasoningEffort = saved.reasoningEffort || "";
+    const saved = await modelSettingsForThread(state.threadId, connectorId);
+    const observed = observedModelSettings(observedThread);
+    const preferred = preferredModelSettings(saved, observed);
+    if (preferred?.model) {
+      state.model = preferred.model;
+      state.reasoningEffort = preferred.reasoningEffort || "";
+      state.modelSettingsUpdatedAt = preferred.updatedAt || "";
+      state.modelSettingsSource = preferred.source || "";
+      if (preferred === observed && (
+        saved?.model !== observed.model
+        || saved?.reasoningEffort !== observed.reasoningEffort
+        || saved?.updatedAt !== observed.updatedAt
+      )) {
+        await saveThreadModelSettings(state.threadId, observed, connectorId);
+      }
       return state;
     }
   }
-  if (state.model && state.reasoningEffort) {
-    if (state.threadId) await saveThreadModelSettings(state.threadId, state, state.connectorId || "");
+  if (state.model) {
+    if (!state.modelSettingsUpdatedAt) state.modelSettingsUpdatedAt = new Date(0).toISOString();
+    state.modelSettingsSource = state.modelSettingsSource || "legacy-state";
+    if (state.threadId) await saveThreadModelSettings(state.threadId, {
+      ...state,
+      updatedAt: state.modelSettingsUpdatedAt,
+      source: state.modelSettingsSource
+    }, connectorId);
     return state;
   }
   const settings = await sessionModelSettings(state);
   state.model = state.model || settings.model || "";
   state.reasoningEffort = state.reasoningEffort || settings.reasoningEffort || "";
+  state.modelSettingsUpdatedAt = state.modelSettingsUpdatedAt || settings.updatedAt || "";
+  state.modelSettingsSource = state.modelSettingsSource || settings.source || "config";
   return state;
 }
 
-async function saveStateModelSettings(state = {}, runner = null) {
-  if (state.threadId) await saveThreadModelSettings(state.threadId, state, state.connectorId || "");
+export async function syncSharedThreadSettings(state = {}) {
+  if (state.connectorId || !state.threadId) return state;
+  const server = appServerForState(state);
+  const socketPath = server.transport?.preferred?.socketPath;
+  if (!socketPath || !existsSync(socketPath)) return state;
+  await server.ensureStarted();
+  if (!server.usingSharedAppServer || server.turn) return state;
+  const live = await server.readThreadSettings(state.threadId, stateAbsoluteCwd(state.cwd || ""));
+  if (!live?.model) return state;
+  if (live.model === state.model && (live.reasoningEffort || "") === (state.reasoningEffort || "")) return state;
+  state.model = live.model;
+  state.reasoningEffort = live.reasoningEffort || "";
+  state.modelSettingsUpdatedAt = new Date().toISOString();
+  state.modelSettingsSource = "app-server";
+  await saveThreadModelSettings(state.threadId, {
+    model: state.model,
+    reasoningEffort: state.reasoningEffort,
+    updatedAt: state.modelSettingsUpdatedAt,
+    source: state.modelSettingsSource
+  }, "");
+  return state;
+}
+
+async function saveStateModelSettings(state = {}, runner = null, options = {}) {
+  const updatedAt = options.updatedAt || new Date().toISOString();
+  const source = options.source || "web";
+  state.modelSettingsUpdatedAt = updatedAt;
+  state.modelSettingsSource = source;
+  if (state.threadId) await saveThreadModelSettings(state.threadId, {
+    ...state,
+    updatedAt,
+    source
+  }, state.connectorId || "");
   if (runner) {
     runner.state.model = state.model || "";
     runner.state.reasoningEffort = state.reasoningEffort || "";
+    runner.state.modelSettingsUpdatedAt = updatedAt;
+    runner.state.modelSettingsSource = source;
   }
-  await writeState(syncLoadedCounts(state), state.connectorId || "");
+  await updateStateModelSettings(state, {
+    model: state.model,
+    reasoningEffort: state.reasoningEffort,
+    updatedAt,
+    source
+  }, state.connectorId || "");
 }
 
 function publicModelSettings(state = {}, models = [], running = false) {
@@ -126,6 +251,8 @@ function publicModelSettings(state = {}, models = [], running = false) {
     threadId: state.threadId || "",
     model: state.model || "",
     reasoningEffort: state.reasoningEffort || "",
+    modelSettingsUpdatedAt: state.modelSettingsUpdatedAt || "",
+    modelSettingsSource: state.modelSettingsSource || "",
     running,
     models: models.map((item) => ({
       id: item.id || item.model,
@@ -149,18 +276,37 @@ export async function sessionModelSettingsPayload(connectorId = "") {
   const external = runner?.running ? null : await externalStatusForState(state, true);
   const running = Boolean(runner?.running || external?.running);
   const selectedState = runner?.state || state;
-  await ensureStateModelSettings(selectedState);
+  await ensureStateModelSettings(selectedState, external);
   const server = runner?.appServer || appServerForState(selectedState);
-  if (selectedState.threadId && !running && !server.turn) {
-    const cwd = selectedState.connectorId ? String(selectedState.cwd || "") : stateAbsoluteCwd(selectedState.cwd || "");
-    const external = await server.readThreadSettings(selectedState.threadId, cwd).catch(() => null);
-    if (external?.model) {
-      selectedState.model = external.model;
-      selectedState.reasoningEffort = external.reasoningEffort || selectedState.reasoningEffort;
-      await saveStateModelSettings(selectedState, runner);
+  const models = await server.modelOptions();
+  if (!connectorId && selectedState.threadId && server.usingSharedAppServer && !server.turn) {
+    const cwd = stateAbsoluteCwd(selectedState.cwd || "");
+    const live = await server.readThreadSettings(selectedState.threadId, cwd).catch(() => null);
+    if (live?.model && (
+      live.model !== selectedState.model
+      || (live.reasoningEffort || "") !== (selectedState.reasoningEffort || "")
+    )) {
+      selectedState.model = live.model;
+      selectedState.reasoningEffort = live.reasoningEffort || "";
+      selectedState.modelSettingsUpdatedAt = new Date().toISOString();
+      selectedState.modelSettingsSource = "app-server";
+      await saveThreadModelSettings(selectedState.threadId, {
+        model: selectedState.model,
+        reasoningEffort: selectedState.reasoningEffort,
+        updatedAt: selectedState.modelSettingsUpdatedAt,
+        source: selectedState.modelSettingsSource
+      }, "");
     }
   }
-  return publicModelSettings(selectedState, await server.modelOptions(), running);
+  if (!runner?.running) {
+    await updateStateModelSettings(selectedState, {
+      model: selectedState.model,
+      reasoningEffort: selectedState.reasoningEffort,
+      updatedAt: selectedState.modelSettingsUpdatedAt,
+      source: selectedState.modelSettingsSource
+    }, connectorId);
+  }
+  return publicModelSettings(selectedState, models, running);
 }
 
 export async function updateSessionModelSettings(update = {}, connectorId = "") {
@@ -168,18 +314,18 @@ export async function updateSessionModelSettings(update = {}, connectorId = "") 
   state.connectorId = state.connectorId || connectorId;
   const runner = await runnerForState(state, false);
   if (runner?.running) throw Object.assign(new Error("当前会话正在处理，请结束或中断后再切换。"), { statusCode: 409 });
-  await assertExternalSessionIdle(state);
-  await ensureStateModelSettings(state);
+  const observed = await assertExternalSessionIdle(state);
+  await ensureStateModelSettings(state, observed);
   const server = runner?.appServer || appServerForState(state);
   const cwd = state.connectorId ? String(state.cwd || "") : stateAbsoluteCwd(state.cwd || "");
   if (update.model) {
     const result = await server.selectModel(update.model, state.reasoningEffort, state.threadId, cwd);
-    state.model = result.selected.model || result.selected.id;
+    state.model = result.model || result.selected.model || result.selected.id;
     state.reasoningEffort = result.effort;
   }
   if (update.reasoningEffort) {
     const result = await server.selectReasoningEffort(update.reasoningEffort, state.model, state.threadId, cwd);
-    state.model = result.selected.model || result.selected.id;
+    state.model = result.model || result.selected.model || result.selected.id;
     state.reasoningEffort = result.option.reasoningEffort;
   }
   if (!update.model && !update.reasoningEffort) {
@@ -343,7 +489,17 @@ export async function createRunner(state = {}) {
     key,
     connectorId: state.connectorId || "",
     cwd: state.cwd || "",
-    state: syncLoadedCounts({ threadId: state.threadId || "", connectorId: state.connectorId || "", cwd: state.cwd || "", model: state.model || "", reasoningEffort: state.reasoningEffort || "", messages: Array.isArray(state.messages) ? state.messages : [], inflight: state.inflight || null }),
+    state: syncLoadedCounts({
+      threadId: state.threadId || "",
+      connectorId: state.connectorId || "",
+      cwd: state.cwd || "",
+      model: state.model || "",
+      reasoningEffort: state.reasoningEffort || "",
+      modelSettingsUpdatedAt: state.modelSettingsUpdatedAt || "",
+      modelSettingsSource: state.modelSettingsSource || "",
+      messages: Array.isArray(state.messages) ? state.messages : [],
+      inflight: state.inflight || null
+    }),
     appServer,
     running: false,
     followMode: await followModeForState(state, state.connectorId || ""),
@@ -373,7 +529,12 @@ export async function runnerForState(state = {}, create = false) {
 export async function rememberRunnerThread(runner, state = runner.state) {
   if (!runner || !state.threadId) return;
   runner.state.threadId = state.threadId;
-  await saveThreadModelSettings(state.threadId, runner.state, runner.connectorId || "");
+  await saveThreadModelSettings(state.threadId, {
+    model: runner.state.model,
+    reasoningEffort: runner.state.reasoningEffort,
+    updatedAt: runner.state.modelSettingsUpdatedAt,
+    source: runner.state.modelSettingsSource
+  }, runner.connectorId || "");
   runners.set(`${runner.connectorId ? `${runner.connectorId}:` : ""}thread:${state.threadId}`, runner);
 }
 
@@ -621,6 +782,7 @@ export async function runRemoteTask(message, runner) {
   const state = runner.state;
   const runnerStartedAtMs = Number(runner.taskStartedAtMs);
   const connectionMessageId = `codex-connection-${Date.now()}`;
+  let taskOk = false;
   let connected = false;
   let waitTimer = null;
   let timeoutTimer = null;
@@ -694,6 +856,7 @@ export async function runRemoteTask(message, runner) {
       }
       ok = false;
     }
+    taskOk = ok;
     const savedAnswers = answers.length ? answers : ["Codex 没有返回文本。"];
     const inflightStartedAtMs = state.inflight?.startedAt ? Date.parse(state.inflight.startedAt) : NaN;
     const startedAtMs = Number.isFinite(runnerStartedAtMs) ? runnerStartedAtMs : inflightStartedAtMs;
@@ -719,7 +882,6 @@ export async function runRemoteTask(message, runner) {
         broadcastRunner(runner, payload);
       });
     }
-    broadcastRunner(runner, { type: "done", ok, threadId: runner.state.threadId });
     const taskDoneMessage = completionMessage(savedAnswers);
     if (ok && taskDoneMessage) {
       notifyWechatTaskDone(taskDoneMessage);
@@ -737,13 +899,20 @@ export async function runRemoteTask(message, runner) {
     const failurePayload = { type: "message", role: "assistant", content: failureMessage, messageId: `task-failed-${Date.now()}`, final: true };
     if (Number.isFinite(runnerStartedAtMs)) failurePayload.taskDurationMs = Math.max(0, Date.now() - runnerStartedAtMs);
     broadcastRunner(runner, failurePayload);
-    broadcastRunner(runner, { type: "done", ok: false, threadId: runner.state.threadId });
   } finally {
-    runner.running = false;
+    // Reflect the terminal state before emitting done. Previously done first
+    // emitted a runner_status that still contained this finished thread, so a
+    // browser refresh could restore the stale red running state. A queued turn
+    // keeps the overall session running while it is handed to the next task.
+    const willContinue = runner.messageQueue.length > 0;
+    runner.running = willContinue;
     runner.reconnecting = false;
     runner.taskStartedAtMs = null;
     runner.steerMessages = [];
-    await markThreadCompletedUnread(runner.state.threadId, runner).catch((markError) => console.error("failed to mark completed thread", markError));
+    broadcastRunner(runner, { type: "done", ok: taskOk, threadId: runner.state.threadId });
+    if (!willContinue) {
+      await markThreadCompletedUnread(runner.state.threadId, runner).catch((markError) => console.error("failed to mark completed thread", markError));
+    }
     processNextQueuedMessage(runner);
   }
 }
@@ -791,7 +960,11 @@ export async function submitRemoteMessage(message, requestedFollowMode = "", con
   const selectedState = await readState(connectorId);
   selectedState.connectorId = selectedState.connectorId || connectorId;
   const selectedRunner = await runnerForState(selectedState, false);
-  if (!selectedRunner?.running) await assertExternalSessionIdle(selectedState);
+  if (!selectedRunner?.running) {
+    const observed = await assertExternalSessionIdle(selectedState);
+    await ensureStateModelSettings(selectedState, observed);
+    await writeState(syncLoadedCounts(selectedState), connectorId);
+  }
   const localAnswer = await localCommandResponse(text, connectorId);
   if (localAnswer) {
     const state = await readState(connectorId);
@@ -879,7 +1052,7 @@ export async function listThreads(connectorId = "") {
   }
   for (const item of entries) {
     const parsed = (await import("./threads.js")).parseSessionFile(await provider.readFile(item.file), item.file);
-    if (!parsed.threadId) continue;
+    if (!parsed.threadId || parsed.threadSource === "subagent" || includedThreadIds.has(parsed.threadId)) continue;
     const name = typeof names[parsed.threadId] === "string" ? names[parsed.threadId] : "";
     const runner = runningByThread.get(parsed.threadId);
     const externalRunning = !runner?.running && isExternalTaskRunning(parsed, item.mtimeMs);
@@ -942,7 +1115,7 @@ export async function selectRemoteThread(rawThreadId, connectorId = "") {
   await clearThreadCompletedUnread(threadId);
   const messages = await mergeLocalMessageMeta(thread.threadId, thread.messages, []);
   const state = { threadId: thread.threadId, connectorId, cwd: thread.cwd || "", model: thread.model || "", reasoningEffort: thread.reasoningEffort || "", messages, loadedCount: messages.length, messageCount: thread.messageCount, inflight: null };
-  await ensureStateModelSettings(state);
+  await ensureStateModelSettings(state, thread);
   selectedRunnerKey = runnerKeyForState(state);
   contextUsage = thread.contextUsage || null;
   const name = await threadName(thread.threadId);

@@ -7,7 +7,8 @@
 ## 架构
 
 ```
-浏览器 PWA  <--HTTP+SSE-->  总控端 server.js  <--stdio JSON-RPC-->  codex app-server（本机）
+浏览器 PWA  <--HTTP+SSE-->  总控端 server.js  <--Unix WebSocket-->  Codex Desktop 共享 app-server（本机）
+                              |                    └─不可用时回退 stdio 独立进程
                               |
                               +--<WebSocket 隧道>-->  被控端 connector  -->  被控端 codex app-server
                               |
@@ -56,6 +57,8 @@ cp .env.example .env
 | `CODEX_BIN` | `/root/.local/bin/codex` | codex 可执行文件路径 |
 | `CODEX_MODEL` | Codex CLI 当前配置 | 可选的模型覆盖值 |
 | `CODEX_REASONING_EFFORT` | Codex CLI 当前配置 | 可选的推理强度覆盖值 |
+| `CODEX_REMOTE_SHARED_APP_SERVER` | `1` | 优先连接本机 Codex Desktop 共享 app-server；设为 `0` 可禁用 |
+| `CODEX_APP_SERVER_SOCKET` | `$CODEX_HOME/app-server-control/app-server-control.sock` | 可选的共享 Unix Socket 路径 |
 | `CODEX_WORK_DIR` | 项目父目录 | 工作目录根（网页端文件管理限制在此目录下） |
 | `CODEX_EXTERNAL_SESSION_POLL_MS` | `1000` | 本机/被控端 Codex Desktop/CLI 外部会话同步间隔 |
 | `CODEX_EXTERNAL_SESSION_STALE_MS` | `7200000` | 无 `task_complete` 且长时间无文件活动时的故障兜底 |
@@ -141,6 +144,8 @@ location /codex-remote/ {
 > 反向代理用子路径时，`X-Forwarded-Prefix` 头要让后端知道前缀，否则静态资源路径会错。
 
 ## 接入被控端
+
+控制总控端所在的本机不需要安装被控端：服务会直接连接本机 Codex Desktop/CLI。只有控制其他电脑时才需要安装被控端 agent。
 
 1. 在 `.env` 设置 `CODEX_REMOTE_CONNECTOR_TOKEN`（与登录密码不同更安全）
 2. 在被控电脑上安装被控端 agent（见被控端仓库 README），安装时填总控端 URL + 配对令牌

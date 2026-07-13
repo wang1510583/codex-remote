@@ -28,6 +28,11 @@ export class CodexAppServer {
     this.turn = null;
     this.contextUsage = null;
     this.onContextUpdate = null;
+    this.onThreadSettingsUpdate = null;
+    this.threadSettingsWaiters = new Map();
+    this.starting = null;
+    this.settingsUpdatePromise = null;
+    this.turnStarting = false;
   }
 
   emit(event) {
@@ -37,6 +42,17 @@ export class CodexAppServer {
 
   async ensureStarted() {
     if (this.transport.alive && this.initialized) return;
+    if (this.starting) return this.starting;
+    const starting = this.startAndInitialize();
+    this.starting = starting;
+    try {
+      await starting;
+    } finally {
+      if (this.starting === starting) this.starting = null;
+    }
+  }
+
+  async startAndInitialize() {
     this.pending.clear();
     this.initialized = false;
     this.activeThreadId = "";
@@ -54,14 +70,24 @@ export class CodexAppServer {
       this.turn = null;
     });
 
-    await this.transport.start();
-    try {
-      await this.request("initialize", {
+    const initialize = () => this.request("initialize", {
         clientInfo: { name: "codex-remote-web", title: "Codex Remote Web", version: "1.0.0" },
         capabilities: { experimentalApi: true, requestAttestation: false }
-      });
+      }, null, this.transport.mode === "shared" ? 3000 : 15000);
+    await this.transport.start();
+    try {
+      await initialize();
     } catch (error) {
-      if (!/already initialized/i.test(error?.message || "")) throw error;
+      if (/already initialized/i.test(error?.message || "")) {
+        // A few older app-server builds initialize the process rather than the
+        // connection. Reusing that process is still safe.
+      } else if (this.transport.mode === "shared" && typeof this.transport.fallbackToStandalone === "function") {
+        console.warn(`共享 Codex app-server 初始化失败，已回退到独立进程：${error?.message || error}`);
+        await this.transport.fallbackToStandalone();
+        await initialize();
+      } else {
+        throw error;
+      }
     }
     this.initialized = true;
   }
@@ -69,6 +95,10 @@ export class CodexAppServer {
   rejectAll(error) {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    for (const waiters of this.threadSettingsWaiters.values()) {
+      for (const waiter of waiters) waiter.finish(null);
+    }
+    this.threadSettingsWaiters.clear();
     const turn = this.turn;
     this.turn = null;
     if (turn) {
@@ -105,10 +135,70 @@ export class CodexAppServer {
     return true;
   }
 
+  dispatchThreadSettingsUpdate(params = {}) {
+    if (!params.threadId || !params.threadSettings || typeof params.threadSettings !== "object") return false;
+    const update = {
+      threadId: String(params.threadId),
+      model: String(params.threadSettings.model || ""),
+      reasoningEffort: normalizeReasoningEffort(params.threadSettings.effort),
+      cwd: String(params.threadSettings.cwd || ""),
+      updatedAt: new Date().toISOString(),
+      source: "app-server"
+    };
+    const waiters = this.threadSettingsWaiters.get(update.threadId);
+    if (waiters) {
+      for (const waiter of [...waiters]) {
+        if (waiter.matches(update)) waiter.finish(update);
+      }
+    }
+    try {
+      const pending = this.onThreadSettingsUpdate?.(update);
+      if (pending && typeof pending.catch === "function") {
+        pending.catch((error) => console.error("failed to handle thread settings update", error));
+      }
+    } catch (error) {
+      console.error("failed to handle thread settings update", error);
+    }
+    return true;
+  }
+
+  waitForThreadSettingsUpdate(threadId, predicate = () => true, timeoutMs = 5000) {
+    if (typeof predicate === "number") {
+      timeoutMs = predicate;
+      predicate = () => true;
+    }
+    let settled = false;
+    let resolvePromise;
+    const promise = new Promise((resolve) => { resolvePromise = resolve; });
+    const waiter = {
+      matches: (update) => {
+        try { return predicate(update); }
+        catch { return false; }
+      },
+      finish: (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const waiters = this.threadSettingsWaiters.get(threadId);
+        if (waiters) {
+          waiters.delete(waiter);
+          if (!waiters.size) this.threadSettingsWaiters.delete(threadId);
+        }
+        resolvePromise(value);
+      }
+    };
+    const timer = setTimeout(() => waiter.finish(null), timeoutMs);
+    const waiters = this.threadSettingsWaiters.get(threadId) || new Set();
+    waiters.add(waiter);
+    this.threadSettingsWaiters.set(threadId, waiters);
+    return { promise, cancel: () => waiter.finish(null) };
+  }
+
   onNotification(message) {
     const method = message.method;
     const params = message.params || {};
     const payload = params.payload || params.event || params;
+    if (method === "thread/settings/updated") this.dispatchThreadSettingsUpdate(params);
     const notificationTurnId = params.turnId || params.turn?.id || "";
     const notificationMatchesTurn = Boolean(this.turn
       && (!params.threadId || params.threadId === this.turn.threadId)
@@ -233,15 +323,27 @@ export class CodexAppServer {
     this.emit({ type: "reconnecting", reconnecting: next, message: turn.reconnectMessage, running: true });
   }
 
-  request(method, params, onResult = null) {
+  request(method, params, onResult = null, timeoutMs = 0) {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
-      this.pending.set(id, { resolve, reject, onResult });
+      const timer = timeoutMs > 0 ? setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Codex 请求 ${method} 超时。`));
+      }, timeoutMs) : null;
+      const finishResolve = (value) => {
+        if (timer) clearTimeout(timer);
+        resolve(value);
+      };
+      const finishReject = (error) => {
+        if (timer) clearTimeout(timer);
+        reject(error);
+      };
+      this.pending.set(id, { resolve: finishResolve, reject: finishReject, onResult });
       try {
         this.transport.send(JSON.stringify({ id, method, params }));
       } catch (error) {
         this.pending.delete(id);
-        reject(error);
+        finishReject(error);
       }
     });
   }
@@ -267,48 +369,57 @@ export class CodexAppServer {
   }
 
   async runTurn(message, state, options = {}) {
+    if (this.settingsUpdatePromise) await this.settingsUpdatePromise.catch(() => {});
     if (this.turn) throw new Error("Codex 正在处理上一条消息。");
-    const cwd = this.resolveCwd(state);
-    const settings = {
-      model: options.model || state.model || "",
-      reasoningEffort: options.reasoningEffort || state.reasoningEffort || ""
-    };
-    state.threadId = await this.ensureThread(state.threadId, cwd, settings);
-    if (typeof options.onConnected === "function") options.onConnected();
-    if (typeof options.onThreadReady === "function") await options.onThreadReady(state);
-    return await new Promise((resolve, reject) => {
-      const turn = {
-        threadId: state.threadId,
-        turnId: "",
-        startedAtMs: Date.now(),
-        answers: [],
-        currentMessage: null,
-        imageIds: new Set(),
-        pendingImages: [],
-        reconnecting: false,
-        reconnectMessage: "",
-        lastError: null,
-        onActivity: typeof options.onActivity === "function" ? options.onActivity : null,
-        resolve,
-        reject
+    this.turnStarting = true;
+    try {
+      const cwd = this.resolveCwd(state);
+      const settings = {
+        model: options.model || state.model || "",
+        reasoningEffort: options.reasoningEffort || state.reasoningEffort || ""
       };
-      this.turn = turn;
-      this.request("turn/start", {
-        threadId: state.threadId,
-        cwd,
-        model: settings.model || undefined,
-        effort: settings.reasoningEffort || undefined,
-        input: [{ type: "text", text: message, text_elements: [] }]
-      }, (result) => {
-        turn.turnId = result.turn.id;
-      }).catch((error) => {
-        if (this.turn === turn) {
-          this.turn = null;
-          this.setTurnReconnecting(turn, false);
-        }
-        reject(error);
+      state.threadId = await this.ensureThread(state.threadId, cwd, settings);
+      if (typeof options.onConnected === "function") options.onConnected();
+      if (typeof options.onThreadReady === "function") await options.onThreadReady(state);
+      const running = new Promise((resolve, reject) => {
+        const turn = {
+          threadId: state.threadId,
+          turnId: "",
+          startedAtMs: Date.now(),
+          answers: [],
+          currentMessage: null,
+          imageIds: new Set(),
+          pendingImages: [],
+          reconnecting: false,
+          reconnectMessage: "",
+          lastError: null,
+          onActivity: typeof options.onActivity === "function" ? options.onActivity : null,
+          resolve,
+          reject
+        };
+        this.turn = turn;
+        this.request("turn/start", {
+          threadId: state.threadId,
+          cwd,
+          model: settings.model || undefined,
+          effort: settings.reasoningEffort || undefined,
+          input: [{ type: "text", text: message, text_elements: [] }]
+        }, (result) => {
+          turn.turnId = result.turn.id;
+        }).catch((error) => {
+          if (this.turn === turn) {
+            this.turn = null;
+            this.setTurnReconnecting(turn, false);
+          }
+          reject(error);
+        });
       });
-    });
+      this.turnStarting = false;
+      return await running;
+    } catch (error) {
+      this.turnStarting = false;
+      throw error;
+    }
   }
 
   async listModels() {
@@ -359,13 +470,61 @@ export class CodexAppServer {
     };
   }
 
-  async updateThreadModelSettings({ model, effort, threadId = "", cwd = codexWorkDir }) {
-    if (this.turn) throw new Error("当前回合正在运行，请结束或中断后再切换模型设置。");
-    if (threadId) {
-      const id = await this.ensureThread(threadId, cwd, { model, reasoningEffort: effort });
-      await this.request("thread/settings/update", { threadId: id, model, effort });
+  async updateThreadModelSettings(update = {}) {
+    const previous = this.settingsUpdatePromise;
+    const operation = (async () => {
+      if (previous) await previous.catch(() => {});
+      if (this.turn || this.turnStarting) throw new Error("当前回合正在运行，请结束或中断后再切换模型设置。");
+      return await this.applyThreadModelSettingsUpdate(update);
+    })();
+    this.settingsUpdatePromise = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.settingsUpdatePromise === operation) this.settingsUpdatePromise = null;
     }
-    return { model, effort };
+  }
+
+  async applyThreadModelSettingsUpdate(update = {}) {
+    const { model, effort, threadId = "", cwd = codexWorkDir } = update;
+    const hasModel = Object.prototype.hasOwnProperty.call(update, "model") && Boolean(model);
+    const hasEffort = Object.prototype.hasOwnProperty.call(update, "effort") && Boolean(effort);
+    if (!threadId) return { model, effort };
+    if (!hasModel && !hasEffort) throw new Error("请选择模型或思考强度。");
+    await this.ensureStarted();
+    const resolvedCwd = this.isRemote ? String(cwd || "") : projectPath(cwd || "");
+    const current = await this.readThreadSettings(threadId, resolvedCwd);
+    const desiredModel = hasModel ? String(model) : (current?.model || "");
+    const desiredEffort = hasEffort
+      ? normalizeReasoningEffort(effort)
+      : normalizeReasoningEffort(current?.reasoningEffort || "");
+    const matchesDesired = (settings = {}) => (
+      (!hasModel || settings.model === desiredModel)
+      && (!hasEffort || normalizeReasoningEffort(settings.reasoningEffort) === desiredEffort)
+    );
+    if (matchesDesired(current)) {
+      return { model: current.model, effort: current.reasoningEffort };
+    }
+
+    const waiter = this.waitForThreadSettingsUpdate(threadId, matchesDesired);
+    try {
+      const params = { threadId };
+      if (hasModel) params.model = desiredModel;
+      if (hasEffort) params.effort = desiredEffort;
+      await this.request("thread/settings/update", params);
+      const notified = await waiter.promise;
+      if (notified && matchesDesired(notified)) {
+        return { model: notified.model, effort: notified.reasoningEffort };
+      }
+      const verified = await this.readThreadSettings(threadId, resolvedCwd);
+      if (verified && matchesDesired(verified)) {
+        return { model: verified.model, effort: verified.reasoningEffort };
+      }
+      throw new Error("Codex 没有确认模型设置已应用，请稍后重试。");
+    } catch (error) {
+      waiter.cancel();
+      throw error;
+    }
   }
 
   async selectModel(requestedModel, currentEffort = "", threadId = "", cwd = codexWorkDir) {
@@ -378,16 +537,28 @@ export class CodexAppServer {
     const efforts = (selected.supportedReasoningEfforts || [])
       .map((item) => item.reasoningEffort)
       .filter(Boolean);
-    const effort = efforts.includes(currentEffort)
-      ? currentEffort
-      : (selected.defaultReasoningEffort || efforts[0] || currentEffort);
-    await this.updateThreadModelSettings({ model: selected.model || selected.id, effort, threadId, cwd });
-    return { selected, effort, effortChanged: effort !== currentEffort };
+    const live = threadId ? await this.readThreadSettings(threadId, cwd) : null;
+    const baseEffort = live?.reasoningEffort || currentEffort;
+    const effort = efforts.includes(baseEffort)
+      ? baseEffort
+      : (selected.defaultReasoningEffort || efforts[0] || baseEffort);
+    const patch = { model: selected.model || selected.id, threadId, cwd };
+    if (effort !== baseEffort) patch.effort = effort;
+    const applied = await this.updateThreadModelSettings(patch);
+    const appliedEffort = applied.effort || effort;
+    return {
+      selected,
+      model: applied.model || selected.model || selected.id,
+      effort: appliedEffort,
+      effortChanged: appliedEffort !== currentEffort
+    };
   }
 
   async selectReasoningEffort(requestedEffort, currentModel = "", threadId = "", cwd = codexWorkDir) {
     const models = await this.modelOptions();
-    const selected = models.find((item) => [item.model, item.id].includes(currentModel))
+    const live = threadId ? await this.readThreadSettings(threadId, cwd) : null;
+    const liveModel = live?.model || currentModel;
+    const selected = models.find((item) => [item.model, item.id].includes(liveModel))
       || models.find((item) => item.isDefault)
       || models[0];
     if (!selected) throw new Error("当前 Codex CLI 没有返回可用模型。");
@@ -396,13 +567,16 @@ export class CodexAppServer {
       (item) => String(item.reasoningEffort || "").toLowerCase() === wanted
     );
     if (!option) throw new Error(`模型 ${selected.model || selected.id} 不支持思考强度：${requestedEffort}`);
-    await this.updateThreadModelSettings({
-      model: selected.model || selected.id,
+    const applied = await this.updateThreadModelSettings({
       effort: option.reasoningEffort,
       threadId,
       cwd
     });
-    return { selected, option };
+    return {
+      selected,
+      model: applied.model || selected.model || selected.id,
+      option: { ...option, reasoningEffort: applied.effort || option.reasoningEffort }
+    };
   }
 
   async readConfig(cwd = codexWorkDir) {
@@ -468,6 +642,10 @@ export class CodexAppServer {
       input: [{ type: "text", text: message, text_elements: [] }]
     });
     return true;
+  }
+
+  get usingSharedAppServer() {
+    return Boolean(this.transport?.usingShared);
   }
 }
 

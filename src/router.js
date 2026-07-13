@@ -8,14 +8,15 @@ import { remotePassword, authToken, codexWorkDir, disableLocal } from "./config.
 import { clients, broadcast, sendEvent, changesSince } from "./sse.js";
 import {
   readState, writeState, saveDraftForState, draftForState, syncLoadedCounts,
-  readConnectorViewState, writeConnectorViewState, setThreadName
+  readConnectorViewState, writeConnectorViewState, setThreadName, writeStateIfIdle
 } from "./store.js";
 import {
   submitRemoteMessage, selectRemoteThread, createRemoteSession, loadThreadPage,
   listThreads, deleteThread, runnerForIncomingState, statusPayload, runnerForState,
   selectedRunner, setSelectedRunnerKey, clearThreadCompletedUnread, markInterruptedInflight,
   runningThreads, runnerKeyForState, ensureStateModelSettings,
-  sessionModelSettingsPayload, updateSessionModelSettings, usagePayload, resetUsageLimit
+  sessionModelSettingsPayload, updateSessionModelSettings, usagePayload, resetUsageLimit,
+  syncSharedThreadSettings
 } from "./runner.js";
 import { isInternalMessage, mergeLocalMessageMeta } from "./threads.js";
 import {
@@ -160,12 +161,13 @@ export async function handle(req, res) {
           const sessionMessages = await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages);
           const messages = mergeStateMessages(sessionMessages, state.messages);
           state = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length), inflight: null };
-          await writeState(state, connectorId);
         }
       } else {
         stopExternalSessionMonitor(connectorId);
       }
-      state = await ensureStateModelSettings(state).catch(() => state);
+      state = await ensureStateModelSettings(state, loadedThread).catch(() => state);
+      state = await syncSharedThreadSettings(state).catch(() => state);
+      if (loadedThread && !runner?.running) await writeStateIfIdle(state, connectorId);
       setSelectedRunnerKey(runner ? runner.key : runnerKeyForState(state));
       const payload = runner?.running ? runner.state : state;
       const connectorsPayload = await remoteConnectorsPayload();

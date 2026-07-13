@@ -1048,18 +1048,21 @@ textarea:focus {
 }
 
 .threadItem.active {
-  border-color: #f3f0e8;
-  background: #111;
+  border-color: #60a5fa;
+  background: #111827;
+  box-shadow: inset 3px 0 0 #60a5fa, 0 0 0 1px rgba(96, 165, 250, 0.28);
 }
 
 .threadItem.running {
   border-color: #ef4444;
   background: rgba(127, 29, 29, 0.78);
+  box-shadow: inset 3px 0 0 #ef4444;
 }
 
 .threadItem.running.active {
-  border-color: #ffb4a8;
+  border-color: #60a5fa;
   background: rgba(153, 27, 27, 0.86);
+  box-shadow: inset 3px 0 0 #60a5fa, 0 0 0 1px rgba(96, 165, 250, 0.38);
 }
 
 .threadItem.completedUnread {
@@ -1068,8 +1071,9 @@ textarea:focus {
 }
 
 .threadItem.completedUnread.active {
-  border-color: #86efac;
+  border-color: #60a5fa;
   background: rgba(22, 101, 52, 0.88);
+  box-shadow: inset 3px 0 0 #60a5fa, 0 0 0 1px rgba(96, 165, 250, 0.38);
 }
 
 .threadItem strong,

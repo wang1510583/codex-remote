@@ -49,6 +49,7 @@ export function externalSnapshotFromThread(thread = {}, connectorId = "") {
     cwd: thread.cwd || "",
     model: thread.model || "",
     reasoningEffort: thread.reasoningEffort || "",
+    settingsUpdatedAt: thread.settingsUpdatedAt || "",
     contextUsage: thread.contextUsage || null,
     messages: Array.isArray(thread.messages) ? thread.messages : [],
     messageCount: Number(thread.messageCount) || 0,
@@ -65,7 +66,10 @@ function snapshotSignature(snapshot = {}) {
     lastMessage.content || "",
     lastMessage.at || "",
     snapshot.contextUsage?.used || 0,
-    snapshot.contextUsage?.window || 0
+    snapshot.contextUsage?.window || 0,
+    snapshot.model || "",
+    snapshot.reasoningEffort || "",
+    snapshot.settingsUpdatedAt || ""
   ]);
 }
 
@@ -114,6 +118,9 @@ async function pollMonitor(monitor) {
         running: next.running,
         externalRunning: next.running,
         externalTaskStartedAt: next.externalTaskStartedAt,
+        model: next.model,
+        reasoningEffort: next.reasoningEffort,
+        settingsUpdatedAt: next.settingsUpdatedAt,
         contextUsage: next.contextUsage,
         messageCount: next.messageCount,
         updatedAt: next.updatedAt
