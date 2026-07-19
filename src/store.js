@@ -30,11 +30,12 @@ async function updateJson(file, fallback, update) {
 export async function readState(connectorId = "") {
   const parsed = await readJson(statePathFor(connectorId), null);
   if (!parsed) return {
-    threadId: "", connectorId, cwd: "", model: "", reasoningEffort: "",
+    threadId: "", runtimeId: "", connectorId, cwd: "", model: "", reasoningEffort: "",
     modelSettingsUpdatedAt: "", modelSettingsSource: "", messages: [], inflight: null
   };
   return {
     threadId: typeof parsed.threadId === "string" ? parsed.threadId : "",
+    runtimeId: typeof parsed.runtimeId === "string" ? parsed.runtimeId : "",
     connectorId: connectorId || (typeof parsed.connectorId === "string" ? parsed.connectorId : ""),
     cwd: typeof parsed.cwd === "string" ? parsed.cwd : "",
     model: typeof parsed.model === "string" ? parsed.model : "",
@@ -54,6 +55,10 @@ export async function writeStateIfIdle(state, connectorId = "") {
   await updateJson(statePathFor(connectorId), {}, (current) => {
     const currentThreadId = typeof current.threadId === "string" ? current.threadId : "";
     if (currentThreadId !== String(state.threadId || "") || current.inflight) return current;
+    if (!currentThreadId && state.runtimeId) {
+      const currentRuntimeId = typeof current.runtimeId === "string" ? current.runtimeId : "";
+      if (currentRuntimeId !== String(state.runtimeId)) return current;
+    }
     const currentSettingsTime = Date.parse(current.modelSettingsUpdatedAt || "");
     const nextSettingsTime = Date.parse(state.modelSettingsUpdatedAt || "");
     if (Number.isFinite(currentSettingsTime) && (!Number.isFinite(nextSettingsTime) || currentSettingsTime > nextSettingsTime)) {
@@ -75,6 +80,9 @@ export async function updateStateModelSettings(expectedState = {}, value = {}, c
     const currentThreadId = typeof current.threadId === "string" ? current.threadId : "";
     if (currentThreadId !== expectedThreadId) return current;
     if (!expectedThreadId) {
+      const expectedRuntimeId = String(expectedState.runtimeId || "");
+      const currentRuntimeId = typeof current.runtimeId === "string" ? current.runtimeId : "";
+      if (expectedRuntimeId && currentRuntimeId !== expectedRuntimeId) return current;
       const expectedCwd = String(expectedState.cwd || "");
       const currentCwd = typeof current.cwd === "string" ? current.cwd : "";
       if (currentCwd && currentCwd !== expectedCwd) return current;
@@ -94,7 +102,9 @@ export function draftKeyFor(threadId = "", cwd = "") {
 }
 
 export function stateKeyFor(state = {}) {
-  return state.threadId ? `thread:${state.threadId}` : `cwd:${state.cwd || ""}`;
+  if (state.threadId) return `thread:${state.threadId}`;
+  if (state.runtimeId) return `runtime:${state.runtimeId}`;
+  return `cwd:${state.cwd || ""}`;
 }
 
 async function readDrafts() {

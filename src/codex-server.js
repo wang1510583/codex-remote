@@ -12,6 +12,19 @@ function normalizeReasoningEffort(value) {
   return compact === "extrahigh" || compact === "xhigh" ? "xhigh" : normalized;
 }
 
+function missingModelProviderName(error) {
+  const message = String(error?.message || error || "");
+  const match = message.match(/Model provider\s+([`'"]?)([^`'"\s]+)\1\s+not found/i);
+  return match?.[2] || "";
+}
+
+function rejectsModelProviderOverride(error) {
+  const message = String(error?.message || error || "");
+  return /(?:unknown|unexpected|unrecognized)\s+field[^\n]*modelProvider/i.test(message)
+    || /modelProvider[^\n]*(?:unknown|unexpected|unrecognized)\s+field/i.test(message)
+    || /invalid params[^\n]*modelProvider/i.test(message);
+}
+
 export class CodexAppServer {
   constructor(transport, options = {}) {
     this.transport = transport;
@@ -116,7 +129,9 @@ export class CodexAppServer {
       if (!pending) return;
       this.pending.delete(message.id);
       if (message.error) {
-        pending.reject(new Error(rpcErrorMessage(message.error)));
+        const error = new Error(rpcErrorMessage(message.error));
+        error.rpcError = message.error;
+        pending.reject(error);
       } else {
         if (pending.onResult) pending.onResult(message.result);
         pending.resolve(message.result);
@@ -210,7 +225,7 @@ export class CodexAppServer {
     if (notificationMatchesTurn && this.turn.reconnecting && method !== "error" && notificationTurnId) {
       this.setTurnReconnecting(this.turn, false);
     }
-    if (this.updateContextUsage(payload)) {
+    if (notificationMatchesTurn && this.updateContextUsage(payload)) {
       // A runner's onContextUpdate callback emits a complete status payload.
       // Do not emit a second, incomplete status event: the browser would read
       // its missing `running` field as false and appear to end the task.
@@ -218,7 +233,7 @@ export class CodexAppServer {
     }
     if (method === "thread/status/changed" || method === "turn/started") return;
     if (method === "item/started" && params.item?.type) {
-      if (params.item.type === "agentMessage" && this.turn) {
+      if (params.item.type === "agentMessage" && notificationMatchesTurn) {
         this.turn.currentMessage = {
           id: params.item.id || `assistant-${Date.now()}`,
           text: "",
@@ -227,7 +242,7 @@ export class CodexAppServer {
       }
       return;
     }
-    if (method === "item/agentMessage/delta" && this.turn) {
+    if (method === "item/agentMessage/delta" && notificationMatchesTurn) {
       const messageId = params.itemId || this.turn.currentMessage?.id || "assistant";
       const current = this.turn.currentMessage?.id === messageId
         ? this.turn.currentMessage
@@ -244,21 +259,27 @@ export class CodexAppServer {
       }
       return;
     }
-    if (method === "item/completed" && params.item?.type === "agentMessage" && this.turn) {
+    if (method === "item/completed" && params.item?.type === "agentMessage" && notificationMatchesTurn) {
       const messageId = params.item.id || this.turn.currentMessage?.id || `assistant-${Date.now()}`;
+      const completedMessageIds = this.turn.completedMessageIds
+        || (this.turn.completedMessageIds = new Set());
+      if (completedMessageIds.has(messageId)) return;
       const text = params.item.text || this.turn.currentMessage?.text || "";
       const phase = params.item.phase || this.turn.currentMessage?.phase || null;
       if (text) {
+        completedMessageIds.add(messageId);
         const content = assistantBubbleText(text, phase);
         const taskDurationMs = /^✅\s/.test(content) ? Math.max(0, Date.now() - this.turn.startedAtMs) : null;
         this.turn.answers.push(content);
+        const answerMessages = this.turn.answerMessages || (this.turn.answerMessages = []);
+        answerMessages.push({ content, messageId, final: true, taskDurationMs });
         this.emit({ type: "message", role: "assistant", content, messageId, final: true, taskDurationMs });
         this.emit({ type: "reply_done" });
       }
       this.turn.currentMessage = null;
       return;
     }
-    if (method === "item/completed" && params.item?.type === "image_generation_call" && this.turn) {
+    if (method === "item/completed" && params.item?.type === "image_generation_call" && notificationMatchesTurn) {
       const turn = this.turn;
       const imageId = params.item.id || `image-${Date.now()}`;
       if (turn.imageIds.has(imageId)) return;
@@ -268,6 +289,8 @@ export class CodexAppServer {
           if (!file) return;
           const content = assistantBubbleText(file, "final_answer");
           turn.answers.push(content);
+          const answerMessages = turn.answerMessages || (turn.answerMessages = []);
+          answerMessages.push({ content, messageId: imageId, final: true });
           this.emit({ type: "message", role: "assistant", content, messageId: imageId, final: true });
           this.emit({ type: "reply_done" });
         })
@@ -348,6 +371,60 @@ export class CodexAppServer {
     });
   }
 
+  async resumeThreadWithProviderFallback(threadId, resolvedCwd, params = {}, fallbackSettings = {}) {
+    const resumeParams = { ...params, threadId, cwd: resolvedCwd };
+    try {
+      return await this.request("thread/resume", resumeParams);
+    } catch (error) {
+      const missingProvider = missingModelProviderName(error);
+      if (!missingProvider) throw error;
+
+      const configured = await this.configuredModelSettings(resolvedCwd);
+      const model = fallbackSettings.model || resumeParams.model || configured.model || "";
+      const reasoningEffort = normalizeReasoningEffort(
+        fallbackSettings.reasoningEffort
+          || resumeParams.config?.model_reasoning_effort
+          || configured.reasoningEffort
+          || ""
+      );
+      const config = { ...(resumeParams.config || {}) };
+      if (reasoningEffort) config.model_reasoning_effort = reasoningEffort;
+      const retryParams = {
+        ...resumeParams,
+        model: model || undefined,
+        modelProvider: configured.modelProvider || undefined,
+        config: Object.values(config).some((value) => value !== undefined && value !== null && value !== "")
+          ? config
+          : undefined
+      };
+      if (!retryParams.model && !retryParams.modelProvider && !retryParams.config) throw error;
+
+      console.warn(
+        `会话 ${threadId} 引用了已移除的模型提供方 ${missingProvider}，正在使用当前提供方 ${configured.modelProvider || "(默认)"} 恢复。`
+      );
+      let result;
+      if (retryParams.modelProvider) {
+        try {
+          result = await this.request("thread/resume", retryParams);
+        } catch (retryError) {
+          if (!retryParams.model || !rejectsModelProviderOverride(retryError)) throw retryError;
+          const { modelProvider: _unsupported, ...modelOnlyParams } = retryParams;
+          result = await this.request("thread/resume", modelOnlyParams);
+        }
+      } else {
+        result = await this.request("thread/resume", retryParams);
+      }
+
+      if (configured.modelProvider && result?.modelProvider
+        && result.modelProvider !== configured.modelProvider) {
+        throw new Error(
+          `旧会话仍在使用模型提供方 ${result.modelProvider}，当前提供方 ${configured.modelProvider} 的强制恢复未生效。请先结束该会话在其他 Codex 客户端中的运行后重试。`
+        );
+      }
+      return result;
+    }
+  }
+
   async ensureThread(threadId, cwd = codexWorkDir, settings = {}) {
     await this.ensureStarted();
     const resolvedCwd = this.isRemote ? String(cwd || "") : projectPath(cwd || "");
@@ -358,10 +435,11 @@ export class CodexAppServer {
       approvalPolicy: "never",
       sandbox: "danger-full-access",
       model: configured.model || undefined,
+      modelProvider: configured.modelProvider || undefined,
       config: { model_reasoning_effort: configured.reasoningEffort || undefined }
     };
     const result = threadId
-      ? await this.request("thread/resume", { ...params, threadId })
+      ? await this.resumeThreadWithProviderFallback(threadId, resolvedCwd, params, configured)
       : await this.request("thread/start", params);
     this.activeThreadId = result.thread.id;
     this.activeCwd = resolvedCwd;
@@ -387,7 +465,9 @@ export class CodexAppServer {
           turnId: "",
           startedAtMs: Date.now(),
           answers: [],
+          answerMessages: [],
           currentMessage: null,
+          completedMessageIds: new Set(),
           imageIds: new Set(),
           pendingImages: [],
           reconnecting: false,
@@ -448,6 +528,7 @@ export class CodexAppServer {
     const result = await this.request("config/read", { cwd: targetCwd, includeLayers: false });
     return {
       model: result?.config?.model || this.model || "",
+      modelProvider: result?.config?.model_provider || result?.config?.modelProvider || "",
       reasoningEffort: result?.config?.model_reasoning_effort || this.reasoningEffort || ""
     };
   }
@@ -457,11 +538,16 @@ export class CodexAppServer {
     return Array.isArray(result?.data) ? result.data : [];
   }
 
-  async readThreadSettings(threadId, cwd = codexWorkDir) {
+  async readThreadSettings(threadId, cwd = codexWorkDir, fallbackSettings = {}) {
     if (!threadId) return null;
     await this.ensureStarted();
     const resolvedCwd = this.isRemote ? String(cwd || "") : projectPath(cwd || "");
-    const result = await this.request("thread/resume", { threadId, cwd: resolvedCwd });
+    const result = await this.resumeThreadWithProviderFallback(
+      threadId,
+      resolvedCwd,
+      {},
+      fallbackSettings
+    );
     this.activeThreadId = result.thread.id;
     this.activeCwd = resolvedCwd;
     return {
@@ -493,7 +579,10 @@ export class CodexAppServer {
     if (!hasModel && !hasEffort) throw new Error("请选择模型或思考强度。");
     await this.ensureStarted();
     const resolvedCwd = this.isRemote ? String(cwd || "") : projectPath(cwd || "");
-    const current = await this.readThreadSettings(threadId, resolvedCwd);
+    const current = await this.readThreadSettings(threadId, resolvedCwd, {
+      model: hasModel ? String(model) : "",
+      reasoningEffort: hasEffort ? normalizeReasoningEffort(effort) : ""
+    });
     const desiredModel = hasModel ? String(model) : (current?.model || "");
     const desiredEffort = hasEffort
       ? normalizeReasoningEffort(effort)
@@ -537,7 +626,13 @@ export class CodexAppServer {
     const efforts = (selected.supportedReasoningEfforts || [])
       .map((item) => item.reasoningEffort)
       .filter(Boolean);
-    const live = threadId ? await this.readThreadSettings(threadId, cwd) : null;
+    const fallbackEffort = efforts.includes(currentEffort)
+      ? currentEffort
+      : (selected.defaultReasoningEffort || efforts[0] || currentEffort);
+    const live = threadId ? await this.readThreadSettings(threadId, cwd, {
+      model: selected.model || selected.id,
+      reasoningEffort: fallbackEffort
+    }) : null;
     const baseEffort = live?.reasoningEffort || currentEffort;
     const effort = efforts.includes(baseEffort)
       ? baseEffort
@@ -556,7 +651,7 @@ export class CodexAppServer {
 
   async selectReasoningEffort(requestedEffort, currentModel = "", threadId = "", cwd = codexWorkDir) {
     const models = await this.modelOptions();
-    const live = threadId ? await this.readThreadSettings(threadId, cwd) : null;
+    const live = threadId ? await this.readThreadSettings(threadId, cwd, { model: currentModel }) : null;
     const liveModel = live?.model || currentModel;
     const selected = models.find((item) => [item.model, item.id].includes(liveModel))
       || models.find((item) => item.isDefault)

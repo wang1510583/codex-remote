@@ -61,6 +61,11 @@ export const wechatGatewayToken = process.env.WECHAT_GATEWAY_TOKEN || "";
 export const wechatTarget = process.env.WECHAT_TO || "";
 export const wechatSource = process.env.WECHAT_SOURCE || "codex-remote-web";
 
+// Dedicated credential embedded into WebToApp-generated APKs. Keep it separate
+// from both the web login password and the remote connector pairing token.
+export const nativeNotificationToken = process.env.CODEX_REMOTE_NOTIFICATION_TOKEN || "";
+export const nativeNotificationClickUrl = process.env.CODEX_REMOTE_NOTIFICATION_CLICK_URL || "";
+
 export const remotePassword = process.env.CODEX_REMOTE_PASSWORD || process.env.REMOTE_PASSWORD || (process.env.CODEX_REMOTE_PASSWORD_B64 ? Buffer.from(process.env.CODEX_REMOTE_PASSWORD_B64, "base64").toString("utf8") : "") || (process.env.REMOTE_LOGIN_B64 ? Buffer.from(process.env.REMOTE_LOGIN_B64, "base64").toString("utf8") : "");
 export const connectorPairToken = process.env.CODEX_REMOTE_CONNECTOR_TOKEN || remotePassword;
 export const authCookieName = "codex_remote_auth";

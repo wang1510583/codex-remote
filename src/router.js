@@ -5,7 +5,7 @@ import { publicDir } from "./config.js";
 import { json, readBody, mimeType, safeCompare, cleanText } from "./utils.js";
 import { isAuthenticated, routePath, routeBase, isPublicPath, redirectToLogin, authCookie } from "./auth.js";
 import { remotePassword, authToken, codexWorkDir, disableLocal } from "./config.js";
-import { clients, broadcast, sendEvent, changesSince } from "./sse.js";
+import { clients, broadcast, sendSnapshot, changesSince, currentEventSeq } from "./sse.js";
 import {
   readState, writeState, saveDraftForState, draftForState, syncLoadedCounts,
   readConnectorViewState, writeConnectorViewState, setThreadName, writeStateIfIdle
@@ -26,6 +26,7 @@ import {
 import { projectPath, relativeProjectPath, isAllowedDownload, allowedDownloadRoots } from "./paths.js";
 import * as ssh from "./ssh.js";
 import { webPushPublicKey, savePushSubscription, sendWebPushTaskDone } from "./webpush.js";
+import { nativeNotificationStatus, sendNativeTaskDone } from "./native-notifications.js";
 import { registerConnector, remoteConnectorsPayload, connectorFileOp, setConnectorRemark } from "./connectors.js";
 import { followModeForState } from "./store.js";
 import { threadName } from "./store.js";
@@ -140,7 +141,16 @@ export async function handle(req, res) {
       return json(res, 200, { ok: true, ...await sendWebPushTaskDone("✅ Web Push 后台测试通知") });
     }
 
+    if (req.method === "GET" && url.pathname === "/api/remote/notifications/status") {
+      return json(res, 200, nativeNotificationStatus());
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/remote/notifications/test") {
+      return json(res, 200, { ok: true, ...sendNativeTaskDone("✅ WebToApp 后台测试通知") });
+    }
+
     if (req.method === "GET" && url.pathname === "/api/remote/state") {
+      const snapshotEventSeq = currentEventSeq();
       const viewState = await readConnectorViewState();
       const requestedConnectorId = connectorIdFrom(req);
       const connectorId = requestedConnectorId || viewState.selectedConnectorId || "";
@@ -191,7 +201,8 @@ export async function handle(req, res) {
         connectors: connectorsPayload.devices,
         localRemark: connectorsPayload.localRemark || "",
         selectedConnectorId: connectorId,
-        disableLocal
+        disableLocal,
+        eventSeq: snapshotEventSeq
       });
     }
 
@@ -370,7 +381,7 @@ export async function handle(req, res) {
           initialStatus.contextUsage = external.contextUsage || initialStatus.contextUsage;
         }
       }
-      sendEvent(res, initialStatus);
+      sendSnapshot(res, initialStatus);
       const cleanup = () => { clearInterval(heartbeat); clients.delete(res); };
       res.on("error", cleanup);
       req.on("close", cleanup);

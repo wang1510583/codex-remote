@@ -8,7 +8,7 @@
     <link rel="manifest" href="site.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="icon.svg" />
     <link rel="apple-touch-icon" href="icon.svg" />
-    <link rel="stylesheet" href="styles.css?v=20260710-usage-panel" />
+    <link rel="stylesheet" href="styles.css?v=20260718-scroll-jump-webview" />
   </head>
   <body>
     <main class="remoteApp">
@@ -165,10 +165,21 @@
 
       <section class="remoteLogWrap">
         <button id="loadMoreMessages" class="loadMoreMessages" type="button" hidden>加载更多</button>
-        <button id="scrollTopRemote" class="scrollJump scrollJumpTop" type="button" title="回到顶部" aria-label="回到顶部" hidden>↑</button>
-        <button id="scrollBottomRemote" class="scrollJump scrollJumpBottom" type="button" title="回到底部" aria-label="回到底部" hidden>↓</button>
         <div id="remoteLog" class="remoteLog" aria-live="polite"></div>
       </section>
+
+      <div class="scrollJumpLayer">
+        <button id="scrollTopRemote" class="scrollJump scrollJumpTop" type="button" title="回到顶部" aria-label="回到顶部" hidden>
+          <svg class="scrollJumpIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <polyline points="18 15 12 9 6 15" />
+          </svg>
+        </button>
+        <button id="scrollBottomRemote" class="scrollJump scrollJumpBottom" type="button" title="回到底部" aria-label="回到底部" hidden>
+          <svg class="scrollJumpIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </button>
+      </div>
 
       <form id="remoteForm" class="remoteComposer">
         <div class="commandPicker">
@@ -200,6 +211,6 @@
       </form>
     </main>
     <script src="pwa.js"></script>
-    <script src="remote.js?v=20260710-usage-panel"></script>
+    <script src="remote.js?v=20260718-realtime-dedupe"></script>
   </body>
 </html>

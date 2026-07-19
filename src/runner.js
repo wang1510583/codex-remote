@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { rootDir, restartScript, codexConnectWaitMs, codexConnectTimeoutMs, codexTurnTimeoutMs, codexWorkDir } from "./config.js";
@@ -21,6 +22,7 @@ import {
 import { createLocalAppServer } from "./codex-server.js";
 import { getConnectorAppServer, remoteSessionProvider, isConnectorOnline } from "./connectors.js";
 import { completionMessage, notifyWechatTaskDone, sendWebPushTaskDone } from "./webpush.js";
+import { sendNativeTaskDone } from "./native-notifications.js";
 import {
   externalRunningSnapshots, externalSessionSnapshot, externalSnapshotFromThread,
   isExternalTaskRunning, monitorExternalSession, refreshExternalSession,
@@ -28,6 +30,7 @@ import {
 } from "./external-sessions.js";
 
 export const runners = new Map();
+const runnerCreations = new Map();
 export let selectedRunnerKey = "";
 export let followMode = "queue";
 export let contextUsage = null;
@@ -111,6 +114,15 @@ function getLocalAppServer() {
 export function appServerForState(state = {}) {
   if (state.connectorId) return bindAppServerSettings(getConnectorAppServer(state.connectorId), state.connectorId);
   return getLocalAppServer();
+}
+
+// A CodexAppServer tracks exactly one active turn. Keep the singleton above as
+// an idle control channel, but give every local conversation its own client
+// connection so different threads can run at the same time. Connector agents
+// currently expose one app-server channel, so they continue to share it.
+export function runnerAppServerForState(state = {}) {
+  if (state.connectorId) return appServerForState(state);
+  return bindAppServerSettings(createLocalAppServer(), "");
 }
 
 async function sessionModelSettings(state = {}) {
@@ -206,7 +218,11 @@ export async function syncSharedThreadSettings(state = {}) {
   if (!socketPath || !existsSync(socketPath)) return state;
   await server.ensureStarted();
   if (!server.usingSharedAppServer || server.turn) return state;
-  const live = await server.readThreadSettings(state.threadId, stateAbsoluteCwd(state.cwd || ""));
+  const live = await server.readThreadSettings(
+    state.threadId,
+    stateAbsoluteCwd(state.cwd || ""),
+    { model: state.model || "", reasoningEffort: state.reasoningEffort || "" }
+  );
   if (!live?.model) return state;
   if (live.model === state.model && (live.reasoningEffort || "") === (state.reasoningEffort || "")) return state;
   state.model = live.model;
@@ -281,7 +297,10 @@ export async function sessionModelSettingsPayload(connectorId = "") {
   const models = await server.modelOptions();
   if (!connectorId && selectedState.threadId && server.usingSharedAppServer && !server.turn) {
     const cwd = stateAbsoluteCwd(selectedState.cwd || "");
-    const live = await server.readThreadSettings(selectedState.threadId, cwd).catch(() => null);
+    const live = await server.readThreadSettings(selectedState.threadId, cwd, {
+      model: selectedState.model || "",
+      reasoningEffort: selectedState.reasoningEffort || ""
+    }).catch(() => null);
     if (live?.model && (
       live.model !== selectedState.model
       || (live.reasoningEffort || "") !== (selectedState.reasoningEffort || "")
@@ -384,7 +403,11 @@ function resolveAbsoluteCwd(state = {}) {
 
 export function runnerKeyForState(state = {}) {
   const c = state.connectorId || "";
-  const base = state.threadId ? `thread:${state.threadId}` : `cwd:${state.cwd || ""}`;
+  const base = state.threadId
+    ? `thread:${state.threadId}`
+    : state.runtimeId
+      ? `runtime:${state.runtimeId}`
+      : `cwd:${state.cwd || ""}`;
   return c ? `${c}:${base}` : base;
 }
 
@@ -426,6 +449,27 @@ export function isRunnerSelected(runner) {
   return runners.get(selectedRunnerKey) === runner || selectedRunnerKey === runner.key || (runner.state.threadId && selectedRunnerKey === runnerKeyForState({ threadId: runner.state.threadId, connectorId: runner.connectorId }));
 }
 
+export async function writeRunnerStateIfSelected(runner) {
+  if (!isRunnerSelected(runner)) return false;
+  await writeState(syncLoadedCounts(runner.state), runner.connectorId || "");
+  return true;
+}
+
+function releaseRunnerAppServerIfIdle(runner) {
+  if (!runner?.ownsAppServer
+    || runner.running
+    || runner.messageQueue.length
+    || runner.appServer?.turn
+    || runner.appServer?.pending?.size
+    || runner.appServer?.starting
+    || runner.appServer?.settingsUpdatePromise) return false;
+  runner.appServer.transport?.kill?.();
+  runner.appServer.initialized = false;
+  runner.appServer.activeThreadId = "";
+  runner.appServer.activeCwd = "";
+  return true;
+}
+
 export function broadcastRunner(runner, event) {
   broadcast({ type: "runner_status", runningThreads: runningThreads() });
   if (isRunnerSelected(runner)) broadcast({ ...event, connectorId: runner.connectorId || "" });
@@ -462,7 +506,9 @@ export function statusPayload(runner = selectedRunner(), isRunning = Boolean(run
 export function liveMessagesFor(runner) {
   const turn = runner?.appServer?.turn;
   if (!runner?.running || !turn) return [];
-  const messages = turn.answers.map((content, index) => ({ role: "assistant", content, messageId: `live-answer-${index}`, final: true }));
+  const messages = Array.isArray(turn.answerMessages) && turn.answerMessages.length
+    ? turn.answerMessages.map((message) => ({ role: "assistant", ...message }))
+    : turn.answers.map((content, index) => ({ role: "assistant", content, messageId: `live-answer-${index}`, final: true }));
   if (turn.currentMessage?.text) {
     messages.push({ role: "assistant", content: assistantBubbleText(turn.currentMessage.text, turn.currentMessage.phase), messageId: turn.currentMessage.id || "assistant", transient: true });
   }
@@ -484,13 +530,14 @@ export function runnerStatePayload(runner, extra = {}) {
 export async function createRunner(state = {}) {
   await ensureStateModelSettings(state);
   const key = runnerKeyForState(state);
-  const appServer = appServerForState(state);
+  const appServer = runnerAppServerForState(state);
   const runner = {
     key,
     connectorId: state.connectorId || "",
     cwd: state.cwd || "",
     state: syncLoadedCounts({
       threadId: state.threadId || "",
+      runtimeId: state.runtimeId || "",
       connectorId: state.connectorId || "",
       cwd: state.cwd || "",
       model: state.model || "",
@@ -507,6 +554,7 @@ export async function createRunner(state = {}) {
     steerMessages: [],
     contextUsage: contextUsage || null,
     reconnecting: false,
+    ownsAppServer: !state.connectorId,
     emit: null
   };
   runner.emit = (event) => broadcastRunner(runner, event);
@@ -521,7 +569,16 @@ export async function runnerForState(state = {}, create = false) {
   const key = runnerKeyForState(state);
   let runner = runners.get(key);
   if (!runner && state.threadId) runner = runners.get(`${state.connectorId ? `${state.connectorId}:` : ""}thread:${state.threadId}`);
-  if (!runner && create) runner = await createRunner(state);
+  if (!runner && create) {
+    let creation = runnerCreations.get(key);
+    if (!creation) {
+      creation = createRunner(state).finally(() => {
+        if (runnerCreations.get(key) === creation) runnerCreations.delete(key);
+      });
+      runnerCreations.set(key, creation);
+    }
+    runner = await creation;
+  }
   if (runner) runner.followMode = await followModeForState(runner.state, runner.connectorId || "");
   return runner || null;
 }
@@ -529,24 +586,47 @@ export async function runnerForState(state = {}, create = false) {
 export async function rememberRunnerThread(runner, state = runner.state) {
   if (!runner || !state.threadId) return;
   runner.state.threadId = state.threadId;
+  runner.state.runtimeId = "";
   await saveThreadModelSettings(state.threadId, {
     model: runner.state.model,
     reasoningEffort: runner.state.reasoningEffort,
     updatedAt: runner.state.modelSettingsUpdatedAt,
     source: runner.state.modelSettingsSource
   }, runner.connectorId || "");
-  runners.set(`${runner.connectorId ? `${runner.connectorId}:` : ""}thread:${state.threadId}`, runner);
+  const nextKey = runnerKeyForState({ connectorId: runner.connectorId, threadId: state.threadId });
+  if (runner.key !== nextKey) {
+    const wasSelected = isRunnerSelected(runner);
+    for (const [key, value] of runners) {
+      if (value === runner) runners.delete(key);
+    }
+    runner.key = nextKey;
+    runners.set(nextKey, runner);
+    if (wasSelected) selectedRunnerKey = nextKey;
+  } else {
+    runners.set(nextKey, runner);
+  }
 }
 
 export async function runnerForIncomingState(state = {}) {
   const cwd = state.cwd || "";
   const selected = await runnerForState(state, false);
   if (selected) return selected;
-  return uniqueRunners().find((runner) => runner.running && runner.cwd === cwd && (runner.connectorId || "") === (state.connectorId || "")) || null;
+  // Legacy state files had no runtimeId. A cwd fallback is safe only when it
+  // identifies exactly one task; otherwise it would select an arbitrary
+  // conversation now that same-folder tasks may run concurrently.
+  if (state.threadId || state.runtimeId) return null;
+  const matches = uniqueRunners().filter((runner) => runner.running
+    && runner.cwd === cwd
+    && (runner.connectorId || "") === (state.connectorId || ""));
+  return matches.length === 1 ? matches[0] : null;
 }
 
-export function busyRunnerForCwd(cwd = "", connectorId = "", exceptRunner = null) {
-  return uniqueRunners().find((runner) => runner.running && runner.cwd === cwd && (runner.connectorId || "") === connectorId && runner !== exceptRunner) || null;
+export function executionConflictForState(state = {}, exceptRunner = null) {
+  const connectorId = state.connectorId || "";
+  if (!connectorId) return null;
+  return uniqueRunners().find((runner) => runner.running
+    && (runner.connectorId || "") === connectorId
+    && runner !== exceptRunner) || null;
 }
 
 function externalTaskLabel(connectorId = "") {
@@ -762,7 +842,7 @@ async function localCommandResponse(message, connectorId = "") {
     commandServer.activeCwd = "";
     contextUsage = freshContextUsage();
     const defaults = await commandServer.configuredModelSettings(currentCwd);
-    const nextState = { threadId: "", connectorId: state.connectorId || "", cwd: state.cwd || "", model: defaults.model || "", reasoningEffort: defaults.reasoningEffort || "", messages: [] };
+    const nextState = { threadId: "", runtimeId: randomUUID(), connectorId: state.connectorId || "", cwd: state.cwd || "", model: defaults.model || "", reasoningEffort: defaults.reasoningEffort || "", messages: [] };
     await writeState(nextState, state.connectorId || "");
     broadcast({ type: "state", ...nextState, absoluteCwd: stateAbsoluteCwd(state.cwd), contextUsage });
     return "已新建线程。";
@@ -826,6 +906,7 @@ export async function runRemoteTask(message, runner) {
           onThreadReady: async (st) => {
             runner.state.threadId = st.threadId;
             await rememberRunnerThread(runner, st);
+            await writeRunnerStateIfSelected(runner);
             broadcastRunner(runner, {
               type: "state",
               ...runner.state,
@@ -873,7 +954,7 @@ export async function runRemoteTask(message, runner) {
     state.inflight = null;
     runner.state = syncLoadedCounts(state);
     await rememberMessageMeta(runner.state.threadId, savedMessages);
-    await writeState(runner.state, runner.connectorId || "");
+    await writeRunnerStateIfSelected(runner);
     broadcastRunner(runner, { type: "state_saved", threadId: runner.state.threadId });
     if (!ok) {
       savedAnswers.forEach((answer, index) => {
@@ -886,6 +967,7 @@ export async function runRemoteTask(message, runner) {
     if (ok && taskDoneMessage) {
       notifyWechatTaskDone(taskDoneMessage);
       sendWebPushTaskDone(taskDoneMessage).catch((error) => console.error("web push task notification failed", error.message || error));
+      sendNativeTaskDone(taskDoneMessage);
     }
   } catch (error) {
     console.error("remote task failed", error);
@@ -895,7 +977,7 @@ export async function runRemoteTask(message, runner) {
     state.messages = state.messages.slice(-80);
     runner.state = syncLoadedCounts(state);
     await rememberMessageMeta(runner.state.threadId, runner.state.messages);
-    await writeState(runner.state, runner.connectorId || "").catch((writeError) => console.error("failed to save task failure", writeError));
+    await writeRunnerStateIfSelected(runner).catch((writeError) => console.error("failed to save task failure", writeError));
     const failurePayload = { type: "message", role: "assistant", content: failureMessage, messageId: `task-failed-${Date.now()}`, final: true };
     if (Number.isFinite(runnerStartedAtMs)) failurePayload.taskDurationMs = Math.max(0, Date.now() - runnerStartedAtMs);
     broadcastRunner(runner, failurePayload);
@@ -918,9 +1000,10 @@ export async function runRemoteTask(message, runner) {
 }
 
 export async function startRemoteTask(message, state, runner = null, options = {}) {
+  runner = runner || await runnerForState(state, false);
+  const conflict = executionConflictForState(state, runner);
+  if (conflict) throw new Error("当前被控端只提供一个 Codex 执行通道，已有会话正在运行。");
   runner = runner || await runnerForState(state, true);
-  const busy = busyRunnerForCwd(state.cwd || "", state.connectorId || "", runner);
-  if (busy) throw new Error(`这个文件夹已有任务正在运行：/${busy.cwd || "root"}`);
   stopExternalSessionMonitor(runner.connectorId || "");
   runner.running = true;
   runner.reconnecting = false;
@@ -931,8 +1014,9 @@ export async function startRemoteTask(message, state, runner = null, options = {
   runner.state.messages = runner.state.messages.slice(-80);
   runner.taskStartedAtMs = Date.now();
   runner.state.inflight = { message, cwd: runner.cwd, startedAt: new Date(runner.taskStartedAtMs).toISOString() };
-  selectedRunnerKey = runner.key;
-  await writeState(runner.state, runner.connectorId || "");
+  runner.appServer.runner = runner;
+  runner.appServer.onContextUpdate = () => broadcast(statusPayload(runner));
+  await writeRunnerStateIfSelected(runner);
   if (!options.skipUserMessage) {
     const savedUserMessage = runner.state.messages[runner.state.messages.length - 1];
     broadcastRunner(runner, { type: "message", ...savedUserMessage });
@@ -943,7 +1027,11 @@ export async function startRemoteTask(message, state, runner = null, options = {
 
 function processNextQueuedMessage(runner) {
   const next = runner.messageQueue.shift();
-  if (!next) { broadcastRunner(runner, statusPayload(runner, false)); return; }
+  if (!next) {
+    broadcastRunner(runner, statusPayload(runner, false));
+    releaseRunnerAppServerIfIdle(runner);
+    return;
+  }
   startRemoteTask(next.message, runner.state, runner, { skipUserMessage: Boolean(next.displayed) })
     .catch((error) => {
       console.error("failed to start queued task", error);
@@ -993,9 +1081,10 @@ export async function submitRemoteMessage(message, requestedFollowMode = "", con
   const state = await readState(connectorId);
   await saveDraftForState(state, "", connectorId);
   selectedRunnerKey = runnerKeyForState(state);
-  let runner = await runnerForState(state, true);
-  const busy = busyRunnerForCwd(state.cwd || "", connectorId, runner);
-  if (busy) throw Object.assign(new Error(`这个文件夹已有任务正在运行，请在会话列表打开红色运行中会话：/${busy.cwd || "root"}`), { statusCode: 409 });
+  let runner = await runnerForState(state, false);
+  const conflict = executionConflictForState(state, runner);
+  if (conflict) throw Object.assign(new Error("当前被控端只提供一个 Codex 执行通道，请等待正在运行的会话结束。"), { statusCode: 409 });
+  runner = runner || await runnerForState(state, true);
   if (runner.running) {
     const effectiveFollowMode = oneShotFollowMode || runner.followMode;
     if (effectiveFollowMode === "steer") {
@@ -1154,7 +1243,7 @@ export async function deleteThread(threadId, connectorId = "") {
 export async function createRemoteSession(rawCwd = "", connectorId = "") {
   const cwd = connectorId ? String(rawCwd || "") : stateCwdValue(rawCwd || "");
   if (!connectorId) await assertProjectDirectory(cwd);
-  const busy = busyRunnerForCwd(cwd, connectorId);
+  const busy = executionConflictForState({ cwd, connectorId });
   if (busy) {
     selectedRunnerKey = busy.key;
     await writeState(busy.state, busy.connectorId || "");
@@ -1169,7 +1258,7 @@ export async function createRemoteSession(rawCwd = "", connectorId = "") {
   contextUsage = freshContextUsage();
   const absoluteCwd = connectorId ? cwd : stateAbsoluteCwd(cwd);
   const defaults = await appServer.configuredModelSettings(absoluteCwd);
-  const state = { threadId: "", connectorId, cwd, model: defaults.model || "", reasoningEffort: defaults.reasoningEffort || "", messages: [], inflight: null };
+  const state = { threadId: "", runtimeId: randomUUID(), connectorId, cwd, model: defaults.model || "", reasoningEffort: defaults.reasoningEffort || "", messages: [], inflight: null };
   selectedRunnerKey = runnerKeyForState(state);
   await writeState(state, connectorId);
   const draft = await draftForState(state, connectorId);

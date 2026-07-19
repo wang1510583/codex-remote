@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { port, host } from "./src/config.js";
 import { handle } from "./src/router.js";
 import { attachConnectorWebSocket } from "./src/connectors.js";
+import { attachNativeNotificationWebSocket } from "./src/native-notifications.js";
 import { setupWebPush } from "./src/webpush.js";
 import { markInterruptedInflight } from "./src/runner.js";
 
@@ -16,6 +17,7 @@ process.on("unhandledRejection", (error) => {
 const server = createServer(handle);
 
 attachConnectorWebSocket(server);
+attachNativeNotificationWebSocket(server);
 
 await markInterruptedInflight("").catch((error) => console.error("failed to mark interrupted task", error));
 await setupWebPush().catch((error) => console.error("failed to setup web push", error));

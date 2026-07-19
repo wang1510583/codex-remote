@@ -2,6 +2,10 @@ export const clients = new Set();
 export const eventBacklog = [];
 export let eventSeq = 0;
 
+export function currentEventSeq() {
+  return eventSeq;
+}
+
 export function bumpEventSeq() {
   return ++eventSeq;
 }
@@ -18,17 +22,29 @@ export function stampEvent(event = {}, record = false) {
   return stamped;
 }
 
-export function sendEvent(res, event) {
+function writeEvent(res, event) {
   if (res.destroyed || res.writableEnded) {
     clients.delete(res);
     return;
   }
   try {
-    res.write(`data: ${JSON.stringify(stampEvent(event, false))}\n\n`);
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
   } catch (error) {
     clients.delete(res);
     console.error("sse write failed", error);
   }
+}
+
+export function sendEvent(res, event) {
+  writeEvent(res, stampEvent(event, false));
+}
+
+// Connection status is a point-in-time snapshot, not a replayable event. It
+// must not consume a sequence number or a client can skip a real event that
+// was broadcast while the initial HTTP state request was still in flight.
+export function sendSnapshot(res, event) {
+  const { seq: _ignored, ...snapshot } = event || {};
+  writeEvent(res, snapshot);
 }
 
 export function broadcast(event) {

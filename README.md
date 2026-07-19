@@ -18,6 +18,7 @@
 - 后端：纯 Node.js（ESM），原生 `http` + `ws`，依赖 `ssh2` + `web-push` + `ws`
 - 前端：原生 HTML/CSS/JS（PWA），无构建步骤
 - 模块化：`server.js` 入口 + `src/` 下 13 个模块（router/runner/codex-server/connectors/store/sse/files/ssh/webpush/threads/transport 等）
+- 本机会话可并行执行：不同会话各用独立 app-server 客户端；同一会话的新消息仍按 `queue` / `steer` 设置处理。被控端 connector 当前只有一个执行通道，因此仍按设备串行。
 
 ## 要求
 
@@ -66,6 +67,8 @@ cp .env.example .env
 | `CODEX_REMOTE_CONNECTOR_TOKEN` | =登录密码 | 被控端配对令牌（建议单独设置，与登录密码不同） |
 | `CODEX_REMOTE_ROUTE_PREFIX` | `/codex-remote` | 路由前缀，用于反向代理子路径 |
 | `WEB_PUSH_SUBJECT` | `mailto:admin@...` | Web Push VAPID subject |
+| `CODEX_REMOTE_NOTIFICATION_TOKEN` | — | WebToApp APK 原生 WebSocket 通知专用令牌 |
+| `CODEX_REMOTE_NOTIFICATION_CLICK_URL` | — | 可选，点击 APK 系统通知时打开的完整 HTTPS 地址 |
 | `WECHAT_GATEWAY_URL` | — | 微信通知网关（可选） |
 | `WECHAT_GATEWAY_TOKEN` | — | 微信网关 token |
 | `WECHAT_TO` | — | 微信通知接收人 |
@@ -127,21 +130,65 @@ lempet.top {
 }
 ```
 
-**nginx** 示例：
+**nginx** 示例（需要同时透传 WebSocket Upgrade，APK 后台通知才可连接）：
 
 ```nginx
+# 放在 nginx 的 http {} 中、server {} 外
+map $http_upgrade $codex_connection_upgrade {
+  default upgrade;
+  ''      '';
+}
+
 location /codex-remote/ {
   proxy_pass http://127.0.0.1:5566/;
   proxy_set_header Host $host;
   proxy_set_header X-Forwarded-Prefix /codex-remote;
   proxy_http_version 1.1;
-  proxy_set_header Connection "";
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection $codex_connection_upgrade;
   proxy_buffering off;  # SSE 需要
   proxy_read_timeout 86400s;
 }
 ```
 
 > 反向代理用子路径时，`X-Forwarded-Prefix` 头要让后端知道前缀，否则静态资源路径会错。
+
+## WebToApp APK 后台通知
+
+Android WebView 的标准 Web Push / `PushManager` 并不可靠。项目另外提供了与 WebToApp 原生前台服务兼容的 WebSocket 端点：
+
+```text
+wss://你的域名/<CODEX_REMOTE_ROUTE_PREFIX>/api/notifications/ws
+```
+
+例如前缀为默认的 `/codex-remote` 时，地址就是 `wss://你的域名/codex-remote/api/notifications/ws`；如果实际配置为 `/codexremote`，这里也必须使用 `/codexremote`。
+
+配置步骤：
+
+1. 在服务器生成一个独立令牌，并写入 `.env`：
+
+   ```sh
+   openssl rand -hex 32
+   ```
+
+   ```env
+   CODEX_REMOTE_NOTIFICATION_TOKEN=上一步生成的令牌
+   # 可选；也可以只在 WebToApp 中填写“点击 URL”
+   CODEX_REMOTE_NOTIFICATION_CLICK_URL=https://你的域名/<CODEX_REMOTE_ROUTE_PREFIX>/
+   ```
+
+2. 重启 Codex Remote 服务，使新令牌生效。
+3. 在 WebToApp 中编辑这个应用，打开 APK 导出/构建配置里的“通知推送”：
+   - 通知类型：`WebSocket`
+   - WebSocket URL：`wss://你的域名/<CODEX_REMOTE_ROUTE_PREFIX>/api/notifications/ws`
+   - 鉴权 Token：与 `CODEX_REMOTE_NOTIFICATION_TOKEN` 完全相同
+   - 注册 URL：留空
+   - 点击 URL：`https://你的域名/<CODEX_REMOTE_ROUTE_PREFIX>/`
+4. 确保生成 APK 包含通知、前台服务、WakeLock 和开机恢复所需权限；重新构建并覆盖安装 APK。
+5. 首次启动时允许系统通知，并在国产 ROM 的电池/后台设置中允许该 APK 后台运行和自启动。
+6. 在网页命令菜单点击 `/notify`。连接正常时会立即收到“WebToApp 后台测试通知”。
+
+不要选择只在页面存活时有效的 `Web API` 通知类型。使用 WebSocket 模式时也不需要依赖网页的 Service Worker Push；现有 Web Push 会继续服务普通 Chrome/桌面浏览器。
 
 ## 接入被控端
 

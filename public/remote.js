@@ -36,6 +36,7 @@ const state = {
   notifiedMessages: new Set(),
   currentTaskStartedAtMs: null,
   pushSubscribed: false,
+  nativeNotificationConnected: false,
   hideThoughts: localStorage.getItem("codex-remote-hide-thoughts") === "1",
   onlyMine: localStorage.getItem("codex-remote-only-mine") === "1",
   completedUnreadThreads: new Set(),
@@ -54,6 +55,10 @@ const basePath = ["/codexremote", "/codex-remote"].find((path) => location.pathn
 const draftPrefix = "codex-remote-draft:";
 let draftTimer = 0;
 let modelSettingsChanging = false;
+let stateLoadGeneration = 0;
+let realtimeReconcileTimer = 0;
+const processedEventSeqs = new Set();
+const pendingRemoteEvents = [];
 const slashCommands = [
   { command: "/help", title: "帮助", detail: "显示当前已接入的 Codex 命令" },
   { command: "/status", title: "状态", detail: "读取 app-server、线程、模型和目录状态" },
@@ -165,6 +170,7 @@ function notificationPermission() {
 }
 
 function notificationDetail() {
+  if (state.nativeNotificationConnected) return "WebToApp 原生后台通知通道已连接";
   const permission = notificationPermission();
   if (permission === "granted") return state.pushSubscribed ? "已开启，后台也会收到任务完成通知" : "已开启，Codex 最终回复会发到系统通知栏";
   if (permission === "denied") return "通知已被浏览器阻止，请到 Chrome/系统通知设置里放开";
@@ -214,9 +220,28 @@ function webPushSubscribeErrorMessage(error) {
 }
 
 async function requestNotifications() {
-  if (notificationPermission() === "unsupported") return;
-  if (Notification.permission === "default") await Notification.requestPermission();
   let enabled = false;
+  const nativeTest = await request("/api/remote/notifications/test", { method: "POST" }).catch((error) => {
+    console.error("native notification test failed", error);
+    return null;
+  });
+  state.nativeNotificationConnected = Number(nativeTest?.sent || 0) > 0;
+  if (state.nativeNotificationConnected) {
+    enabled = true;
+    appendEvent(`WebToApp 原生后台通知已连接，并已发送 ${nativeTest.sent} 条测试通知。`);
+  }
+  if (notificationPermission() === "unsupported") {
+    if (!enabled) {
+      const message = nativeTest?.configured
+        ? "当前浏览器不支持网页通知，且没有检测到已连接的 WebToApp 后台通道。请检查 APK 的 WebSocket 通知配置与后台运行权限。"
+        : "当前浏览器不支持网页通知，服务端也没有配置 CODEX_REMOTE_NOTIFICATION_TOKEN。";
+      upsertAssistantMessage(message, true, "notify-native-error");
+    }
+    renderCommandList();
+    closeCommandMenu();
+    return;
+  }
+  if (Notification.permission === "default") await Notification.requestPermission();
   if (Notification.permission === "granted") {
     await subscribeWebPush().catch((error) => {
       console.error("web push subscribe failed", error);
@@ -318,6 +343,7 @@ function setRunning(running, queueLength = state.queueLength, queueMessages = st
   updateMeta();
   renderQueuePanel();
   updateStatusIcon();
+  updateRealtimeReconcile();
   if (
     wasRunning !== state.running
     || wasExternalRunning !== state.externalRunning
@@ -853,10 +879,16 @@ function persistAssistantNotice(text, messageId) {
   }).catch((error) => console.error("failed to persist assistant notice", error));
 }
 
-function assistantBubbleByMessageId(messageId) {
+function stableAssistantMessageId(messageId) {
+  const id = String(messageId || "");
+  return Boolean(id && id !== "assistant");
+}
+
+function assistantBubbleByMessageId(messageId, includeFinal = false) {
   if (!messageId) return null;
   return [...els.log.querySelectorAll(".message.assistant")]
-    .find((item) => item.dataset.messageId === String(messageId)) || null;
+    .find((item) => item.dataset.messageId === String(messageId)
+      && (includeFinal || item.dataset.final !== "true")) || null;
 }
 
 function localNoticeContext() {
@@ -899,21 +931,37 @@ function replayLocalNotices(messages = []) {
 
 function upsertAssistantMessage(text, final = false, messageId = "assistant", meta = {}) {
   if (!text) return;
-  let bubble = state.assistantBubbles.get(messageId) || assistantBubbleByMessageId(messageId);
+  const stableMessageId = stableAssistantMessageId(messageId);
+  let bubble = state.assistantBubbles.get(messageId)
+    || assistantBubbleByMessageId(messageId, stableMessageId);
+  if (stableMessageId && bubble?.dataset.final === "true") {
+    // Android WebView can replay an already completed SSE message with a new
+    // event sequence after reconnecting. A real app-server item id is stable,
+    // so this is the same bubble rather than a new reply. Ignore late deltas
+    // and only accept a repeated final payload as an idempotent content update.
+    if (final) setMessageContent(bubble, text);
+    return bubble;
+  }
   if (final && /^✅\s/.test(text || "")) {
     if (bubble?.isConnected) {
       const container = bubble.closest(".messageBlock") || bubble;
       container.remove();
     }
     const nextBubble = appendMessage("assistant", text, { ...meta, at: meta.at || new Date().toISOString() });
-    if (nextBubble) nextBubble.dataset.messageId = String(messageId);
+    if (nextBubble) {
+      nextBubble.dataset.messageId = String(messageId);
+      nextBubble.dataset.final = "true";
+    }
     state.assistantBubbles.delete(messageId);
     if (shouldPersistLocalAssistantBubble(final, meta)) persistAssistantNotice(text, messageId);
     return;
   }
   if (!bubble?.isConnected) {
     bubble = appendMessage("assistant", text);
-    if (bubble) bubble.dataset.messageId = String(messageId);
+    if (bubble) {
+      bubble.dataset.messageId = String(messageId);
+      bubble.dataset.final = "false";
+    }
     state.assistantBubbles.set(messageId, bubble);
   } else {
     const shouldFollow = isNearBottom();
@@ -922,6 +970,7 @@ function upsertAssistantMessage(text, final = false, messageId = "assistant", me
     else requestAnimationFrame(updateScrollJumps);
   }
   if (final) {
+    if (bubble) bubble.dataset.final = "true";
     if (shouldPersistLocalAssistantBubble(final, meta)) persistAssistantNotice(text, messageId);
     state.assistantBubbles.delete(messageId);
   }
@@ -1003,10 +1052,19 @@ async function request(url, options = {}) {
   return response.json();
 }
 
+function isCurrentStateSnapshot(generation, snapshotEventSeq) {
+  if (generation !== stateLoadGeneration) return false;
+  const sequence = Number(snapshotEventSeq);
+  return !Number.isFinite(sequence) || sequence >= state.lastEventSeq;
+}
+
 async function loadState(connectorId = currentConnectorId()) {
+  const generation = ++stateLoadGeneration;
   const data = await request("/api/remote/state", { connectorId });
   if (connectorId !== currentConnectorId()) return;
+  if (!isCurrentStateSnapshot(generation, data.eventSeq)) return false;
   renderState(data);
+  return true;
 }
 
 function settingsResponseIsCurrent(updatedAt = "") {
@@ -1018,6 +1076,9 @@ function settingsResponseIsCurrent(updatedAt = "") {
 
 function renderState(data) {
   if (!connectorMatchesCurrent(data)) return;
+  // Any direct state render (thread selection, SSE state event, pagination)
+  // supersedes older /state requests that may still be in flight.
+  stateLoadGeneration += 1;
   saveDraft();
   if (data.connectorId !== undefined) state.selectedConnectorId = data.connectorId || "";
   if (Array.isArray(data.connectors)) state.connectors = data.connectors;
@@ -2051,8 +2112,39 @@ function applyIncomingModelSettings(data = {}, running = state.running) {
   return settingsChanged;
 }
 
+function remoteEventSequence(data = {}) {
+  const sequence = Number(data.seq);
+  return Number.isSafeInteger(sequence) && sequence > 0 ? sequence : 0;
+}
+
+function rememberRemoteEvent(data = {}) {
+  const sequence = remoteEventSequence(data);
+  if (!sequence) return true;
+  if (processedEventSeqs.has(sequence)) return false;
+  processedEventSeqs.add(sequence);
+  while (processedEventSeqs.size > 1000) {
+    processedEventSeqs.delete(processedEventSeqs.values().next().value);
+  }
+  if (sequence > state.lastEventSeq) state.lastEventSeq = sequence;
+  return true;
+}
+
+function processRemoteEvents(events = [], floorSequence = 0) {
+  const ordered = events
+    .map((event, index) => ({ event, index, sequence: remoteEventSequence(event) }))
+    .sort((left, right) => {
+      if (left.sequence && right.sequence && left.sequence !== right.sequence) return left.sequence - right.sequence;
+      if (left.sequence !== right.sequence) return left.sequence ? 1 : -1;
+      return left.index - right.index;
+    });
+  for (const { event, sequence } of ordered) {
+    if (floorSequence && sequence && sequence <= floorSequence) continue;
+    handleRemoteEvent(event);
+  }
+}
+
 function handleRemoteEvent(data) {
-  if (Number(data.seq) > state.lastEventSeq) state.lastEventSeq = Number(data.seq);
+  if (!rememberRemoteEvent(data)) return;
   if (data.type === "connectors_changed") { loadConnectors().catch(() => {}); return; }
   if (data.type === "connector_selected") {
     const nextId = data.selectedConnectorId || "";
@@ -2144,31 +2236,55 @@ function handleRemoteEvent(data) {
 async function resyncEvents() {
   if (state.resyncingEvents) return;
   state.resyncingEvents = true;
+  let snapshotFloorSequence = 0;
   try {
     const data = await request(`/api/remote/changes?afterSeq=${encodeURIComponent(state.lastEventSeq || 0)}`);
     if (data.reset) {
       await loadState();
-      return;
+      snapshotFloorSequence = state.lastEventSeq;
+    } else {
+      const buffered = pendingRemoteEvents.splice(0);
+      processRemoteEvents([...(data.events || []), ...buffered]);
+      if (Number(data.eventSeq) > state.lastEventSeq) state.lastEventSeq = Number(data.eventSeq);
     }
-    for (const event of data.events || []) handleRemoteEvent(event);
-    if (Number(data.eventSeq) > state.lastEventSeq) state.lastEventSeq = Number(data.eventSeq);
   } finally {
+    const buffered = pendingRemoteEvents.splice(0);
     state.resyncingEvents = false;
+    processRemoteEvents(buffered, snapshotFloorSequence);
   }
+}
+
+function updateRealtimeReconcile() {
+  if (!state.running) {
+    clearTimeout(realtimeReconcileTimer);
+    realtimeReconcileTimer = 0;
+    return;
+  }
+  if (realtimeReconcileTimer) return;
+  realtimeReconcileTimer = setTimeout(async () => {
+    realtimeReconcileTimer = 0;
+    if (document.visibilityState !== "hidden") {
+      await resyncEvents().catch(() => loadState().catch(() => {}));
+    }
+    updateRealtimeReconcile();
+  }, 3000);
 }
 
 function connectEvents() {
   const source = new EventSource(`${basePath}/api/remote/events`);
   source.onopen = () => {
-    const shouldResync = state.eventDisconnected;
     state.connected = true;
     state.eventDisconnected = false;
     updateStatusIcon();
     updateMeta();
-    if (shouldResync) resyncEvents().catch(() => loadState().catch(() => {}));
+    // Always close the race between the preceding /state response and this
+    // EventSource connection. This also repairs Android WebView reconnects.
+    resyncEvents().catch(() => loadState().catch(() => {}));
   };
   source.onmessage = (event) => {
-    handleRemoteEvent(JSON.parse(event.data));
+    const data = JSON.parse(event.data);
+    if (state.resyncingEvents && remoteEventSequence(data)) pendingRemoteEvents.push(data);
+    else handleRemoteEvent(data);
   };
   source.onerror = () => {
     state.connected = false;
@@ -2188,6 +2304,12 @@ function restorePushSubscription() {
   subscribeWebPush()
     .catch((error) => console.error("web push restore failed", error))
     .finally(renderCommandList);
+}
+
+async function refreshNativeNotificationStatus() {
+  const status = await request("/api/remote/notifications/status");
+  state.nativeNotificationConnected = Number(status?.connected || 0) > 0;
+  renderCommandList();
 }
 
 async function sendMessage(mode = "queue") {
@@ -2507,5 +2629,6 @@ loadState().then(connectEvents).catch((error) => {
   els.meta.textContent = error.message;
 });
 restorePushSubscription();
+refreshNativeNotificationStatus().catch(() => {});
 autosizeInput();
 updateScrollJumps();

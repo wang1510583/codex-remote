@@ -21,7 +21,9 @@ function activeTurn(options = {}) {
     turnId: "turn-1",
     startedAtMs: Date.now(),
     answers: options.answers || [],
+    answerMessages: [],
     currentMessage: options.currentMessage || null,
+    completedMessageIds: new Set(),
     imageIds: new Set(),
     pendingImages: [],
     reconnecting: false,
@@ -142,4 +144,64 @@ test("context usage emits only the runner's complete status payload", () => {
   assert.equal(events[0].type, "status");
   assert.equal(events[0].running, true);
   assert.equal(events[0].contextUsage.remainingPercent, 75);
+});
+
+test("notifications from another concurrent turn are ignored", async () => {
+  let activityCount = 0;
+  const { server, turn, promise, events } = activeTurn({ onActivity: () => { activityCount += 1; } });
+
+  server.onNotification({
+    method: "item/agentMessage/delta",
+    params: { threadId: "thread-2", turnId: "turn-2", itemId: "other-answer", delta: "不应串入" }
+  });
+  server.onNotification({
+    method: "thread/tokenUsage/updated",
+    params: {
+      threadId: "thread-2",
+      turnId: "turn-2",
+      payload: { type: "token_count", info: { last_token_usage: { input_tokens: 900 }, model_context_window: 1000 } }
+    }
+  });
+
+  assert.equal(server.turn, turn);
+  assert.equal(turn.currentMessage, null);
+  assert.equal(server.contextUsage, null);
+  assert.equal(activityCount, 0);
+  assert.deepEqual(events, []);
+
+  server.onNotification(completedNotification("completed"));
+  assert.deepEqual(await promise, []);
+});
+
+test("a replayed completed message id is emitted and saved only once", async () => {
+  const { server, turn, promise, events } = activeTurn();
+  const notification = {
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        type: "agentMessage",
+        id: "msg-stable-1",
+        text: "只应出现一次",
+        phase: "commentary"
+      }
+    }
+  };
+
+  server.onNotification(notification);
+  server.onNotification(notification);
+
+  assert.deepEqual(turn.answers, ["🤔 只应出现一次"]);
+  assert.deepEqual(turn.answerMessages, [{
+    content: "🤔 只应出现一次",
+    messageId: "msg-stable-1",
+    final: true,
+    taskDurationMs: null
+  }]);
+  assert.equal(events.filter((event) => event.type === "message").length, 1);
+  assert.equal(events.filter((event) => event.type === "reply_done").length, 1);
+
+  server.onNotification(completedNotification("completed"));
+  assert.deepEqual(await promise, ["🤔 只应出现一次"]);
 });
