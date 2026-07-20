@@ -574,16 +574,21 @@ function autosizeInput() {
   updateVisualViewport();
 }
 
-// Android's IME "send" and "newline" actions both arrive as Enter key events.
-// Chromium does, however, clear the active composition/selection immediately
-// before a newline committed by the IME. Keep a selected, zero-width probe at
-// the caret so that this otherwise invisible difference can be observed in the
-// web page. The probe is always removed before drafts or messages are read.
+// Android's IME "send" and "newline" actions can both arrive as Enter key
+// events. Keep a zero-width probe immediately before a collapsed native caret
+// so the action can still be recognized without leaving the textarea in a
+// selected-text state. The probe is removed before drafts or messages are read.
 const androidImeActionProbe = "\u2060";
 const androidImeNewlineWindowMs = 750;
+const androidImeEnterDecisionMs = 60;
+const androidImeProcessPreludeWindowMs = 50;
 let androidImeComposing = false;
 let androidImeNewlineUntil = 0;
 let androidImeProbeTimer = 0;
+let androidImeEnterTimer = 0;
+let pendingAndroidImeEnter = null;
+let androidImeProcessKeyCandidate = null;
+let androidImeNewlinePreludeUntil = 0;
 
 function isAndroidImeClient(userAgent = navigator.userAgent) {
   const value = String(userAgent || "");
@@ -594,12 +599,97 @@ function composerText(value = els.input.value) {
   return String(value || "").split(androidImeActionProbe).join("");
 }
 
-function isAndroidImeProbeSelected(input = els.input) {
+function isAndroidImeProbeArmed(input = els.input) {
   const start = Number(input?.selectionStart);
   const end = Number(input?.selectionEnd);
   return Number.isInteger(start)
-    && end === start + androidImeActionProbe.length
-    && String(input.value || "").slice(start, end) === androidImeActionProbe;
+    && start === end
+    && start >= androidImeActionProbe.length
+    && String(input.value || "").slice(start - androidImeActionProbe.length, start) === androidImeActionProbe;
+}
+
+function isAndroidImeProcessKey(event = {}) {
+  return Number(event.keyCode) === 229 || Number(event.which) === 229;
+}
+
+function rememberAndroidImeProcessKey(event = {}, input = els.input) {
+  if (!isAndroidImeProcessKey(event) || !isAndroidImeProbeArmed(input)) {
+    androidImeProcessKeyCandidate = null;
+    return false;
+  }
+  androidImeProcessKeyCandidate = {
+    at: Date.now(),
+    text: composerText(input.value),
+    selectionStart: Number(input.selectionStart),
+    selectionEnd: Number(input.selectionEnd)
+  };
+  return true;
+}
+
+function finishAndroidImeProcessKey(event = {}, input = els.input) {
+  if (!isAndroidImeProcessKey(event)) return false;
+  const candidate = androidImeProcessKeyCandidate;
+  androidImeProcessKeyCandidate = null;
+  if (
+    !candidate
+    || Date.now() - candidate.at > androidImeProcessPreludeWindowMs
+    || candidate.text !== composerText(input.value)
+    || candidate.selectionStart !== Number(input.selectionStart)
+    || candidate.selectionEnd !== Number(input.selectionEnd)
+    || !isAndroidImeProbeArmed(input)
+  ) return false;
+  androidImeNewlinePreludeUntil = Date.now() + androidImeProcessPreludeWindowMs;
+  return true;
+}
+
+function hasAndroidImeNewlinePrelude() {
+  return androidImeNewlinePreludeUntil >= Date.now();
+}
+
+function clearAndroidImeProcessKeyState() {
+  androidImeProcessKeyCandidate = null;
+  androidImeNewlinePreludeUntil = 0;
+}
+
+function isAndroidImeCompositionKey(event = {}) {
+  return Boolean(event.isComposing || isAndroidImeProcessKey(event));
+}
+
+function isAndroidImeTextNewline(event = {}) {
+  const inputType = String(event.inputType || "");
+  const data = event.data;
+  return (inputType === "insertText" || inputType === "insertCompositionText")
+    && (data === "" || data === "\n" || data === "\r\n");
+}
+
+function isAndroidBrowserLineBreak(event = {}) {
+  return event.inputType === "insertLineBreak" || event.inputType === "insertParagraph";
+}
+
+function cancelPendingAndroidImeEnter() {
+  clearTimeout(androidImeEnterTimer);
+  androidImeEnterTimer = 0;
+  pendingAndroidImeEnter = null;
+}
+
+function finishPendingAndroidImeSend() {
+  if (!pendingAndroidImeEnter) return false;
+  cancelPendingAndroidImeEnter();
+  androidImeNewlineUntil = 0;
+  removeAndroidImeProbe();
+  sendMessage("steer");
+  scheduleAndroidImeProbe();
+  return true;
+}
+
+function queueAndroidImeSendDecision() {
+  cancelPendingAndroidImeEnter();
+  pendingAndroidImeEnter = {
+    text: composerText(),
+    selectionStart: Number(els.input.selectionStart),
+    selectionEnd: Number(els.input.selectionEnd)
+  };
+  androidImeEnterTimer = setTimeout(finishPendingAndroidImeSend, androidImeEnterDecisionMs);
 }
 
 function removeAndroidImeProbe(input = els.input) {
@@ -614,7 +704,7 @@ function removeAndroidImeProbe(input = els.input) {
 }
 
 function deleteComposerTextBesideProbe(input = els.input, direction = "backward") {
-  if (!isAndroidImeProbeSelected(input)) return false;
+  if (!isAndroidImeProbeArmed(input)) return false;
   const value = composerText(input.value);
   const caret = String(input.value || "").slice(0, input.selectionStart).split(androidImeActionProbe).join("").length;
   let deleteStart = caret;
@@ -644,7 +734,9 @@ function armAndroidImeProbe() {
   const start = Number.isInteger(els.input.selectionStart) ? els.input.selectionStart : els.input.value.length;
   const end = Number.isInteger(els.input.selectionEnd) ? els.input.selectionEnd : start;
   if (start !== end) return;
-  els.input.setRangeText(androidImeActionProbe, start, end, "select");
+  // "end" keeps selectionStart === selectionEnd, so Chromium draws its real
+  // blinking caret and the IME remains in normal text-composition mode.
+  els.input.setRangeText(androidImeActionProbe, start, end, "end");
 }
 
 function scheduleAndroidImeProbe(delay = 0) {
@@ -665,9 +757,14 @@ function hasPendingAndroidImeNewline() {
 function updateVisualViewport() {
   const viewport = window.visualViewport;
   if (!viewport) return;
-  const keyboardOffset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+  const viewportTop = Math.max(0, Number(viewport.offsetTop) || 0);
+  const viewportHeight = Math.max(1, Number(viewport.height) || window.innerHeight);
+  const keyboardOffset = Math.max(0, window.innerHeight - viewportHeight - viewportTop);
+  const composerHeight = Math.max(0, els.form.getBoundingClientRect().height || 0);
   document.documentElement.style.setProperty("--keyboard-offset", `${keyboardOffset}px`);
-  document.documentElement.style.setProperty("--visual-viewport-height", `${viewport.height}px`);
+  document.documentElement.style.setProperty("--visual-viewport-top", `${viewportTop}px`);
+  document.documentElement.style.setProperty("--visual-viewport-height", `${viewportHeight}px`);
+  if (composerHeight) document.documentElement.style.setProperty("--mobile-composer-height", `${composerHeight}px`);
 }
 
 function draftKeyFor(threadId = state.threadId, cwd = state.cwd) {
@@ -889,7 +986,7 @@ function renderTable(lines) {
       return `${renderInlineMarkdown(cell)}${" ".repeat(Math.max(0, width - tableCellVisualWidth(cell)))}`;
     }).join(" | ");
   });
-  return `<pre>${rendered.join("\n")}</pre>`;
+  return `<pre class="markdownTable">${rendered.join("\n")}</pre>`;
 }
 
 function formatSize(size) {
@@ -969,19 +1066,56 @@ function renderMarkdown(text) {
   let fence = null;
   let blockquote = [];
   let table = [];
+  let paragraph = [];
+  let list = null;
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    html.push(`<p>${paragraph.map(renderInlineMarkdown).join("<br>")}</p>`);
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (!list?.items.length) {
+      list = null;
+      return;
+    }
+    const tag = list.ordered ? "ol" : "ul";
+    const start = list.ordered && list.start !== 1 ? ` start="${list.start}"` : "";
+    const items = list.items.map((item) => {
+      const depth = Math.min(3, Math.max(0, item.depth));
+      const depthClass = depth ? ` markdownListDepth${depth}` : "";
+      const value = list.ordered && item.value !== null ? ` value="${item.value}"` : "";
+      const task = item.content.match(/^\[([ xX])\]\s+(.*)$/);
+      const taskClass = task ? " markdownTaskItem" : "";
+      const taskMark = task
+        ? `<span class="markdownTaskMark${task[1].toLowerCase() === "x" ? " checked" : ""}" aria-hidden="true">${task[1].toLowerCase() === "x" ? "✓" : ""}</span>`
+        : "";
+      const content = task ? task[2] : item.content;
+      return `<li class="markdownListItem${depthClass}${taskClass}"${value}>${taskMark}${renderInlineMarkdown(content)}</li>`;
+    }).join("");
+    html.push(`<${tag} class="markdownList"${start}>${items}</${tag}>`);
+    list = null;
+  };
 
   const flushBlockquote = () => {
     if (!blockquote.length) return;
     let start = 0;
     let content = "";
     const callout = blockquote[0].match(/^\[!(\w+)\]\s*(.*)$/);
+    let className = "";
     if (callout) {
-      content += callout[2] ? `<b>${escapeHtml(callout[1])}: ${escapeHtml(callout[2])}</b>` : `<b>${escapeHtml(callout[1])}</b>`;
+      const calloutKinds = new Set(["note", "tip", "important", "warning", "caution"]);
+      const requestedKind = callout[1].toLowerCase();
+      const kind = calloutKinds.has(requestedKind) ? requestedKind : "note";
+      const defaultTitles = { note: "提示", tip: "建议", important: "重要", warning: "警告", caution: "注意" };
+      const title = callout[2] || defaultTitles[kind];
+      className = ` class="markdownCallout markdownCallout-${kind}"`;
+      content += `<div class="markdownCalloutTitle">${renderInlineMarkdown(title)}</div>`;
       start = 1;
-      if (start < blockquote.length) content += "\n";
     }
-    content += blockquote.slice(start).map(renderInlineMarkdown).join("\n");
-    html.push(`<blockquote>${content}</blockquote>`);
+    const body = blockquote.slice(start).map(renderInlineMarkdown).join("<br>");
+    if (body) content += `<div class="markdownCalloutBody">${body}</div>`;
+    html.push(`<blockquote${className}>${content}</blockquote>`);
     blockquote = [];
   };
   const flushTable = () => {
@@ -994,6 +1128,8 @@ function renderMarkdown(text) {
     const line = lines[index];
     const trimmed = line.trim();
     if (trimmed.startsWith("```")) {
+      flushParagraph();
+      flushList();
       flushBlockquote();
       flushTable();
       if (!fence) {
@@ -1015,35 +1151,83 @@ function renderMarkdown(text) {
     if (!isQuote) flushBlockquote();
     if (!isTable) flushTable();
     if (isQuote) {
+      flushParagraph();
+      flushList();
       blockquote.push(trimmed === ">" ? "" : trimmed.replace(/^>\s?/, ""));
       continue;
     }
     if (isTable) {
+      flushParagraph();
+      flushList();
       table.push(trimmed);
+      continue;
+    }
+
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
       continue;
     }
 
     const heading = line.match(/^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*$/);
     if (heading) {
+      flushParagraph();
+      flushList();
       const level = heading[1].length;
       const content = heading[2].replace(/[ \t]+#+[ \t]*$/, "");
       html.push(`<h${level}>${renderInlineMarkdown(content)}</h${level}>`);
     }
-    else if (/^[-*_]{3,}$/.test(trimmed)) html.push("——————————");
+    else if (/^[-*_]{3,}$/.test(trimmed)) {
+      flushParagraph();
+      flushList();
+      html.push('<hr class="markdownDivider">');
+    }
     else {
-      const bullet = line.match(/^(\s*)[-*]\s+(.*)$/);
-      const ordered = line.match(/^(\s*)\d+\.\s+(.*)$/);
+      const bullet = line.match(/^(\s*)[-+*]\s+(.*)$/);
+      const ordered = line.match(/^(\s*)(\d+)[.)]\s+(.*)$/);
       if (bullet) {
-        html.push(`${"  ".repeat(Math.floor(bullet[1].length / 2))}• ${renderInlineMarkdown(bullet[2])}`);
+        flushParagraph();
+        if (list?.ordered) flushList();
+        if (!list) list = { ordered: false, start: 1, items: [] };
+        list.items.push({
+          depth: Math.floor(bullet[1].replaceAll("\t", "  ").length / 2),
+          value: null,
+          content: bullet[2]
+        });
       } else if (ordered) {
-        const marker = line.slice(0, line.length - ordered[2].length).trim();
-        html.push(`${"  ".repeat(Math.floor(ordered[1].length / 2))}${escapeHtml(marker)} ${renderInlineMarkdown(ordered[2])}`);
+        flushParagraph();
+        if (list && !list.ordered) flushList();
+        const value = Number(ordered[2]);
+        if (!list) list = { ordered: true, start: value, items: [] };
+        list.items.push({
+          depth: Math.floor(ordered[1].replaceAll("\t", "  ").length / 2),
+          value,
+          content: ordered[3]
+        });
       } else {
-        html.push(renderInlineMarkdown(line));
+        flushList();
+        const status = trimmed.match(/^(✅|🤔|❌|⏳|⚠️?|ℹ️?)\s+(.+)$/u);
+        if (status) {
+          flushParagraph();
+          const icon = status[1];
+          const kind = icon.startsWith("✅")
+            ? "success"
+            : (icon.startsWith("🤔") || icon.startsWith("⏳")
+              ? "thinking"
+              : (icon.startsWith("❌") || icon.startsWith("⚠") ? "warning" : "info"));
+          html.push(`<div class="messageLead messageLead-${kind}"><span class="messageLeadIcon" aria-hidden="true">${icon}</span><span class="messageLeadText">${renderInlineMarkdown(status[2])}</span></div>`);
+        } else if (/^[^：:\n]{1,32}[：:]$/u.test(trimmed)) {
+          flushParagraph();
+          html.push(`<h4 class="messageSectionTitle">${renderInlineMarkdown(trimmed)}</h4>`);
+        } else {
+          paragraph.push(line);
+        }
       }
     }
   }
 
+  flushParagraph();
+  flushList();
   flushBlockquote();
   flushTable();
   if (fence) html.push(`<pre><code>${escapeHtml(fence.lines.join("\n"))}</code></pre>`);
@@ -1055,6 +1239,7 @@ function setMessageContent(element, text) {
   element.innerHTML = renderMarkdown(text);
   if (element.classList.contains("assistant")) {
     element.classList.toggle("completion", /^✅\s/.test(text || ""));
+    element.classList.toggle("thinking", /^🤔\s/.test(text || ""));
   }
 }
 
@@ -2627,6 +2812,7 @@ async function refreshNativeNotificationStatus() {
 }
 
 async function sendMessage(mode = "steer") {
+  cancelPendingAndroidImeEnter();
   const connectorId = currentConnectorId();
   const message = composerText().trim();
   if (!message && !state.uploads.length) return;
@@ -2684,6 +2870,7 @@ function shouldSendMessageFromKeydown(event = {}, androidImeActionReady = false,
   return Boolean(
     androidImeActionReady
     && !androidImeNewlinePending
+    && !isAndroidImeCompositionKey(event)
     && !event.shiftKey
     && !event.altKey
     && !event.ctrlKey
@@ -2692,21 +2879,34 @@ function shouldSendMessageFromKeydown(event = {}, androidImeActionReady = false,
 }
 
 els.input.addEventListener("keydown", (event) => {
+  if (isAndroidImeClient() && isAndroidImeProcessKey(event)) rememberAndroidImeProcessKey(event);
   if (
     isAndroidImeClient()
-    && isAndroidImeProbeSelected()
+    && isAndroidImeProbeArmed()
     && (event.key === "Backspace" || event.key === "Delete")
   ) {
     // Let the browser perform its normal deletion against the real text, not
-    // against the selected zero-width action probe.
+    // against the zero-width action probe immediately before the caret.
     removeAndroidImeProbe();
     return;
   }
-  const pendingNewline = hasPendingAndroidImeNewline();
+  const processKeyNewline = hasAndroidImeNewlinePrelude();
+  const pendingNewline = hasPendingAndroidImeNewline() || processKeyNewline;
   const androidImeActionReady = isAndroidImeClient()
-    && (isAndroidImeProbeSelected() || event.isComposing);
+    && (isAndroidImeProbeArmed() || event.isComposing);
   if (!shouldSendMessageFromKeydown(event, androidImeActionReady, pendingNewline)) {
-    if (event.key === "Enter" && pendingNewline) androidImeNewlineUntil = 0;
+    if (event.key === "Enter" && pendingNewline) {
+      androidImeNewlineUntil = 0;
+      androidImeNewlinePreludeUntil = 0;
+    }
+    return;
+  }
+  if (androidImeActionReady && !event.ctrlKey && !event.metaKey) {
+    // Do not cancel Enter yet. Android emits beforeinput immediately after
+    // keydown; insertText means the dedicated newline button, while the
+    // editor's insertLineBreak is the keyboard Send action. Waiting for that
+    // event preserves the native caret and still lets both keys be distinct.
+    queueAndroidImeSendDecision();
     return;
   }
   event.preventDefault();
@@ -2720,11 +2920,12 @@ els.input.addEventListener("keydown", (event) => {
 
 els.input.addEventListener("beforeinput", (event) => {
   if (!isAndroidImeClient()) return;
-  const probeSelected = isAndroidImeProbeSelected();
+  const probeArmed = isAndroidImeProbeArmed();
   const deletionDirection = event.inputType === "deleteContentBackward"
     ? "backward"
     : (event.inputType === "deleteContentForward" ? "forward" : "");
-  if (probeSelected && deletionDirection) {
+  if (probeArmed && deletionDirection) {
+    cancelPendingAndroidImeEnter();
     if (event.cancelable) {
       event.preventDefault();
       deleteComposerTextBesideProbe(els.input, deletionDirection);
@@ -2737,13 +2938,34 @@ els.input.addEventListener("beforeinput", (event) => {
     }
     return;
   }
-  if (event.data !== "") return;
-  const clearsProbe = event.inputType === "insertText" && isAndroidImeProbeSelected();
-  const clearsComposition = event.inputType === "insertCompositionText" && androidImeComposing;
-  if (clearsProbe || clearsComposition) markAndroidImeNewlineCommit();
+  const textNewline = isAndroidImeTextNewline(event);
+  const browserLineBreak = isAndroidBrowserLineBreak(event);
+  if (pendingAndroidImeEnter) {
+    if (textNewline || androidImeComposing) {
+      cancelPendingAndroidImeEnter();
+      markAndroidImeNewlineCommit();
+      return;
+    }
+    if (browserLineBreak) {
+      if (!event.cancelable) {
+        cancelPendingAndroidImeEnter();
+        markAndroidImeNewlineCommit();
+        return;
+      }
+      event.preventDefault();
+      finishPendingAndroidImeSend();
+      return;
+    }
+    cancelPendingAndroidImeEnter();
+  }
+  if (browserLineBreak || (textNewline && (probeArmed || androidImeComposing))) {
+    markAndroidImeNewlineCommit();
+  }
 });
 
 els.input.addEventListener("compositionstart", () => {
+  clearAndroidImeProcessKeyState();
+  cancelPendingAndroidImeEnter();
   androidImeComposing = true;
 });
 
@@ -2754,16 +2976,32 @@ els.input.addEventListener("compositionend", (event) => {
 });
 
 els.input.addEventListener("input", (event) => {
+  clearAndroidImeProcessKeyState();
+  if (pendingAndroidImeEnter && composerText() !== pendingAndroidImeEnter.text) {
+    cancelPendingAndroidImeEnter();
+  }
   autosizeInput();
   saveDraft();
   if (!event.isComposing && !androidImeComposing) scheduleAndroidImeProbe();
 });
+els.input.addEventListener("keyup", (event) => {
+  if (isAndroidImeClient() && isAndroidImeProcessKey(event)) finishAndroidImeProcessKey(event);
+});
 els.input.addEventListener("focus", () => scheduleAndroidImeProbe());
-els.input.addEventListener("blur", () => removeAndroidImeProbe());
-els.input.addEventListener("pointerdown", () => removeAndroidImeProbe());
+els.input.addEventListener("blur", () => {
+  clearAndroidImeProcessKeyState();
+  cancelPendingAndroidImeEnter();
+  removeAndroidImeProbe();
+});
+els.input.addEventListener("pointerdown", () => {
+  clearAndroidImeProcessKeyState();
+  cancelPendingAndroidImeEnter();
+  removeAndroidImeProbe();
+});
 els.input.addEventListener("pointerup", () => scheduleAndroidImeProbe());
 els.input.addEventListener("select", () => {
-  if (!isAndroidImeClient() || isAndroidImeProbeSelected()) return;
+  if (!isAndroidImeClient()) return;
+  if (isAndroidImeProbeArmed()) return;
   removeAndroidImeProbe();
   if (els.input.selectionStart === els.input.selectionEnd) scheduleAndroidImeProbe();
 });

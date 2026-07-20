@@ -30,3 +30,30 @@ test("scroll jump controls use an isolated pointer-safe overlay and explicit ico
   assert.match(block, /\.scrollJump\s*\{[\s\S]*?-webkit-appearance:\s*none;[\s\S]*?appearance:\s*none;/);
   assert.match(block, /\.scrollJumpIcon\s*\{[\s\S]*?display:\s*block;[\s\S]*?width:\s*20px;[\s\S]*?height:\s*20px;/);
 });
+
+test("mobile keyboard layout is one visual-viewport shell without scroll-chain gaps", async () => {
+  const html = await readFile(new URL("../public/remote.html", import.meta.url), "utf8");
+  const styles = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  const source = await readFile(new URL("../public/remote.js", import.meta.url), "utf8");
+  const mobile = styles.slice(styles.indexOf("@media (max-width: 700px)"));
+  const viewport = source.slice(
+    source.indexOf("function updateVisualViewport"),
+    source.indexOf("function draftKeyFor")
+  );
+
+  assert.match(html, /interactive-widget=resizes-content/);
+  assert.match(html, /<html[^>]*class="remotePageRoot"/);
+  assert.match(html, /<body class="remotePage">/);
+  assert.match(styles, /html\.remotePageRoot,[\s\S]*?body\.remotePage\s*\{[\s\S]*?overscroll-behavior:\s*none/);
+  assert.match(styles, /\.remoteLogWrap\s*\{[\s\S]*?overscroll-behavior:\s*none/);
+  assert.match(mobile, /\.remoteApp\s*\{[\s\S]*?position:\s*fixed;[\s\S]*?top:\s*var\(--visual-viewport-top\);[\s\S]*?grid-template-rows:[^;]*minmax\(0, 1fr\) auto;/);
+  assert.match(mobile, /\.remoteLogWrap\s*\{[\s\S]*?grid-row:\s*2;[\s\S]*?height:\s*auto;/);
+  assert.match(mobile, /\.remoteComposer\s*\{[\s\S]*?position:\s*relative;[\s\S]*?grid-row:\s*3;/);
+  assert.match(mobile, /\.remoteComposer\s*\{[\s\S]*?min-height:\s*var\(--mobile-composer-min-height\)/);
+  assert.doesNotMatch(mobile, /\.remoteComposer\s*\{[^}]*min-height:\s*var\(--mobile-composer-height\)/);
+  assert.doesNotMatch(mobile, /\.remoteComposer\s*\{[^}]*bottom:\s*var\(--keyboard-offset\)/);
+  assert.match(mobile, /\.scrollJumpLayer\s*\{[\s\S]*?position:\s*absolute;/);
+  assert.match(viewport, /--visual-viewport-top/);
+  assert.match(viewport, /--visual-viewport-height/);
+  assert.match(viewport, /--mobile-composer-height/);
+});
