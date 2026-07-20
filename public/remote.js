@@ -37,6 +37,9 @@ const state = {
   currentTaskStartedAtMs: null,
   pushSubscribed: false,
   nativeNotificationConnected: false,
+  autoSpeech: localStorage.getItem("codex-remote-auto-speech") === "1",
+  spokenMessageIds: new Set(),
+  speechUtterances: new Set(),
   hideThoughts: localStorage.getItem("codex-remote-hide-thoughts") === "1",
   onlyMine: localStorage.getItem("codex-remote-only-mine") === "1",
   completedUnreadThreads: new Set(),
@@ -73,6 +76,7 @@ const slashCommands = [
   { command: "/follow steer", title: "引导模式", detail: "运行中发送的新消息引导当前任务" },
   { command: "/steer ", title: "立即引导", detail: "把后续文字发送给当前正在运行的任务" },
   { command: "/notify", title: "通知", detail: notificationDetail, action: requestNotifications },
+  { command: "/tts", title: "自动语音朗读", detail: speechDetail, action: toggleAutoSpeech },
   { command: "/result", title: "只看结果", detail: () => state.hideThoughts ? "当前只显示用户气泡和 ✅ 气泡，点击后显示全部" : "隐藏思考过程气泡，只显示用户气泡和 ✅ 气泡", action: toggleResultOnly },
   { command: "/mine", title: "只看自己", detail: () => state.onlyMine ? "当前只显示自己发送的气泡，点击后显示全部" : "只显示自己发送的消息气泡", action: toggleOnlyMine },
   { command: "/stop", title: "中断", detail: "通过 turn/interrupt 中断当前回合" }
@@ -176,6 +180,203 @@ function notificationDetail() {
   if (permission === "denied") return "通知已被浏览器阻止，请到 Chrome/系统通知设置里放开";
   if (permission === "unsupported") return "当前浏览器不支持网页通知";
   return "点击后向浏览器申请通知权限";
+}
+
+function speechEngine() {
+  return typeof window !== "undefined" && "speechSynthesis" in window
+    ? window.speechSynthesis
+    : null;
+}
+
+function speechSupported() {
+  return Boolean(speechEngine() && typeof window.SpeechSynthesisUtterance === "function");
+}
+
+function speechDetail() {
+  if (!speechSupported()) return "当前浏览器或 WebView 不支持系统语音朗读";
+  return state.autoSpeech ? "已开启，点击后关闭并停止当前朗读" : "点击开启，助手的每个完整消息气泡将自动朗读";
+}
+
+function stopSpeech() {
+  const engine = speechEngine();
+  try { engine?.cancel(); } catch {}
+  state.speechUtterances.clear();
+}
+
+function speechTextFromMessage(text = "") {
+  return String(text || "")
+    .replace(/```[^\n]*\n?[\s\S]*?```/g, " 代码内容已省略。 ")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/https?:\/\/[^\s)]+/gi, " 链接 ")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/^\s*(?:#{1,6}|>|[-+*])\s*/gm, "")
+    .replace(/^\s*\d+[.)]\s+/gm, "")
+    .replace(/[|*_~]+/g, " ")
+    .replace(/^[✅🤔❌⏳]\s*/u, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 12000);
+}
+
+function speechChunks(text, maxLength = 1000) {
+  const chunks = [];
+  let remaining = String(text || "").trim();
+  while (remaining.length > maxLength) {
+    const windowText = remaining.slice(0, maxLength + 1);
+    const punctuationMatches = [...windowText.matchAll(/[。！？!?；;]\s*/g)];
+    const punctuation = punctuationMatches[punctuationMatches.length - 1];
+    let splitAt = punctuation ? punctuation.index + punctuation[0].length : -1;
+    if (splitAt < Math.floor(maxLength * 0.45)) {
+      const spaceAt = windowText.lastIndexOf(" ");
+      splitAt = spaceAt >= Math.floor(maxLength * 0.45) ? spaceAt + 1 : maxLength;
+    }
+    chunks.push(remaining.slice(0, splitAt).trim());
+    remaining = remaining.slice(splitAt).trim();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks.filter(Boolean);
+}
+
+function preferredSpeechVoice(engine) {
+  const voices = typeof engine?.getVoices === "function" ? engine.getVoices() : [];
+  return voices.find((voice) => /^zh[-_]CN$/i.test(voice.lang || ""))
+    || voices.find((voice) => /^zh/i.test(voice.lang || ""))
+    || voices.find((voice) => voice.default)
+    || null;
+}
+
+function enqueueSpeech(text) {
+  if (!speechSupported()) return false;
+  const content = speechTextFromMessage(text);
+  if (!content) return false;
+  const engine = speechEngine();
+  const voice = preferredSpeechVoice(engine);
+  let queued = 0;
+  if (engine.paused) engine.resume();
+  for (const chunk of speechChunks(content)) {
+    const utterance = new window.SpeechSynthesisUtterance(chunk);
+    utterance.lang = voice?.lang || "zh-CN";
+    if (voice) utterance.voice = voice;
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+    const release = () => state.speechUtterances.delete(utterance);
+    utterance.onend = release;
+    utterance.onerror = release;
+    state.speechUtterances.add(utterance);
+    try {
+      engine.speak(utterance);
+      queued += 1;
+    } catch {
+      release();
+    }
+  }
+  return queued > 0;
+}
+
+function speechMessageKey(data = {}) {
+  const rawId = String(data.messageId || "");
+  const messagePart = rawId && rawId !== "assistant"
+    ? rawId
+    : `content:${String(data.content || "")}`;
+  return `${currentConnectorId()}\n${state.threadId || state.cwd || "new"}\n${messagePart}`;
+}
+
+function speakCompletedAssistantMessage(data = {}) {
+  if (!state.autoSpeech || !data.final || data.role !== "assistant") return false;
+  const key = speechMessageKey(data);
+  if (state.spokenMessageIds.has(key)) return false;
+  if (!enqueueSpeech(data.content || "")) return false;
+  state.spokenMessageIds.add(key);
+  while (state.spokenMessageIds.size > 500) {
+    state.spokenMessageIds.delete(state.spokenMessageIds.values().next().value);
+  }
+  return true;
+}
+
+function toggleAutoSpeech() {
+  closeCommandMenu();
+  if (!speechSupported()) {
+    state.autoSpeech = false;
+    localStorage.removeItem("codex-remote-auto-speech");
+    appendEvent("当前浏览器或 WebView 不支持系统语音朗读，请检查 Android 系统 TTS 引擎。");
+    renderCommandList();
+    return;
+  }
+  state.autoSpeech = !state.autoSpeech;
+  localStorage.setItem("codex-remote-auto-speech", state.autoSpeech ? "1" : "0");
+  stopSpeech();
+  appendEvent(state.autoSpeech ? "自动语音朗读已开启" : "自动语音朗读已关闭");
+  if (state.autoSpeech) enqueueSpeech("自动语音朗读已开启");
+  renderCommandList();
+}
+
+function assistantSpeechTextsAfterUserBubble(userBubble) {
+  const userBlock = userBubble?.closest?.(".messageBlock.userBlock") || userBubble;
+  if (!userBlock) return [];
+  const replies = [];
+  for (let node = userBlock.nextElementSibling; node; node = node.nextElementSibling) {
+    if (node.matches?.(".messageBlock.userBlock, .message.user") || node.classList?.contains("userBlock")) break;
+    const bubbles = [];
+    if (node.matches?.(".message.assistant")) bubbles.push(node);
+    if (typeof node.querySelectorAll === "function") bubbles.push(...node.querySelectorAll(".message.assistant"));
+    for (const bubble of bubbles) {
+      const text = bubble.dataset?.speechText ?? bubble.textContent ?? "";
+      if (speechTextFromMessage(text)) replies.push(text);
+    }
+  }
+  return replies;
+}
+
+function showSpeechFeedback(text) {
+  if (typeof document === "undefined" || !text) return;
+  let feedback = document.querySelector(".speechFeedback");
+  if (!feedback) {
+    feedback = document.createElement("div");
+    feedback.className = "speechFeedback";
+    feedback.setAttribute("role", "status");
+    feedback.setAttribute("aria-live", "polite");
+    document.body.appendChild(feedback);
+  }
+  feedback.textContent = text;
+  clearTimeout(showSpeechFeedback.removeTimer);
+  showSpeechFeedback.removeTimer = setTimeout(() => feedback.remove(), 2400);
+}
+
+function markUserBubbleSpeechSelection(userBubble) {
+  if (!userBubble?.classList) return;
+  userBubble.classList.add("speechSelected");
+  setTimeout(() => userBubble.classList.remove("speechSelected"), 550);
+}
+
+function speakRepliesAfterUserBubble(userBubble) {
+  markUserBubbleSpeechSelection(userBubble);
+  stopSpeech();
+  if (!speechSupported()) {
+    showSpeechFeedback("当前浏览器或 WebView 不支持系统语音朗读");
+    return 0;
+  }
+  const replies = assistantSpeechTextsAfterUserBubble(userBubble);
+  let queued = 0;
+  for (const reply of replies) {
+    if (enqueueSpeech(reply)) queued += 1;
+  }
+  showSpeechFeedback(queued
+    ? `正在朗读这条消息后的 ${queued} 条 Codex 回复`
+    : "该消息后暂时没有可朗读的 Codex 回复");
+  return queued;
+}
+
+function handleUserBubbleSpeechInteraction(event) {
+  if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return;
+  const target = event.target;
+  const userBubble = target?.closest?.(".message.user");
+  if (!userBubble || !els.log.contains(userBubble)) return;
+  if (target !== userBubble && target?.closest?.("a, button, input, textarea, select")) return;
+  if (event.type === "keydown") event.preventDefault();
+  speakRepliesAfterUserBubble(userBubble);
 }
 
 function urlBase64ToUint8Array(value) {
@@ -755,6 +956,7 @@ function renderMarkdown(text) {
 }
 
 function setMessageContent(element, text) {
+  element.dataset.speechText = String(text || "");
   element.innerHTML = renderMarkdown(text);
   if (element.classList.contains("assistant")) {
     element.classList.toggle("completion", /^✅\s/.test(text || ""));
@@ -822,6 +1024,12 @@ function appendMessage(role, text, meta = {}) {
   wrapper.className = `messageBlock ${role}Block${isCompletion ? " completionBlock" : ""}`;
   const item = document.createElement("div");
   item.className = `message ${role}${isCompletion ? " completion" : ""}`;
+  if (role === "user") {
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.setAttribute("aria-label", "朗读这条消息之后的 Codex 回复");
+    item.title = "点击朗读这条消息之后的 Codex 回复";
+  }
   setMessageContent(item, text);
   wrapper.appendChild(item);
   const at = meta.at || (role === "user" ? new Date().toISOString() : "");
@@ -1080,6 +1288,7 @@ function renderState(data) {
   // supersedes older /state requests that may still be in flight.
   stateLoadGeneration += 1;
   saveDraft();
+  const previousConnectorId = state.selectedConnectorId || "";
   if (data.connectorId !== undefined) state.selectedConnectorId = data.connectorId || "";
   if (Array.isArray(data.connectors)) state.connectors = data.connectors;
   if (data.localRemark !== undefined) state.localConnectorRemark = data.localRemark || "";
@@ -1088,6 +1297,7 @@ function renderState(data) {
   const previousTop = els.logWrap.scrollTop;
   const previousThreadId = state.threadId;
   const nextThreadId = data.threadId || "";
+  if (nextThreadId !== previousThreadId || (state.selectedConnectorId || "") !== previousConnectorId) stopSpeech();
   const applySettings = nextThreadId !== previousThreadId
     || settingsResponseIsCurrent(data.modelSettingsUpdatedAt || "");
   if (Number(data.eventSeq) > state.lastEventSeq) state.lastEventSeq = Number(data.eventSeq);
@@ -2201,6 +2411,7 @@ function handleRemoteEvent(data) {
         data.taskDurationMs = Math.max(0, Date.now() - state.currentTaskStartedAtMs);
       }
       upsertAssistantMessage(data.content, data.final, data.messageId || "assistant", data);
+      if (data.final) speakCompletedAssistantMessage(data);
       if (data.final && /^✅\s/.test(data.content || "")) notifyCodexReply(data);
     } else {
       appendMessage(data.role, data.content, data);
@@ -2613,6 +2824,8 @@ els.scrollBottom.addEventListener("click", () => {
 });
 
 els.logWrap.addEventListener("scroll", updateScrollJumps);
+els.log.addEventListener("click", handleUserBubbleSpeechInteraction);
+els.log.addEventListener("keydown", handleUserBubbleSpeechInteraction);
 document.addEventListener("visibilitychange", resyncWhenActive);
 window.addEventListener("pageshow", resyncWhenActive);
 window.addEventListener("focus", resyncWhenActive);
