@@ -116,3 +116,31 @@ test("running tasks have a lightweight replay fallback for silent Android EventS
   assert.match(reconcile, /if \(!state\.running\)[\s\S]*?clearTimeout\(realtimeReconcileTimer\)/);
   assert.match(reconcile, /setTimeout\(async \(\) =>[\s\S]*?resyncEvents\(\)[\s\S]*?, 3000\)/);
 });
+
+test("returning from the background preserves and can rebuild live thought bubbles", async () => {
+  const source = await readFile(new URL("../public/remote.js", import.meta.url), "utf8");
+  const router = await readFile(new URL("../src/router.js", import.meta.url), "utf8");
+  const resume = source.slice(
+    source.indexOf("function resyncWhenActive"),
+    source.indexOf("function restorePushSubscription")
+  );
+
+  assert.match(resume, /resyncEvents\(\)\.catch\(\(\) => loadState\(\)/);
+  assert.doesNotMatch(resume, /^function resyncWhenActive\(\)[\s\S]*?\n\s*loadState\(\)\.catch/m);
+  assert.match(router, /const payload = runner\?\.running \? runnerStatePayload\(runner\) : state/);
+});
+
+test("a done event cannot erase a just-rendered short final reply", async () => {
+  const source = await readFile(new URL("../public/remote.js", import.meta.url), "utf8");
+  const messageHandler = source.slice(
+    source.indexOf('if (data.type === "message")'),
+    source.indexOf('if (data.type === "reply_done")')
+  );
+  const doneHandler = source.slice(
+    source.indexOf('if (data.type === "done")'),
+    source.indexOf('if (data.type === "thread_completion"')
+  );
+
+  assert.match(messageHandler, /upsertAssistantMessage\(data\.content, data\.final/);
+  assert.doesNotMatch(doneHandler, /loadState|renderState|els\.log/);
+});

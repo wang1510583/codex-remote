@@ -15,7 +15,7 @@ import {
   listThreads, deleteThread, runnerForIncomingState, statusPayload, runnerForState,
   selectedRunner, setSelectedRunnerKey, clearThreadCompletedUnread, markInterruptedInflight,
   runningThreads, runnerKeyForState, ensureStateModelSettings,
-  sessionModelSettingsPayload, updateSessionModelSettings, usagePayload, resetUsageLimit,
+  runnerStatePayload, sessionModelSettingsPayload, updateSessionModelSettings, usagePayload, resetUsageLimit,
   syncSharedThreadSettings
 } from "./runner.js";
 import { isInternalMessage, mergeLocalMessageMeta } from "./threads.js";
@@ -179,7 +179,10 @@ export async function handle(req, res) {
       state = await syncSharedThreadSettings(state).catch(() => state);
       if (loadedThread && !runner?.running) await writeStateIfIdle(state, connectorId);
       setSelectedRunnerKey(runner ? runner.key : runnerKeyForState(state));
-      const payload = runner?.running ? runner.state : state;
+      // A running state must include the app-server turn's current transient
+      // messages. Otherwise a tab restored from the background clears the
+      // live thought bubble and cannot rebuild it until the thread is reopened.
+      const payload = runner?.running ? runnerStatePayload(runner) : state;
       const connectorsPayload = await remoteConnectorsPayload();
       return json(res, 200, {
         ...payload,

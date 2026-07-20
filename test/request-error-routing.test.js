@@ -12,12 +12,12 @@ test("ordinary request failures are not broadcast as task errors", async () => {
   assert.match(catchBlock, /json\(res, statusCode,/);
 });
 
-test("a failed post-completion refresh does not create a completion or error bubble", async () => {
+test("task completion preserves the final live reply instead of rebuilding messages", async () => {
   const remoteSource = await readFile(new URL("../public/remote.js", import.meta.url), "utf8");
   const doneHandler = remoteSource.slice(
     remoteSource.indexOf('if (data.type === "done")'),
     remoteSource.indexOf('if (data.type === "thread_completion"')
   );
-  assert.match(doneHandler, /loadState\(\)\.catch\(\(error\) => console\.warn/);
-  assert.doesNotMatch(doneHandler, /appendEvent|upsertAssistantMessage/);
+  assert.doesNotMatch(doneHandler, /loadState|renderState|innerHTML/);
+  assert.match(doneHandler, /scheduleThreadListRefresh\(250\)/);
 });

@@ -537,8 +537,8 @@ function setRunning(running, queueLength = state.queueLength, queueMessages = st
   if (state.running) state.replyDone = false;
   els.sendQueue.disabled = state.externalRunning;
   els.sendSteer.disabled = state.externalRunning;
-  els.sendQueue.title = state.externalRunning ? "Codex Desktop/CLI 正在执行，网页端当前为只读同步" : "队列模式发送";
-  els.sendSteer.title = state.externalRunning ? "外部 Codex 任务不能从网页端引导" : "引导模式发送";
+  els.sendQueue.title = state.externalRunning ? "Codex Desktop/CLI 正在执行，网页端当前为只读同步" : "队列模式发送（备用）";
+  els.sendSteer.title = state.externalRunning ? "外部 Codex 任务不能从网页端引导" : "引导模式发送（默认，Ctrl+Enter）";
   if (els.newChat) els.newChat.disabled = state.running;
   els.threadButton.disabled = false;
   updateMeta();
@@ -574,6 +574,94 @@ function autosizeInput() {
   updateVisualViewport();
 }
 
+// Android's IME "send" and "newline" actions both arrive as Enter key events.
+// Chromium does, however, clear the active composition/selection immediately
+// before a newline committed by the IME. Keep a selected, zero-width probe at
+// the caret so that this otherwise invisible difference can be observed in the
+// web page. The probe is always removed before drafts or messages are read.
+const androidImeActionProbe = "\u2060";
+const androidImeNewlineWindowMs = 750;
+let androidImeComposing = false;
+let androidImeNewlineUntil = 0;
+let androidImeProbeTimer = 0;
+
+function isAndroidImeClient(userAgent = navigator.userAgent) {
+  const value = String(userAgent || "");
+  return /Android/i.test(value) && /Chrome|Chromium|EdgA|OPR|SamsungBrowser/i.test(value);
+}
+
+function composerText(value = els.input.value) {
+  return String(value || "").split(androidImeActionProbe).join("");
+}
+
+function isAndroidImeProbeSelected(input = els.input) {
+  const start = Number(input?.selectionStart);
+  const end = Number(input?.selectionEnd);
+  return Number.isInteger(start)
+    && end === start + androidImeActionProbe.length
+    && String(input.value || "").slice(start, end) === androidImeActionProbe;
+}
+
+function removeAndroidImeProbe(input = els.input) {
+  const value = String(input?.value || "");
+  if (!value.includes(androidImeActionProbe)) return;
+  const start = Number.isInteger(input.selectionStart) ? input.selectionStart : value.length;
+  const end = Number.isInteger(input.selectionEnd) ? input.selectionEnd : start;
+  const direction = input.selectionDirection || "none";
+  const offsetWithoutProbe = (offset) => value.slice(0, offset).split(androidImeActionProbe).join("").length;
+  input.value = composerText(value);
+  input.setSelectionRange(offsetWithoutProbe(start), offsetWithoutProbe(end), direction);
+}
+
+function deleteComposerTextBesideProbe(input = els.input, direction = "backward") {
+  if (!isAndroidImeProbeSelected(input)) return false;
+  const value = composerText(input.value);
+  const caret = String(input.value || "").slice(0, input.selectionStart).split(androidImeActionProbe).join("").length;
+  let deleteStart = caret;
+  let deleteEnd = caret;
+  if (direction === "forward") {
+    const nextCharacter = Array.from(value.slice(caret))[0] || "";
+    deleteEnd += nextCharacter.length;
+  } else {
+    const previousCharacter = Array.from(value.slice(0, caret)).pop() || "";
+    deleteStart -= previousCharacter.length;
+  }
+  input.value = `${value.slice(0, deleteStart)}${value.slice(deleteEnd)}`;
+  input.setSelectionRange(deleteStart, deleteStart);
+  return true;
+}
+
+function armAndroidImeProbe() {
+  clearTimeout(androidImeProbeTimer);
+  androidImeProbeTimer = 0;
+  if (!isAndroidImeClient() || androidImeComposing || document.activeElement !== els.input) return;
+  const remaining = androidImeNewlineUntil - Date.now();
+  if (remaining > 0) {
+    scheduleAndroidImeProbe(remaining + 20);
+    return;
+  }
+  removeAndroidImeProbe();
+  const start = Number.isInteger(els.input.selectionStart) ? els.input.selectionStart : els.input.value.length;
+  const end = Number.isInteger(els.input.selectionEnd) ? els.input.selectionEnd : start;
+  if (start !== end) return;
+  els.input.setRangeText(androidImeActionProbe, start, end, "select");
+}
+
+function scheduleAndroidImeProbe(delay = 0) {
+  if (!isAndroidImeClient()) return;
+  clearTimeout(androidImeProbeTimer);
+  androidImeProbeTimer = setTimeout(armAndroidImeProbe, Math.max(0, delay));
+}
+
+function markAndroidImeNewlineCommit() {
+  androidImeNewlineUntil = Date.now() + androidImeNewlineWindowMs;
+  scheduleAndroidImeProbe(androidImeNewlineWindowMs + 20);
+}
+
+function hasPendingAndroidImeNewline() {
+  return isAndroidImeClient() && androidImeNewlineUntil >= Date.now();
+}
+
 function updateVisualViewport() {
   const viewport = window.visualViewport;
   if (!viewport) return;
@@ -588,13 +676,15 @@ function draftKeyFor(threadId = state.threadId, cwd = state.cwd) {
 
 function saveDraft() {
   const key = state.draftKey || draftKeyFor();
-  const value = els.input.value;
+  const value = composerText();
   if (value) localStorage.setItem(key, value);
   else localStorage.removeItem(key);
   scheduleServerDraft(value, state.threadId, state.cwd);
 }
 
 function clearDraft() {
+  clearTimeout(draftTimer);
+  draftTimer = 0;
   localStorage.removeItem(state.draftKey || draftKeyFor());
   saveServerDraft("", state.threadId, state.cwd);
 }
@@ -603,8 +693,9 @@ function restoreDraftForCurrentState(serverDraft) {
   const nextKey = draftKeyFor();
   if (state.draftKey === nextKey) return;
   state.draftKey = nextKey;
-  els.input.value = typeof serverDraft === "string" ? serverDraft : (localStorage.getItem(nextKey) || "");
+  els.input.value = composerText(typeof serverDraft === "string" ? serverDraft : (localStorage.getItem(nextKey) || ""));
   autosizeInput();
+  scheduleAndroidImeProbe();
 }
 
 function scheduleServerDraft(text, threadId, cwd) {
@@ -932,8 +1023,12 @@ function renderMarkdown(text) {
       continue;
     }
 
-    const heading = line.match(/^#{1,6}\s+(.+)$/);
-    if (heading) html.push(`<b>${renderInlineMarkdown(heading[1])}</b>`);
+    const heading = line.match(/^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*$/);
+    if (heading) {
+      const level = heading[1].length;
+      const content = heading[2].replace(/[ \t]+#+[ \t]*$/, "");
+      html.push(`<h${level}>${renderInlineMarkdown(content)}</h${level}>`);
+    }
     else if (/^[-*_]{3,}$/.test(trimmed)) html.push("——————————");
     else {
       const bullet = line.match(/^(\s*)[-*]\s+(.*)$/);
@@ -1193,7 +1288,7 @@ function toggleCommandMenu() {
 }
 
 function insertCommand(command) {
-  const text = els.input.value;
+  const text = composerText();
   if (text.trim().startsWith("/")) {
     els.input.value = text.replace(/^\s*\/\S*/, command);
   } else {
@@ -1203,6 +1298,7 @@ function insertCommand(command) {
   closeCommandMenu();
   autosizeInput();
   els.input.focus();
+  scheduleAndroidImeProbe();
 }
 
 function renderCommandList() {
@@ -2428,7 +2524,11 @@ function handleRemoteEvent(data) {
   }
   if (data.type === "done") {
     state.currentTaskStartedAtMs = null;
-    loadState().catch((error) => console.warn("任务完成后的状态刷新失败", error));
+    // The final message has already been rendered from the preceding SSE
+    // event. Rebuilding the message list here can replace that live bubble
+    // with a lagging thread snapshot, making a short reply such as "ok"
+    // disappear until the conversation is reopened. The following status
+    // event updates the running state without touching the rendered messages.
     scheduleThreadListRefresh(250);
   }
   if (data.type === "thread_completion" && data.threadId) {
@@ -2507,7 +2607,10 @@ function connectEvents() {
 
 function resyncWhenActive() {
   if (document.visibilityState === "hidden") return;
-  loadState().catch(() => {});
+  // Replaying missed events preserves the live DOM bubbles. A full state
+  // rebuild is only the fallback (or is requested by resyncEvents when the
+  // replay window has expired).
+  resyncEvents().catch(() => loadState().catch(() => {}));
 }
 
 function restorePushSubscription() {
@@ -2523,9 +2626,9 @@ async function refreshNativeNotificationStatus() {
   renderCommandList();
 }
 
-async function sendMessage(mode = "queue") {
+async function sendMessage(mode = "steer") {
   const connectorId = currentConnectorId();
-  const message = els.input.value.trim();
+  const message = composerText().trim();
   if (!message && !state.uploads.length) return;
   if (state.externalRunning) {
     upsertAssistantMessage("Codex Desktop/CLI 正在执行这个会话，网页端当前为只读实时同步。请等任务结束后再发送。", true, "external-session-readonly", { persist: false });
@@ -2540,6 +2643,7 @@ async function sendMessage(mode = "queue") {
   els.input.value = "";
   clearDraft();
   autosizeInput();
+  scheduleAndroidImeProbe();
   state.replyDone = false;
   state.currentTaskStartedAtMs = Date.now();
   const followMatch = outgoingMessage.trim().toLowerCase().match(/^\/follow\s+(queue|steer)$/);
@@ -2563,27 +2667,105 @@ async function sendMessage(mode = "queue") {
 
 els.form.addEventListener("submit", (event) => {
   event.preventDefault();
-  sendMessage("queue");
+  sendMessage("steer");
 });
 
-els.sendSteer.addEventListener("click", () => {
-  sendMessage("steer");
+els.sendQueue.addEventListener("click", () => {
+  sendMessage("queue");
 });
 
 if (els.onlyMineButton) {
   els.onlyMineButton.addEventListener("click", toggleOnlyMine);
 }
 
+function shouldSendMessageFromKeydown(event = {}, androidImeActionReady = false, androidImeNewlinePending = false) {
+  if (event.key !== "Enter") return false;
+  if ((event.ctrlKey || event.metaKey) && !event.isComposing) return true;
+  return Boolean(
+    androidImeActionReady
+    && !androidImeNewlinePending
+    && !event.shiftKey
+    && !event.altKey
+    && !event.ctrlKey
+    && !event.metaKey
+  );
+}
+
 els.input.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-    event.preventDefault();
-    sendMessage();
+  if (
+    isAndroidImeClient()
+    && isAndroidImeProbeSelected()
+    && (event.key === "Backspace" || event.key === "Delete")
+  ) {
+    // Let the browser perform its normal deletion against the real text, not
+    // against the selected zero-width action probe.
+    removeAndroidImeProbe();
+    return;
   }
+  const pendingNewline = hasPendingAndroidImeNewline();
+  const androidImeActionReady = isAndroidImeClient()
+    && (isAndroidImeProbeSelected() || event.isComposing);
+  if (!shouldSendMessageFromKeydown(event, androidImeActionReady, pendingNewline)) {
+    if (event.key === "Enter" && pendingNewline) androidImeNewlineUntil = 0;
+    return;
+  }
+  event.preventDefault();
+  androidImeNewlineUntil = 0;
+  removeAndroidImeProbe();
+  sendMessage("steer");
+  // Re-arm as well when sendMessage exits early (for example, empty text or a
+  // temporarily read-only conversation).
+  scheduleAndroidImeProbe();
 });
 
-els.input.addEventListener("input", () => {
+els.input.addEventListener("beforeinput", (event) => {
+  if (!isAndroidImeClient()) return;
+  const probeSelected = isAndroidImeProbeSelected();
+  const deletionDirection = event.inputType === "deleteContentBackward"
+    ? "backward"
+    : (event.inputType === "deleteContentForward" ? "forward" : "");
+  if (probeSelected && deletionDirection) {
+    if (event.cancelable) {
+      event.preventDefault();
+      deleteComposerTextBesideProbe(els.input, deletionDirection);
+      androidImeNewlineUntil = 0;
+      autosizeInput();
+      saveDraft();
+      scheduleAndroidImeProbe();
+    } else {
+      removeAndroidImeProbe();
+    }
+    return;
+  }
+  if (event.data !== "") return;
+  const clearsProbe = event.inputType === "insertText" && isAndroidImeProbeSelected();
+  const clearsComposition = event.inputType === "insertCompositionText" && androidImeComposing;
+  if (clearsProbe || clearsComposition) markAndroidImeNewlineCommit();
+});
+
+els.input.addEventListener("compositionstart", () => {
+  androidImeComposing = true;
+});
+
+els.input.addEventListener("compositionend", (event) => {
+  androidImeComposing = false;
+  if (isAndroidImeClient() && event.data === "") markAndroidImeNewlineCommit();
+  else scheduleAndroidImeProbe();
+});
+
+els.input.addEventListener("input", (event) => {
   autosizeInput();
   saveDraft();
+  if (!event.isComposing && !androidImeComposing) scheduleAndroidImeProbe();
+});
+els.input.addEventListener("focus", () => scheduleAndroidImeProbe());
+els.input.addEventListener("blur", () => removeAndroidImeProbe());
+els.input.addEventListener("pointerdown", () => removeAndroidImeProbe());
+els.input.addEventListener("pointerup", () => scheduleAndroidImeProbe());
+els.input.addEventListener("select", () => {
+  if (!isAndroidImeClient() || isAndroidImeProbeSelected()) return;
+  removeAndroidImeProbe();
+  if (els.input.selectionStart === els.input.selectionEnd) scheduleAndroidImeProbe();
 });
 els.input.addEventListener("paste", (event) => {
   const files = pastedFiles(event);
