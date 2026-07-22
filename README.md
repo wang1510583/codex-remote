@@ -68,7 +68,6 @@ cp .env.example .env
 | `CODEX_REMOTE_ROUTE_PREFIX` | `/codex-remote` | 路由前缀，用于反向代理子路径 |
 | `WEB_PUSH_SUBJECT` | `mailto:admin@...` | Web Push VAPID subject |
 | `CODEX_REMOTE_NOTIFICATION_TOKEN` | — | WebToApp APK 原生 WebSocket 通知专用令牌 |
-| `CODEX_REMOTE_NOTIFICATION_CLICK_URL` | — | 可选，点击 APK 系统通知时打开的完整 HTTPS 地址 |
 | `WECHAT_GATEWAY_URL` | — | 微信通知网关（可选） |
 | `WECHAT_GATEWAY_TOKEN` | — | 微信网关 token |
 | `WECHAT_TO` | — | 微信通知接收人 |
@@ -181,8 +180,6 @@ wss://你的域名/<CODEX_REMOTE_ROUTE_PREFIX>/api/notifications/ws
 
    ```env
    CODEX_REMOTE_NOTIFICATION_TOKEN=上一步生成的令牌
-   # 可选；也可以只在 WebToApp 中填写“点击 URL”
-   CODEX_REMOTE_NOTIFICATION_CLICK_URL=https://你的域名/<CODEX_REMOTE_ROUTE_PREFIX>/
    ```
 
 2. 重启 Codex Remote 服务，使新令牌生效。
@@ -191,7 +188,7 @@ wss://你的域名/<CODEX_REMOTE_ROUTE_PREFIX>/api/notifications/ws
    - WebSocket URL：`wss://你的域名/<CODEX_REMOTE_ROUTE_PREFIX>/api/notifications/ws`
    - 鉴权 Token：与 `CODEX_REMOTE_NOTIFICATION_TOKEN` 完全相同
    - 注册 URL：留空
-   - 点击 URL：`https://你的域名/<CODEX_REMOTE_ROUTE_PREFIX>/`
+   - 点击系统通知时会直接打开通知聚合 App，不需要填写点击 URL
 4. 确保生成 APK 包含通知、前台服务、WakeLock 和开机恢复所需权限；重新构建并覆盖安装 APK。
 5. 首次启动时允许系统通知，并在国产 ROM 的电池/后台设置中允许该 APK 后台运行和自启动。
 6. 在网页命令菜单点击 `/notify`。连接正常时会立即收到“WebToApp 后台测试通知”。

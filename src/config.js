@@ -52,6 +52,7 @@ export const messageMetaPath = path.join(dataDir, "message-meta.json");
 export const threadCompletionsPath = path.join(dataDir, "thread-completions.json");
 export const pushVapidPath = path.join(dataDir, "push-vapid.json");
 export const pushSubscriptionsPath = path.join(dataDir, "push-subscriptions.json");
+export const nativeNotificationQueuePath = path.join(dataDir, "native-notification-queue.json");
 export const connectorStatePath = path.join(dataDir, "connectors.json");
 export const connectorsViewStatePath = path.join(dataDir, "connector-view.json");
 export const sessionsDir = path.join(os.homedir(), ".codex", "sessions");
@@ -64,7 +65,6 @@ export const wechatSource = process.env.WECHAT_SOURCE || "codex-remote-web";
 // Dedicated credential embedded into WebToApp-generated APKs. Keep it separate
 // from both the web login password and the remote connector pairing token.
 export const nativeNotificationToken = process.env.CODEX_REMOTE_NOTIFICATION_TOKEN || "";
-export const nativeNotificationClickUrl = process.env.CODEX_REMOTE_NOTIFICATION_CLICK_URL || "";
 
 export const remotePassword = process.env.CODEX_REMOTE_PASSWORD || process.env.REMOTE_PASSWORD || (process.env.CODEX_REMOTE_PASSWORD_B64 ? Buffer.from(process.env.CODEX_REMOTE_PASSWORD_B64, "base64").toString("utf8") : "") || (process.env.REMOTE_LOGIN_B64 ? Buffer.from(process.env.REMOTE_LOGIN_B64, "base64").toString("utf8") : "");
 export const connectorPairToken = process.env.CODEX_REMOTE_CONNECTOR_TOKEN || remotePassword;

@@ -1,9 +1,18 @@
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { WebSocketServer } from "ws";
-import { nativeNotificationClickUrl, nativeNotificationToken } from "./config.js";
+import {
+  nativeNotificationQueuePath,
+  nativeNotificationToken
+} from "./config.js";
 import { routePath } from "./auth.js";
 import { cleanText, safeCompare } from "./utils.js";
 
 const WEBSOCKET_PATH = "/api/notifications/ws";
+const MAX_STORED_NOTIFICATIONS = 200;
+const MAX_ACKNOWLEDGEMENTS_PER_DEVICE = 240;
+const NOTIFICATION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 function notificationBody(text = "") {
   return String(text)
@@ -33,13 +42,134 @@ function rejectUpgrade(socket, statusCode, statusText) {
   socket.destroy();
 }
 
+function safeDeviceId(value = "") {
+  return cleanText(String(value || ""), 160);
+}
+
+function emptyDeliveryStore() {
+  return { version: 1, notifications: [], acknowledgements: {} };
+}
+
+function normalizeDeliveryStore(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const notifications = (Array.isArray(source.notifications) ? source.notifications : [])
+    .map((item) => ({
+      id: cleanText(String(item?.id || ""), 160),
+      title: cleanText(String(item?.title || "服务器Codex"), 120) || "服务器Codex",
+      body: notificationBody(item?.body),
+      ts: Number(item?.ts) || 0
+    }))
+    .filter((item) => item.id && item.ts > 0);
+  const acknowledgements = {};
+  const rawAcknowledgements = source.acknowledgements && typeof source.acknowledgements === "object"
+    ? source.acknowledgements
+    : {};
+  for (const [rawDeviceId, rawIds] of Object.entries(rawAcknowledgements)) {
+    const deviceId = safeDeviceId(rawDeviceId);
+    if (!deviceId || !Array.isArray(rawIds)) continue;
+    acknowledgements[deviceId] = [...new Set(rawIds
+      .map((id) => cleanText(String(id || ""), 160))
+      .filter(Boolean))]
+      .slice(-MAX_ACKNOWLEDGEMENTS_PER_DEVICE);
+  }
+  return { version: 1, notifications, acknowledgements };
+}
+
+function readDeliveryStore(file, logger) {
+  if (!file || !existsSync(file)) return emptyDeliveryStore();
+  try {
+    return normalizeDeliveryStore(JSON.parse(readFileSync(file, "utf8")));
+  } catch (error) {
+    logger.error("failed to read native notification queue", error?.message || error);
+    return emptyDeliveryStore();
+  }
+}
+
+function websocketReason(reason) {
+  return cleanText(Buffer.isBuffer(reason) ? reason.toString("utf8") : String(reason || ""), 120);
+}
+
 export function createNativeNotificationHub(options = {}) {
   const token = String(options.token ?? nativeNotificationToken ?? "");
-  const defaultClickUrl = String(options.clickUrl ?? nativeNotificationClickUrl ?? "");
   const logger = options.logger || console;
+  const queuePath = options.queuePath ?? nativeNotificationQueuePath;
   const clients = new Set();
+  let deliveryStore = readDeliveryStore(queuePath, logger);
   let wss = null;
   let attachedServer = null;
+
+  function pruneDeliveryStore() {
+    const cutoff = Date.now() - NOTIFICATION_RETENTION_MS;
+    deliveryStore.notifications = deliveryStore.notifications
+      .filter((item) => item.ts >= cutoff)
+      .slice(-MAX_STORED_NOTIFICATIONS);
+    const knownIds = new Set(deliveryStore.notifications.map((item) => item.id));
+    for (const [deviceId, ids] of Object.entries(deliveryStore.acknowledgements)) {
+      const remaining = ids.filter((id) => knownIds.has(id)).slice(-MAX_ACKNOWLEDGEMENTS_PER_DEVICE);
+      if (remaining.length) deliveryStore.acknowledgements[deviceId] = remaining;
+      else delete deliveryStore.acknowledgements[deviceId];
+    }
+  }
+
+  function persistDeliveryStore() {
+    if (!queuePath) return;
+    pruneDeliveryStore();
+    try {
+      mkdirSync(path.dirname(queuePath), { recursive: true });
+      const temporaryPath = `${queuePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+      writeFileSync(temporaryPath, `${JSON.stringify(deliveryStore, null, 2)}\n`, { mode: 0o600 });
+      renameSync(temporaryPath, queuePath);
+    } catch (error) {
+      logger.error("failed to persist native notification queue", error?.message || error);
+    }
+  }
+
+  function notificationPayload(notification) {
+    return JSON.stringify({
+      type: "notification",
+      id: notification.id,
+      title: notification.title,
+      body: notification.body,
+      ts: notification.ts
+    });
+  }
+
+  function sendToClient(entry, notification) {
+    if (entry.ws.readyState !== 1) return false;
+    try {
+      entry.ws.send(notificationPayload(notification));
+      return true;
+    } catch (error) {
+      logger.error("native notification send failed", error?.message || error);
+      return false;
+    }
+  }
+
+  function replayPending(entry) {
+    const deviceId = safeDeviceId(entry.deviceId);
+    if (!deviceId) return 0;
+    pruneDeliveryStore();
+    const acknowledged = new Set(deliveryStore.acknowledgements[deviceId] || []);
+    let sent = 0;
+    for (const notification of deliveryStore.notifications) {
+      if (acknowledged.has(notification.id)) continue;
+      if (sendToClient(entry, notification)) sent += 1;
+    }
+    if (sent) logger.log(`native notification client replayed ${sent} queued notification(s)`);
+    return sent;
+  }
+
+  function acknowledge(entry, id) {
+    const deviceId = safeDeviceId(entry.deviceId);
+    const notificationId = cleanText(String(id || ""), 160);
+    if (!deviceId || !notificationId) return;
+    if (!deliveryStore.notifications.some((item) => item.id === notificationId)) return;
+    const ids = new Set(deliveryStore.acknowledgements[deviceId] || []);
+    if (ids.has(notificationId)) return;
+    ids.add(notificationId);
+    deliveryStore.acknowledgements[deviceId] = [...ids].slice(-MAX_ACKNOWLEDGEMENTS_PER_DEVICE);
+    persistDeliveryStore();
+  }
 
   function status() {
     return {
@@ -79,7 +209,7 @@ export function createNativeNotificationHub(options = {}) {
     wss.on("connection", (ws, req) => {
       const entry = {
         ws,
-        deviceId: cleanText(String(req.headers["x-device-id"] || ""), 160),
+        deviceId: safeDeviceId(req.headers["x-device-id"]),
         appName: cleanText(String(req.headers["x-app-name"] || ""), 120),
         connectedAt: new Date().toISOString()
       };
@@ -98,18 +228,26 @@ export function createNativeNotificationHub(options = {}) {
           return;
         }
         if (message?.type === "hello") {
-          entry.deviceId = cleanText(String(message.deviceId || entry.deviceId), 160);
+          entry.deviceId = safeDeviceId(message.deviceId || entry.deviceId);
           entry.appName = cleanText(String(message.appName || entry.appName), 120);
           ws.send(JSON.stringify({ type: "ack", ts: Date.now() }));
+          replayPending(entry);
+          return;
+        }
+        if (message?.type === "notification_ack") {
+          acknowledge(entry, message.id);
         }
       });
 
-      const remove = () => {
+      const remove = (code = 1006, reason = "") => {
         if (!clients.delete(entry)) return;
-        logger.log(`native notification client disconnected (${clients.size} total)`);
+        const detail = websocketReason(reason);
+        logger.log(
+          `native notification client disconnected (${clients.size} total; code ${code}${detail ? `, ${detail}` : ""})`
+        );
       };
       ws.on("close", remove);
-      ws.on("error", remove);
+      ws.on("error", (error) => remove(1006, error?.message || "socket error"));
     });
 
     if (!token) {
@@ -118,14 +256,16 @@ export function createNativeNotificationHub(options = {}) {
     return wss;
   }
 
-  function sendNotification({ title = "服务器Codex", body = "", url = defaultClickUrl } = {}) {
-    const payload = JSON.stringify({
-      type: "notification",
+  function sendNotification({ title = "服务器Codex", body = "" } = {}) {
+    const notification = {
+      id: randomUUID(),
       title: String(title || "服务器Codex").slice(0, 120),
       body: notificationBody(body),
-      url: String(url || ""),
       ts: Date.now()
-    });
+    };
+    deliveryStore.notifications.push(notification);
+    persistDeliveryStore();
+
     const total = clients.size;
     let sent = 0;
     for (const entry of [...clients]) {
@@ -133,12 +273,7 @@ export function createNativeNotificationHub(options = {}) {
         clients.delete(entry);
         continue;
       }
-      try {
-        entry.ws.send(payload);
-        sent += 1;
-      } catch (error) {
-        logger.error("native notification send failed", error?.message || error);
-      }
+      if (sendToClient(entry, notification)) sent += 1;
     }
     return { configured: Boolean(token), sent, total };
   }
