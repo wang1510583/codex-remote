@@ -3,8 +3,40 @@ import { codexBin, codexModel, codexReasoningEffort, codexWorkDir } from "./conf
 import { broadcast } from "./sse.js";
 import { rpcErrorMessage } from "./utils.js";
 import { projectPath, absoluteStateCwd } from "./paths.js";
-import { assistantBubbleText, saveGeneratedImage, contextUsageFromEvent } from "./threads.js";
+import {
+  assistantBubbleText, saveGeneratedImage, contextUsageFromEvent,
+  fullReplyItemTextLimit, fullReplyMessageFromThreadItem
+} from "./threads.js";
 import { createLocalAppServerTransport } from "./transport/local.js";
+
+export const supplementalModelOptions = Object.freeze([
+  Object.freeze({
+    id: "gemini-3.6-flash-high",
+    model: "gemini-3.6-flash-high",
+    displayName: "Gemini 3.6 Flash High",
+    defaultReasoningEffort: "high",
+    supportedReasoningEfforts: Object.freeze([
+      Object.freeze({ reasoningEffort: "high" })
+    ])
+  })
+]);
+
+export function withSupplementalModelOptions(reportedModels = []) {
+  const models = Array.isArray(reportedModels) ? [...reportedModels] : [];
+  const reportedIds = new Set(models.flatMap((item) => [item?.id, item?.model])
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean));
+  for (const option of supplementalModelOptions) {
+    const aliases = [option.id, option.model].map((value) => String(value || "").toLowerCase());
+    if (aliases.some((value) => reportedIds.has(value))) continue;
+    models.push({
+      ...option,
+      supportedReasoningEfforts: option.supportedReasoningEfforts.map((item) => ({ ...item }))
+    });
+    for (const alias of aliases) reportedIds.add(alias);
+  }
+  return models;
+}
 
 function normalizeReasoningEffort(value) {
   const normalized = String(value || "").trim().toLowerCase();
@@ -150,6 +182,103 @@ export class CodexAppServer {
     return true;
   }
 
+  notificationTime(value) {
+    const time = Number(value);
+    if (!Number.isFinite(time) || time <= 0) return new Date().toISOString();
+    try { return new Date(time).toISOString(); }
+    catch { return new Date().toISOString(); }
+  }
+
+  rememberFullItem(item = {}) {
+    if (!this.turn || !item?.type) return null;
+    const fullItems = this.turn.fullItems || (this.turn.fullItems = new Map());
+    const id = item.id || `full-${item.type}-${fullItems.size}`;
+    const remembered = { ...item, id };
+    fullItems.set(id, remembered);
+    return remembered;
+  }
+
+  currentFullItem(itemId = "", fallbackType = "") {
+    if (!this.turn) return null;
+    const fullItems = this.turn.fullItems || (this.turn.fullItems = new Map());
+    const id = itemId || `full-${fallbackType || "item"}`;
+    let item = fullItems.get(id);
+    if (!item && fallbackType) {
+      item = { id, type: fallbackType };
+      fullItems.set(id, item);
+    }
+    return item || null;
+  }
+
+  appendFullItemText(current = "", delta = "") {
+    const next = `${current || ""}${delta || ""}`;
+    if (next.length <= fullReplyItemTextLimit) return next;
+    const marker = "…（较早的 CLI 输出已省略）\n";
+    return `${marker}${next.slice(-(fullReplyItemTextLimit - marker.length))}`;
+  }
+
+  emitFullItem(item = {}, final = false, atValue = 0) {
+    if (!this.turn) return false;
+    const formatted = fullReplyMessageFromThreadItem(item, {
+      final,
+      at: this.notificationTime(atValue)
+    });
+    if (!formatted?.content) return false;
+    const row = {
+      ...formatted,
+      final: Boolean(final),
+      transient: !final
+    };
+    const fullReplyMessages = this.turn.fullReplyMessages || (this.turn.fullReplyMessages = new Map());
+    fullReplyMessages.set(row.messageId, row);
+    this.emit({ type: "cli_message", ...row });
+    return true;
+  }
+
+  updateFullItemFromDelta(method, params = {}) {
+    if (!this.turn) return false;
+    const fallbackType = method.includes("/reasoning/")
+      ? "reasoning"
+      : method.includes("/commandExecution/")
+        ? "commandExecution"
+        : method.includes("/fileChange/")
+          ? "fileChange"
+          : method.includes("/mcpToolCall/")
+            ? "mcpToolCall"
+            : method.includes("/plan/")
+              ? "plan"
+              : "";
+    if (!fallbackType) return false;
+    const item = this.currentFullItem(params.itemId, fallbackType);
+    if (!item) return false;
+    if (method === "item/reasoning/summaryPartAdded") {
+      item.summary = [...(item.summary || [])];
+      if (item.summary[params.summaryIndex] === undefined) item.summary[params.summaryIndex] = "";
+    } else if (method === "item/reasoning/summaryTextDelta") {
+      item.summary = [...(item.summary || [])];
+      const index = Number(params.summaryIndex) || 0;
+      item.summary[index] = this.appendFullItemText(item.summary[index], params.delta);
+    } else if (method === "item/reasoning/textDelta") {
+      item.content = [...(item.content || [])];
+      const index = Number(params.contentIndex) || 0;
+      item.content[index] = this.appendFullItemText(item.content[index], params.delta);
+    } else if (method === "item/commandExecution/outputDelta") {
+      item.aggregatedOutput = this.appendFullItemText(item.aggregatedOutput, params.delta);
+    } else if (method === "item/fileChange/outputDelta") {
+      item.output = this.appendFullItemText(item.output, params.delta);
+    } else if (method === "item/fileChange/patchUpdated") {
+      item.changes = Array.isArray(params.changes) ? params.changes : item.changes;
+    } else if (method === "item/mcpToolCall/progress") {
+      item.progress = this.appendFullItemText(item.progress, `${params.message || ""}\n`);
+    } else if (method === "item/plan/delta") {
+      item.text = this.appendFullItemText(item.text, params.delta);
+    } else {
+      return false;
+    }
+    this.emitFullItem(item, false);
+    return true;
+  }
+
   dispatchThreadSettingsUpdate(params = {}) {
     if (!params.threadId || !params.threadSettings || typeof params.threadSettings !== "object") return false;
     const update = {
@@ -232,6 +361,7 @@ export class CodexAppServer {
       return;
     }
     if (method === "thread/status/changed" || method === "turn/started") return;
+    if (notificationMatchesTurn && this.updateFullItemFromDelta(method, params)) return;
     if (method === "item/started" && params.item?.type) {
       if (params.item.type === "agentMessage" && notificationMatchesTurn) {
         this.turn.currentMessage = {
@@ -239,6 +369,9 @@ export class CodexAppServer {
           text: "",
           phase: params.item.phase || null
         };
+      } else if (notificationMatchesTurn) {
+        const item = this.rememberFullItem(params.item);
+        if (item) this.emitFullItem(item, false, params.startedAtMs);
       }
       return;
     }
@@ -296,6 +429,14 @@ export class CodexAppServer {
         })
         .catch((error) => console.error("failed to save generated image", error));
       turn.pendingImages.push(pending);
+      return;
+    }
+    if (method === "item/completed"
+      && params.item?.type
+      && !["agentMessage", "image_generation_call"].includes(params.item.type)
+      && notificationMatchesTurn) {
+      const item = this.rememberFullItem(params.item);
+      if (item) this.emitFullItem(item, true, params.completedAtMs);
       return;
     }
     if (method === "turn/completed" && notificationMatchesTurn) {
@@ -470,6 +611,8 @@ export class CodexAppServer {
           completedMessageIds: new Set(),
           imageIds: new Set(),
           pendingImages: [],
+          fullItems: new Map(),
+          fullReplyMessages: new Map(),
           reconnecting: false,
           reconnectMessage: "",
           lastError: null,
@@ -535,7 +678,7 @@ export class CodexAppServer {
 
   async modelOptions() {
     const result = await this.listModels();
-    return Array.isArray(result?.data) ? result.data : [];
+    return withSupplementalModelOptions(result?.data);
   }
 
   async readThreadSettings(threadId, cwd = codexWorkDir, fallbackSettings = {}) {

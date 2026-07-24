@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { CodexAppServer } from "../src/codex-server.js";
+import { CodexAppServer, withSupplementalModelOptions } from "../src/codex-server.js";
 import { externalSnapshotFromThread } from "../src/external-sessions.js";
 import { preferredModelSettings } from "../src/runner.js";
 import { shouldReplaceThreadModelSettings } from "../src/store.js";
@@ -10,6 +10,60 @@ import { parseSessionFile } from "../src/threads.js";
 function jsonl(rows) {
   return rows.map((row) => JSON.stringify(row)).join("\n");
 }
+
+test("Gemini 3.6 Flash High is added to the selectable model list", () => {
+  const options = withSupplementalModelOptions([{
+    id: "gpt-5.6-sol",
+    model: "gpt-5.6-sol",
+    displayName: "GPT 5.6 Sol"
+  }]);
+  const gemini = options.find((item) => item.model === "gemini-3.6-flash-high");
+
+  assert.ok(gemini);
+  assert.equal(gemini.id, "gemini-3.6-flash-high");
+  assert.equal(gemini.displayName, "Gemini 3.6 Flash High");
+  assert.equal(gemini.defaultReasoningEffort, "high");
+  assert.deepEqual(gemini.supportedReasoningEfforts, [{ reasoningEffort: "high" }]);
+});
+
+test("a model already reported by Codex is not duplicated by the supplemental list", () => {
+  const reported = {
+    id: "gemini-3.6-flash-high",
+    model: "gemini-3.6-flash-high",
+    displayName: "Provider Gemini"
+  };
+  const options = withSupplementalModelOptions([reported]);
+
+  assert.equal(options.length, 1);
+  assert.equal(options[0], reported);
+});
+
+test("Gemini 3.6 Flash High can be selected and applies High effort", async () => {
+  const server = new CodexAppServer({}, { isRemote: true });
+  server.listModels = async () => ({ data: [{ id: "gpt-5.6-sol", model: "gpt-5.6-sol" }] });
+  server.readThreadSettings = async () => ({ model: "gpt-5.6-sol", reasoningEffort: "medium" });
+  let applied = null;
+  server.updateThreadModelSettings = async (update) => {
+    applied = update;
+    return { model: update.model, effort: update.effort };
+  };
+
+  const result = await server.selectModel(
+    "gemini-3.6-flash-high",
+    "medium",
+    "thread-1",
+    "/workspace"
+  );
+
+  assert.deepEqual(applied, {
+    model: "gemini-3.6-flash-high",
+    effort: "high",
+    threadId: "thread-1",
+    cwd: "/workspace"
+  });
+  assert.equal(result.model, "gemini-3.6-flash-high");
+  assert.equal(result.effort, "high");
+});
 
 test("thread_settings_applied exposes the session model and reasoning effort", () => {
   const parsed = parseSessionFile(jsonl([

@@ -53,18 +53,25 @@ export function externalSnapshotFromThread(thread = {}, connectorId = "") {
     contextUsage: thread.contextUsage || null,
     messages: Array.isArray(thread.messages) ? thread.messages : [],
     messageCount: Number(thread.messageCount) || 0,
+    fullMessages: Array.isArray(thread.fullMessages) ? thread.fullMessages : [],
+    fullMessageCount: Number(thread.fullMessageCount) || 0,
     updatedAt: thread.updatedAt || ""
   };
 }
 
 function snapshotSignature(snapshot = {}) {
   const lastMessage = snapshot.messages?.at(-1) || {};
+  const lastFullMessage = snapshot.fullMessages?.at(-1) || {};
   return JSON.stringify([
     snapshot.running,
     snapshot.messageCount,
     lastMessage.role || "",
     lastMessage.content || "",
     lastMessage.at || "",
+    snapshot.fullMessageCount,
+    lastFullMessage.messageId || "",
+    lastFullMessage.content || "",
+    lastFullMessage.at || "",
     snapshot.contextUsage?.used || 0,
     snapshot.contextUsage?.window || 0,
     snapshot.model || "",
@@ -123,6 +130,7 @@ async function pollMonitor(monitor) {
         settingsUpdatedAt: next.settingsUpdatedAt,
         contextUsage: next.contextUsage,
         messageCount: next.messageCount,
+        fullMessageCount: next.fullMessageCount,
         updatedAt: next.updatedAt
       });
     }

@@ -16,12 +16,15 @@ import {
   selectedRunner, setSelectedRunnerKey, clearThreadCompletedUnread, markInterruptedInflight,
   runningThreads, runnerKeyForState, ensureStateModelSettings,
   runnerStatePayload, sessionModelSettingsPayload, updateSessionModelSettings, usagePayload, resetUsageLimit,
-  syncSharedThreadSettings
+  syncSharedThreadSettings, liveFullMessagesFor
 } from "./runner.js";
-import { isInternalMessage, mergeLocalMessageMeta } from "./threads.js";
+import {
+  isInternalMessage, mergeLocalMessageMeta, limitFullReplyMessages
+} from "./threads.js";
 import {
   listProjectFiles, createProjectFolder, deleteProjectFolder, createProjectFile,
-  deleteProjectFile, writeProjectFile, renameProjectPath, saveUploadedFiles
+  deleteProjectFile, writeProjectFile, renameProjectPath, saveUploadedFiles,
+  projectDownloadTarget, createProjectFolderZip
 } from "./files.js";
 import { projectPath, relativeProjectPath, isAllowedDownload, allowedDownloadRoots } from "./paths.js";
 import * as ssh from "./ssh.js";
@@ -85,11 +88,87 @@ function mergeStateMessages(sessionMessages = [], stateMessages = []) {
   return rows.slice(-80);
 }
 
+function mergeFullReplyMessages(sessionMessages = [], stateMessages = [], liveMessages = []) {
+  const rows = [];
+  const byMessageId = new Map();
+  const byContent = new Set();
+  const add = (message, replaceById = false) => {
+    if (!message?.role || !message?.content) return;
+    if (message.role === "user" && isInternalMessage(message.content)) return;
+    const messageId = String(message.messageId || "");
+    const contentKey = messageMergeKey(message);
+    if (replaceById && messageId && byMessageId.has(messageId)) {
+      const index = byMessageId.get(messageId);
+      byContent.delete(messageMergeKey(rows[index]));
+      rows[index] = message;
+      byContent.add(contentKey);
+      return;
+    }
+    if (byContent.has(contentKey)) return;
+    const index = rows.length;
+    rows.push(message);
+    byContent.add(contentKey);
+    if (messageId) byMessageId.set(messageId, index);
+  };
+  for (const message of sessionMessages) add(message);
+  for (const message of stateMessages) add(message);
+  for (const message of liveMessages) add(message, true);
+  rows.sort((left, right) => {
+    const leftTime = left.at ? Date.parse(left.at) : 0;
+    const rightTime = right.at ? Date.parse(right.at) : 0;
+    if (!Number.isNaN(leftTime) && !Number.isNaN(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
+    return 0;
+  });
+  return limitFullReplyMessages(rows);
+}
+
 async function dispatchFileList(req, res, connectorId) {
   const url = new URL(req.url, "http://localhost");
   const dir = url.searchParams.get("dir") || "";
   if (connectorId) return json(res, 200, await connectorFileOp(connectorId, "list", { dir }));
   return json(res, 200, await listProjectFiles(dir));
+}
+
+function attachmentDisposition(filename = "download") {
+  return `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
+function streamFolderZip(req, res, folder, archiveName) {
+  const archive = createProjectFolderZip(folder, archiveName);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      callback(value);
+    };
+    const abort = () => {
+      try { archive.abort(); } catch {}
+    };
+    const fail = (error) => {
+      abort();
+      if (res.headersSent) {
+        if (!res.destroyed) res.destroy(error);
+        settle(resolve);
+      } else {
+        settle(reject, error);
+      }
+    };
+    archive.on("warning", fail);
+    archive.on("error", fail);
+    res.on("error", fail);
+    res.on("finish", () => settle(resolve));
+    res.on("close", () => {
+      if (!res.writableEnded) abort();
+      settle(resolve);
+    });
+    req.on("aborted", () => {
+      abort();
+      settle(resolve);
+    });
+    archive.pipe(res);
+    Promise.resolve(archive.finalize()).catch(fail);
+  });
 }
 
 export async function handle(req, res) {
@@ -151,6 +230,7 @@ export async function handle(req, res) {
 
     if (req.method === "GET" && url.pathname === "/api/remote/state") {
       const snapshotEventSeq = currentEventSeq();
+      const wantsFullReplies = url.searchParams.get("full") === "1";
       const viewState = await readConnectorViewState();
       const requestedConnectorId = connectorIdFrom(req);
       const connectorId = requestedConnectorId || viewState.selectedConnectorId || "";
@@ -162,6 +242,9 @@ export async function handle(req, res) {
       if (runner?.running) {
         stopExternalSessionMonitor(connectorId);
         state = runner.state;
+        if (wantsFullReplies && state.threadId) {
+          loadedThread = await loadThreadPage(state.threadId, connectorId).catch(() => null);
+        }
       } else if (state.threadId) {
         const thread = await loadThreadPage(state.threadId, connectorId).catch(() => null);
         if (thread) {
@@ -183,9 +266,21 @@ export async function handle(req, res) {
       // messages. Otherwise a tab restored from the background clears the
       // live thought bubble and cannot rebuild it until the thread is reopened.
       const payload = runner?.running ? runnerStatePayload(runner) : state;
+      const liveFullMessages = wantsFullReplies && runner?.running ? liveFullMessagesFor(runner) : [];
+      const fullMessages = wantsFullReplies
+        ? mergeFullReplyMessages(loadedThread?.fullMessages || [], payload.messages || [], liveFullMessages)
+        : undefined;
+      const fullMessageCount = wantsFullReplies
+        ? Math.max(
+          Number(loadedThread?.fullMessageCount) || 0,
+          fullMessages.length
+        )
+        : undefined;
       const connectorsPayload = await remoteConnectorsPayload();
       return json(res, 200, {
         ...payload,
+        fullMessages,
+        fullMessageCount,
         connectorId,
         absoluteCwd: state.connectorId ? (state.cwd || "") : absoluteCwdLocal(state.cwd || ""),
         fileLinkRoots: allowedDownloadRoots(),
@@ -362,6 +457,39 @@ export async function handle(req, res) {
       const { readFile } = await import("node:fs/promises");
       const buffer = await readFile(file);
       return json(res, 200, { type: "text", path: relativeProjectPath(file), mime: type, text: buffer.toString("utf8") });
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/remote/project-download") {
+      const connectorId = connectorIdFrom(req);
+      if (connectorId) {
+        return json(res, 501, { error: "被控电脑文件下载暂不支持，请先切换到本机项目。" });
+      }
+      const target = await projectDownloadTarget(url.searchParams.get("path") || "");
+      const expectedType = url.searchParams.get("type") || "";
+      if (expectedType && expectedType !== target.type) {
+        return json(res, 409, { error: "文件类型已经变化，请刷新文件面板后重试。" });
+      }
+      if (target.type === "file") {
+        res.writeHead(200, {
+          "Content-Type": target.mime,
+          "Content-Length": target.size,
+          "Content-Disposition": attachmentDisposition(target.name),
+          "Cache-Control": "private, no-store"
+        });
+        const stream = createReadStream(target.file);
+        stream.on("error", (error) => {
+          if (!res.destroyed) res.destroy(error);
+        });
+        stream.pipe(res);
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": "application/zip",
+        "Content-Disposition": attachmentDisposition(`${target.name}.zip`),
+        "Cache-Control": "private, no-store"
+      });
+      await streamFolderZip(req, res, target.file, target.name);
+      return;
     }
 
     if (req.method === "GET" && url.pathname === "/api/remote/events") {

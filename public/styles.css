@@ -143,6 +143,44 @@ textarea:focus {
   line-height: 1.5;
 }
 
+.message.assistant.fullReply {
+  padding: 7px 10px;
+  border-left: 2px solid #52525b;
+  border-radius: 0;
+  background: transparent;
+  color: #b9bec8;
+  font-size: 12.5px;
+  line-height: 1.48;
+}
+
+.message.assistant.fullReply h4 {
+  margin: 0 0 6px;
+  color: #d6d3d1;
+  font-size: 1em;
+  font-weight: 650;
+}
+
+.message.assistant.fullReply pre {
+  max-height: 360px;
+  overflow: auto;
+  font-size: 11.5px;
+}
+
+.fullReply-reasoning .message.assistant.fullReply,
+.fullReply-plan .message.assistant.fullReply {
+  border-left-color: #7c6f9f;
+}
+
+.fullReply-tool-call .message.assistant.fullReply,
+.fullReply-tool-output .message.assistant.fullReply,
+.fullReply-mcp .message.assistant.fullReply {
+  border-left-color: #64748b;
+}
+
+.fullReply-patch .message.assistant.fullReply {
+  border-left-color: #4f7661;
+}
+
 .messageBlock {
   display: flex;
   flex-direction: column;
@@ -1052,8 +1090,10 @@ textarea:focus {
 
 .fileActions {
   display: flex;
+  flex-wrap: wrap;
   gap: 5px;
   align-items: center;
+  justify-content: flex-end;
 }
 
 .fileActions button {
@@ -1922,5 +1962,23 @@ textarea:focus {
 
   .modelSettingsModels {
     grid-template-columns: 1fr;
+  }
+
+  .fileItem.sshFileItem {
+    align-items: start;
+    gap: 6px;
+    padding: 9px 10px;
+  }
+
+  .fileActions {
+    display: grid;
+    grid-template-columns: repeat(2, max-content);
+    gap: 4px;
+  }
+
+  .fileActions button {
+    min-height: 27px;
+    padding: 3px 7px;
+    font-size: 12px;
   }
 }

@@ -42,6 +42,8 @@ const state = {
   speechUtterances: new Set(),
   hideThoughts: localStorage.getItem("codex-remote-hide-thoughts") === "1",
   onlyMine: localStorage.getItem("codex-remote-only-mine") === "1",
+  showFullReplies: localStorage.getItem("codex-remote-show-full-replies") === "1",
+  fullMessageCount: 0,
   completedUnreadThreads: new Set(),
   connectors: [],
   connectorJobs: [],
@@ -77,6 +79,7 @@ const slashCommands = [
   { command: "/steer ", title: "立即引导", detail: "把后续文字发送给当前正在运行的任务" },
   { command: "/notify", title: "通知", detail: notificationDetail, action: requestNotifications },
   { command: "/tts", title: "自动语音朗读", detail: speechDetail, action: toggleAutoSpeech },
+  { command: "/full", title: "显示Codex完整回复", detail: fullRepliesDetail, action: toggleFullReplies },
   { command: "/result", title: "只看结果", detail: () => state.hideThoughts ? "当前只显示用户气泡和 ✅ 气泡，点击后显示全部" : "隐藏思考过程气泡，只显示用户气泡和 ✅ 气泡", action: toggleResultOnly },
   { command: "/mine", title: "只看自己", detail: () => state.onlyMine ? "当前只显示自己发送的气泡，点击后显示全部" : "只显示自己发送的消息气泡", action: toggleOnlyMine },
   { command: "/stop", title: "中断", detail: "通过 turn/interrupt 中断当前回合" }
@@ -195,6 +198,12 @@ function speechSupported() {
 function speechDetail() {
   if (!speechSupported()) return "当前浏览器或 WebView 不支持系统语音朗读";
   return state.autoSpeech ? "已开启，点击后关闭并停止当前朗读" : "点击开启，助手的每个完整消息气泡将自动朗读";
+}
+
+function fullRepliesDetail() {
+  return state.showFullReplies
+    ? "已开启，点击后恢复普通消息视图"
+    : "显示 Codex CLI 的推理、工具调用、命令输出和文件修改，并实时同步";
 }
 
 function stopSpeech() {
@@ -1253,12 +1262,33 @@ function scrollToLatest(force = false) {
 }
 
 function applyMessageFilter() {
-  els.log.classList.toggle("hideThoughts", state.hideThoughts);
-  els.log.classList.toggle("onlyMine", state.onlyMine);
+  els.log.classList.toggle("hideThoughts", state.hideThoughts && !state.showFullReplies);
+  els.log.classList.toggle("onlyMine", state.onlyMine && !state.showFullReplies);
+  els.log.classList.toggle("showFullReplies", state.showFullReplies);
   if (els.onlyMineButton) {
     els.onlyMineButton.classList.toggle("active", state.onlyMine);
     els.onlyMineButton.title = state.onlyMine ? "显示全部消息" : "只看自己发送";
     els.onlyMineButton.setAttribute("aria-pressed", state.onlyMine ? "true" : "false");
+  }
+}
+
+async function toggleFullReplies() {
+  state.showFullReplies = !state.showFullReplies;
+  localStorage.setItem("codex-remote-show-full-replies", state.showFullReplies ? "1" : "0");
+  if (state.showFullReplies) {
+    state.hideThoughts = false;
+    state.onlyMine = false;
+    localStorage.setItem("codex-remote-hide-thoughts", "0");
+    localStorage.setItem("codex-remote-only-mine", "0");
+  }
+  applyMessageFilter();
+  renderCommandList();
+  closeCommandMenu();
+  try {
+    await loadState();
+    scrollToLatest(true);
+  } catch (error) {
+    upsertAssistantMessage(`读取 Codex 完整回复失败：${error.message}`, true, "full-replies-error", { persist: false });
   }
 }
 
@@ -1304,6 +1334,16 @@ function appendMessage(role, text, meta = {}) {
   wrapper.className = `messageBlock ${role}Block${isCompletion ? " completionBlock" : ""}`;
   const item = document.createElement("div");
   item.className = `message ${role}${isCompletion ? " completion" : ""}`;
+  const fullKind = String(meta.fullKind || "").replace(/[^a-z-]/gi, "");
+  if (fullKind) {
+    wrapper.classList.add("fullReplyBlock", `fullReply-${fullKind}`);
+    item.classList.add("fullReply");
+    item.dataset.fullKind = fullKind;
+  }
+  if (meta.messageId) {
+    item.dataset.messageId = String(meta.messageId);
+    item.dataset.final = meta.final ? "true" : "false";
+  }
   if (role === "user") {
     item.tabIndex = 0;
     item.setAttribute("role", "button");
@@ -1445,7 +1485,7 @@ function upsertAssistantMessage(text, final = false, messageId = "assistant", me
     return;
   }
   if (!bubble?.isConnected) {
-    bubble = appendMessage("assistant", text);
+    bubble = appendMessage("assistant", text, meta);
     if (bubble) {
       bubble.dataset.messageId = String(messageId);
       bubble.dataset.final = "false";
@@ -1549,7 +1589,8 @@ function isCurrentStateSnapshot(generation, snapshotEventSeq) {
 
 async function loadState(connectorId = currentConnectorId()) {
   const generation = ++stateLoadGeneration;
-  const data = await request("/api/remote/state", { connectorId });
+  const stateUrl = state.showFullReplies ? "/api/remote/state?full=1" : "/api/remote/state";
+  const data = await request(stateUrl, { connectorId });
   if (connectorId !== currentConnectorId()) return;
   if (!isCurrentStateSnapshot(generation, data.eventSeq)) return false;
   renderState(data);
@@ -1600,6 +1641,7 @@ function renderState(data) {
   restoreDraftForCurrentState(data.draft);
   state.loadedCount = Number(data.loadedCount || data.messages?.length || 0);
   state.messageCount = Number(data.messageCount || state.loadedCount);
+  state.fullMessageCount = Number(data.fullMessageCount || 0);
   if (data.followMode === "steer" || data.followMode === "queue") {
     state.followMode = data.followMode;
   }
@@ -1611,7 +1653,13 @@ function renderState(data) {
   els.log.innerHTML = "";
   applyMessageFilter();
   const renderedMessages = new Set();
-  for (const message of data.messages || []) {
+  const historyMessages = state.showFullReplies && Array.isArray(data.fullMessages)
+    ? data.fullMessages
+    : (data.messages || []);
+  if (state.showFullReplies && state.fullMessageCount > historyMessages.length) {
+    appendEvent(`完整输出共 ${state.fullMessageCount} 条；为保证手机页面流畅，当前显示最近 ${historyMessages.length} 条。`);
+  }
+  for (const message of historyMessages) {
     appendMessage(message.role, message.content, message);
     renderedMessages.add(renderedMessageKey(message));
   }
@@ -1854,6 +1902,10 @@ async function resetUsageCredit(credit = {}) {
 }
 
 function updateLoadMore() {
+  if (state.showFullReplies) {
+    els.loadMore.hidden = true;
+    return;
+  }
   const hasMore = state.threadId && state.messageCount > state.loadedCount;
   els.loadMore.hidden = !hasMore;
   els.loadMore.textContent = hasMore ? `加载更多（${state.loadedCount}/${state.messageCount}）` : "加载更多";
@@ -1886,6 +1938,42 @@ function fileIcon(item) {
 
 function displayProjectPath(cwd = "", absoluteCwd = "") {
   return absoluteCwd || (cwd ? `/${cwd}` : "项目根目录");
+}
+
+function projectItemName(file = "", fallback = "download") {
+  const parts = String(file || "").split(/[\\/]/).filter(Boolean);
+  return parts.at(-1) || fallback;
+}
+
+function projectDownloadUrl(file = "", type = "file") {
+  const params = new URLSearchParams({
+    path: String(file || ""),
+    type: type === "dir" ? "dir" : "file"
+  });
+  const connectorId = currentConnectorId();
+  if (connectorId) params.set("connector", connectorId);
+  return `${basePath}/api/remote/project-download?${params.toString()}`;
+}
+
+function downloadProjectItem(file = "", name = "", type = "file") {
+  if (currentConnectorId()) {
+    upsertAssistantMessage(
+      "被控电脑文件下载暂不支持，请先切换到本机项目。",
+      true,
+      "project-download-unsupported"
+    );
+    return false;
+  }
+  const itemType = type === "dir" ? "dir" : "file";
+  const baseName = name || projectItemName(file);
+  const link = document.createElement("a");
+  link.href = projectDownloadUrl(file, itemType);
+  link.download = itemType === "dir" ? `${baseName}.zip` : baseName;
+  link.hidden = true;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  return true;
 }
 
 async function openFiles(dir = "") {
@@ -1927,6 +2015,7 @@ async function openFiles(dir = "") {
       row.querySelector("strong").textContent = item.name;
       row.querySelector("small").textContent = item.type === "dir" ? "文件夹" : `${formatSize(item.size)} · ${new Date(item.mtime).toLocaleString()}`;
       const actions = row.querySelector(".fileActions");
+      actions.append(fileActionButton("下载", "download"));
       if (item.type === "file") actions.append(fileActionButton("编辑", "edit"));
       actions.append(fileActionButton("改名", "rename"), fileActionButton("删除", "delete", "danger"));
       els.fileList.appendChild(row);
@@ -2067,20 +2156,25 @@ async function createSessionInSelectedFolder() {
 async function previewFile(file) {
   els.filePreview.hidden = false;
   els.filePreview.innerHTML = '<div class="remoteEvent">加载中...</div>';
-  const download = downloadUrl(file);
   try {
     const data = await request(`/api/remote/file?path=${encodeURIComponent(file)}`);
     if (data.type === "image") {
-      els.filePreview.innerHTML = `<div class="filePreviewTop"><strong>${escapeHtml(data.path)}</strong><a href="${download}" download>下载</a></div><img src="${basePath}${data.url}" alt="${escapeHtml(data.path)}">`;
+      els.filePreview.innerHTML = `<div class="filePreviewTop"><strong>${escapeHtml(data.path)}</strong><button type="button" data-download-project-file>下载</button></div><img src="${basePath}${data.url}" alt="${escapeHtml(data.path)}">`;
     } else {
       els.filePreview.innerHTML = `
-        <div class="filePreviewTop"><strong>${escapeHtml(data.path)}</strong><div class="panelActions"><button type="button" data-save-project-file>保存</button><a href="${download}" download>下载</a></div></div>
+        <div class="filePreviewTop"><strong>${escapeHtml(data.path)}</strong><div class="panelActions"><button type="button" data-save-project-file>保存</button><button type="button" data-download-project-file>下载</button></div></div>
         <div class="sshEditor"><textarea id="projectEditorText" spellcheck="false">${escapeHtml(data.text)}</textarea></div>
       `;
       els.filePreview.querySelector("[data-save-project-file]").addEventListener("click", () => saveProjectFile(data.path));
     }
+    els.filePreview.querySelector("[data-download-project-file]")?.addEventListener("click", () => {
+      downloadProjectItem(data.path || file, projectItemName(data.path || file), "file");
+    });
   } catch (error) {
-    els.filePreview.innerHTML = `<div class="filePreviewTop"><strong>${escapeHtml(file)}</strong><a href="${download}" download>下载</a></div><div class="remoteEvent">${escapeHtml(error.message)}</div>`;
+    els.filePreview.innerHTML = `<div class="filePreviewTop"><strong>${escapeHtml(file)}</strong><button type="button" data-download-project-file>下载</button></div><div class="remoteEvent">${escapeHtml(error.message)}</div>`;
+    els.filePreview.querySelector("[data-download-project-file]")?.addEventListener("click", () => {
+      downloadProjectItem(file, projectItemName(file), "file");
+    });
   }
 }
 
@@ -2567,7 +2661,8 @@ async function selectThread(threadId) {
   });
   if (connectorId !== currentConnectorId()) return;
   state.completedUnreadThreads.delete(threadId);
-  renderState(data);
+  if (state.showFullReplies) await loadState(connectorId);
+  else renderState(data);
   els.threadPanel.hidden = true;
 }
 
@@ -2703,6 +2798,12 @@ function handleRemoteEvent(data) {
       }
     }
   }
+  if (data.type === "cli_message") {
+    if (state.showFullReplies && data.role === "assistant") {
+      upsertAssistantMessage(data.content, data.final, data.messageId || "cli-message", data);
+    }
+    return;
+  }
   if (data.type === "reply_done") {
     state.replyDone = true;
     updateMeta();
@@ -2722,7 +2823,13 @@ function handleRemoteEvent(data) {
     scheduleThreadListRefresh();
   }
   if (data.type === "error") upsertAssistantMessage(`错误：${data.text}`, true, "error");
-  if (data.type === "state") renderState(data);
+  if (data.type === "state") {
+    if (state.showFullReplies && data.threadId && !Array.isArray(data.fullMessages)) {
+      loadState(currentConnectorId()).catch((error) => console.warn("读取 Codex 完整回复失败", error));
+    } else {
+      renderState(data);
+    }
+  }
   if (data.type === "thread_name" && data.threadId === state.threadId) {
     state.threadName = data.name || "";
     updateMeta();
@@ -3190,6 +3297,7 @@ els.fileList.addEventListener("click", (event) => {
   const name = row.dataset.name || "";
   if (actionButton) {
     const action = actionButton.dataset.fileAction;
+    if (action === "download") downloadProjectItem(file, name, row.dataset.type || "file");
     if (action === "edit") previewFile(file);
     if (action === "rename") renameProjectItem(file, name).catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
     if (action === "delete") deleteProjectItem(file, name, row.dataset.type || "").catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));

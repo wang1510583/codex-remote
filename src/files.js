@@ -1,9 +1,42 @@
-import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { ZipArchive } from "archiver";
 import { codexWorkDir, uploadDir } from "./config.js";
 import { isPreviewText, mimeType, safeFolderName, safeName, safeProjectFileName, readRawBody } from "./utils.js";
 import { projectPath, relativeProjectPath } from "./paths.js";
+
+function isInsidePath(root, target) {
+  return target === root || target.startsWith(`${root}${path.sep}`);
+}
+
+export async function projectDownloadTarget(pathParam = "") {
+  const requested = projectPath(pathParam);
+  const [realRoot, resolved] = await Promise.all([
+    realpath(projectPath("")),
+    realpath(requested)
+  ]);
+  if (!isInsidePath(realRoot, resolved)) {
+    throw Object.assign(new Error("下载路径超出项目范围。"), { statusCode: 403 });
+  }
+  const info = await stat(resolved);
+  if (!info.isFile() && !info.isDirectory()) {
+    throw Object.assign(new Error("只能下载文件或文件夹。"), { statusCode: 400 });
+  }
+  return {
+    file: resolved,
+    name: path.basename(requested) || path.basename(realRoot),
+    type: info.isDirectory() ? "dir" : "file",
+    size: info.isFile() ? info.size : 0,
+    mime: info.isFile() ? mimeType(resolved) : "application/zip"
+  };
+}
+
+export function createProjectFolderZip(folder, archiveName = path.basename(folder)) {
+  const archive = new ZipArchive({ zlib: { level: 6 } });
+  archive.directory(folder, safeName(archiveName || path.basename(folder)));
+  return archive;
+}
 
 export async function listProjectFiles(dirParam = "") {
   const dir = projectPath(dirParam);

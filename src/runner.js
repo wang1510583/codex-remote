@@ -49,6 +49,7 @@ function reasoningEffortLabel(value) {
 }
 
 const modelDescriptionsZh = {
+  "gemini-3.6-flash-high": "Gemini 3.6 Flash 高强度快速模型，适合需要快速响应的任务。",
   "gpt-5.6-sol": "最新的前沿智能体编程模型，适合复杂任务。",
   "gpt-5.6-terra": "能力与速度均衡，适合日常开发工作。",
   "gpt-5.6-luna": "快速且经济，适合较轻量的编程任务。",
@@ -513,6 +514,12 @@ export function liveMessagesFor(runner) {
     messages.push({ role: "assistant", content: assistantBubbleText(turn.currentMessage.text, turn.currentMessage.phase), messageId: turn.currentMessage.id || "assistant", transient: true });
   }
   return messages;
+}
+
+export function liveFullMessagesFor(runner) {
+  const turn = runner?.appServer?.turn;
+  if (!runner?.running || !turn?.fullReplyMessages) return [];
+  return [...turn.fullReplyMessages.values()];
 }
 
 export function runnerStatePayload(runner, extra = {}) {
@@ -1140,7 +1147,12 @@ export async function listThreads(connectorId = "") {
     });
   }
   for (const item of entries) {
-    const parsed = (await import("./threads.js")).parseSessionFile(await provider.readFile(item.file), item.file);
+    const parsed = (await import("./threads.js")).parseSessionFile(
+      await provider.readFile(item.file),
+      item.file,
+      undefined,
+      { includeFull: false }
+    );
     if (!parsed.threadId || parsed.threadSource === "subagent" || includedThreadIds.has(parsed.threadId)) continue;
     const name = typeof names[parsed.threadId] === "string" ? names[parsed.threadId] : "";
     const runner = runningByThread.get(parsed.threadId);
