@@ -56,7 +56,7 @@ function noMatchingMessage(ws, predicate, timeoutMs = 120) {
   });
 }
 
-test("WebToApp notification websocket authenticates and receives task completion", async (t) => {
+test("WebToApp notification websocket receives both task completion and terminal errors", async (t) => {
   const server = createServer((_req, res) => res.end("ok"));
   const queuePath = await temporaryQueuePath(t);
   const hub = createNativeNotificationHub({
@@ -93,6 +93,14 @@ test("WebToApp notification websocket authenticates and receives task completion
   assert.equal(message.title, "服务器Codex");
   assert.equal(message.body, "已完成代码修改");
   assert.equal("url" in message, false);
+
+  const receivedError = matchingMessage(ws, (next) => next.type === "notification" && next.id !== message.id);
+  const errorResult = hub.sendTaskDone("❌ 执行失败：模型连接中断");
+  const errorMessage = await receivedError;
+
+  assert.deepEqual(errorResult, { configured: true, sent: 1, total: 1 });
+  assert.equal(errorMessage.title, "Codex任务出错");
+  assert.equal(errorMessage.body, "❌ 执行失败：模型连接中断");
 });
 
 test("WebToApp notification websocket rejects an invalid token", async (t) => {

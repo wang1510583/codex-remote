@@ -6,6 +6,10 @@ export function cleanText(value, maxLength) {
   return value.slice(0, maxLength);
 }
 
+export function taskNotificationTitle(text = "") {
+  return /^\s*❌/.test(String(text || "")) ? "Codex任务出错" : "服务器Codex";
+}
+
 export function json(res, status, data) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(data));

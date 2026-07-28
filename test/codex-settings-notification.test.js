@@ -11,6 +11,7 @@ function settingsNotification(overrides = {}) {
         cwd: "/workspace/project",
         model: "gpt-5.6-sol",
         effort: "ultra",
+        serviceTier: "priority",
         ...overrides
       }
     }
@@ -27,6 +28,7 @@ test("thread settings notifications expose model and effort without an active tu
   assert.equal(received.threadId, "thread-1");
   assert.equal(received.model, "gpt-5.6-sol");
   assert.equal(received.reasoningEffort, "ultra");
+  assert.equal(received.serviceTier, "priority");
   assert.equal(received.cwd, "/workspace/project");
   assert.equal(received.source, "app-server");
   assert.ok(Number.isFinite(Date.parse(received.updatedAt)));

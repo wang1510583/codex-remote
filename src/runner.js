@@ -21,7 +21,9 @@ import {
 } from "./threads.js";
 import { createLocalAppServer } from "./codex-server.js";
 import { getConnectorAppServer, remoteSessionProvider, isConnectorOnline } from "./connectors.js";
-import { completionMessage, notifyWechatTaskDone, sendWebPushTaskDone } from "./webpush.js";
+import {
+  completionMessage, failureNotificationMessage, notifyWechatTaskDone, sendWebPushTaskDone
+} from "./webpush.js";
 import { sendNativeTaskDone } from "./native-notifications.js";
 import {
   externalRunningSnapshots, externalSessionSnapshot, externalSnapshotFromThread,
@@ -46,6 +48,31 @@ const reasoningEffortLabels = {
 
 function reasoningEffortLabel(value) {
   return reasoningEffortLabels[String(value || "").toLowerCase()] || String(value || "");
+}
+
+function fastModeLabel(status = null) {
+  if (!status) return "未知";
+  if (status.enabled) return "已开启";
+  if (!status.featureEnabled) return "不可用（fast_mode 已禁用）";
+  if (!status.supported) return "当前模型不支持";
+  return "已关闭";
+}
+
+function fastModeStatusMessage(status = {}) {
+  const serviceTier = status.serviceTier || "标准";
+  const rows = [
+    `Fast 模式：**${fastModeLabel(status)}**`,
+    "",
+    `- 当前模型：\`${status.model || "默认"}\``,
+    `- 当前服务层：\`${serviceTier}\``,
+    `- 模型支持 Fast：${status.supported ? "是" : "否"}`,
+    `- 后续会话默认：${status.configuredEnabled ? "Fast" : "标准"}`
+  ];
+  if (status.enabled) {
+    rows.push("- Fast 模式会提高响应速度，但会更快消耗使用额度。");
+  }
+  rows.push("", "用法：`/fast`（切换）、`/fast on`、`/fast off`、`/fast status`");
+  return rows.join("\n");
 }
 
 const modelDescriptionsZh = {
@@ -684,6 +711,32 @@ function taskFailureMessage(error) {
   ].filter(Boolean).join("\n\n");
 }
 
+export function dispatchTaskTerminalNotification(text, channels = {}) {
+  const content = String(text || "").trim();
+  if (!content) return false;
+  const notifyWechat = channels.notifyWechat || notifyWechatTaskDone;
+  const sendWebPush = channels.sendWebPush || sendWebPushTaskDone;
+  const sendNative = channels.sendNative || sendNativeTaskDone;
+  const logger = channels.logger || console;
+  try {
+    notifyWechat(content);
+  } catch (error) {
+    logger.error("wechat task notification failed", error?.message || error);
+  }
+  try {
+    Promise.resolve(sendWebPush(content))
+      .catch((error) => logger.error("web push task notification failed", error?.message || error));
+  } catch (error) {
+    logger.error("web push task notification failed", error?.message || error);
+  }
+  try {
+    sendNative(content);
+  } catch (error) {
+    logger.error("native task notification failed", error?.message || error);
+  }
+  return true;
+}
+
 async function localCommandResponse(message, connectorId = "") {
   const raw = message.trim();
   const command = raw.toLowerCase();
@@ -701,6 +754,8 @@ async function localCommandResponse(message, connectorId = "") {
       "- `/model <模型ID>`：切换到 Codex CLI 提供的模型",
       "- `/effort`：查看当前模型支持的思考强度",
       "- `/effort <强度>`：切换思考强度（`/reasoning` 是别名）",
+      "- `/fast`：切换当前模型的 Fast 服务层并持久化选择",
+      "- `/fast on|off|status`：开启、关闭或查看 Fast 模式",
       "- `/diff`：通过 `gitDiffToRemote` 查看当前 Git diff",
       "- `/compact`：通过 `thread/compact/start` 压缩当前线程上下文",
       "- `/stop`：通过 `turn/interrupt` 中断当前回合；无回合时重启 app-server",
@@ -715,6 +770,11 @@ async function localCommandResponse(message, connectorId = "") {
   }
   if (command === "/status") {
     await ensureStateModelSettings(state);
+    const fastStatus = await commandServer.fastModeStatus(
+      state.model,
+      currentRunner?.running ? "" : state.threadId,
+      currentCwd
+    ).catch(() => null);
     return [
       "当前状态：", "",
       `- Web 服务 PID：${process.pid}`,
@@ -725,7 +785,8 @@ async function localCommandResponse(message, connectorId = "") {
       `- 工作目录：${currentCwdLabel}`,
       `- 被控端：${state.connectorId || "本机"}`,
       `- 模型：${state.model || "默认"}`,
-      `- 思考强度：${reasoningEffortLabel(state.reasoningEffort) || "默认"}`
+      `- 思考强度：${reasoningEffortLabel(state.reasoningEffort) || "默认"}`,
+      `- Fast 模式：${fastModeLabel(fastStatus)}`
     ].join("\n");
   }
   if (command === "/model") {
@@ -788,6 +849,46 @@ async function localCommandResponse(message, connectorId = "") {
       const available = (selected?.supportedReasoningEfforts || []).map((item) => reasoningEffortLabel(item.reasoningEffort)).filter(Boolean).join("、");
       return [`切换思考强度失败：${error.message || error}`, available ? `可用选项：${available}` : ""].filter(Boolean).join("\n\n");
     }
+  }
+  const fastMatch = raw.match(/^\/fast(?:\s+(on|off|status))?\s*$/i);
+  if (fastMatch) {
+    const action = String(fastMatch[1] || "").toLowerCase();
+    if (currentRunner?.running && action !== "status") {
+      return "Codex 正在处理，请结束或中断后再切换 Fast 模式。";
+    }
+    try {
+      const status = await commandServer.fastModeStatus(
+        state.model,
+        currentRunner?.running ? "" : state.threadId,
+        currentCwd
+      );
+      if (action === "status") return fastModeStatusMessage(status);
+      const enabled = action === "on"
+        ? true
+        : action === "off"
+          ? false
+          : !(status.enabled || (!status.supported && status.configuredEnabled));
+      const updated = await commandServer.setFastMode(
+        enabled,
+        state.model,
+        state.threadId,
+        currentCwd
+      );
+      return [
+        `Fast 模式已${enabled ? "开启" : "关闭"}。`,
+        "",
+        fastModeStatusMessage(updated)
+      ].join("\n");
+    } catch (error) {
+      return [
+        `Fast 模式切换失败：${error.message || error}`,
+        "",
+        "用法：`/fast`、`/fast on`、`/fast off`、`/fast status`"
+      ].join("\n");
+    }
+  }
+  if (command.startsWith("/fast")) {
+    return "Fast 命令格式不正确。\n\n用法：`/fast`、`/fast on`、`/fast off`、`/fast status`";
   }
   if (command === "/diff") {
     const result = await commandServer.gitDiff(currentCwd).catch((error) => { throw error; });
@@ -874,6 +975,12 @@ export async function runRemoteTask(message, runner) {
   let waitTimer = null;
   let timeoutTimer = null;
   let turnTimeoutTimer = null;
+  let terminalNotificationSent = false;
+  const notifyTaskTerminalOnce = (text) => {
+    if (terminalNotificationSent || !text) return false;
+    terminalNotificationSent = dispatchTaskTerminalNotification(text, runner.notificationChannels || {});
+    return terminalNotificationSent;
+  };
   const clearConnectionTimers = () => { if (waitTimer) clearTimeout(waitTimer); if (timeoutTimer) clearTimeout(timeoutTimer); waitTimer = null; timeoutTimer = null; };
   const clearTurnTimeout = () => { if (turnTimeoutTimer) clearTimeout(turnTimeoutTimer); turnTimeoutTimer = null; };
   let rejectTurnTimeout = null;
@@ -944,16 +1051,24 @@ export async function runRemoteTask(message, runner) {
       }
       ok = false;
     }
+    if (ok && !completionMessage(answers)) {
+      answers = [
+        ...answers,
+        "❌ Codex 任务已经停止，但没有返回完整的最终回复。"
+      ];
+      ok = false;
+    }
     taskOk = ok;
     const savedAnswers = answers.length ? answers : ["Codex 没有返回文本。"];
     const inflightStartedAtMs = state.inflight?.startedAt ? Date.parse(state.inflight.startedAt) : NaN;
     const startedAtMs = Number.isFinite(runnerStartedAtMs) ? runnerStartedAtMs : inflightStartedAtMs;
     const taskDurationMs = Number.isFinite(startedAtMs) ? Math.max(0, Date.now() - startedAtMs) : null;
     const completionIndex = savedAnswers.reduce((lastIndex, answer, index) => (/^✅\s/.test(answer || "") ? index : lastIndex), -1);
+    const terminalIndex = ok ? completionIndex : savedAnswers.length - 1;
     const savedMessages = [];
     for (const [index, answer] of savedAnswers.entries()) {
       const msg = { role: "assistant", content: answer, at: new Date().toISOString() };
-      if (index === completionIndex && taskDurationMs !== null) msg.taskDurationMs = taskDurationMs;
+      if (index === terminalIndex && taskDurationMs !== null) msg.taskDurationMs = taskDurationMs;
       savedMessages.push(msg);
       state.messages.push(msg);
     }
@@ -964,28 +1079,43 @@ export async function runRemoteTask(message, runner) {
     await writeRunnerStateIfSelected(runner);
     broadcastRunner(runner, { type: "state_saved", threadId: runner.state.threadId });
     if (!ok) {
+      const notificationText = failureNotificationMessage(savedAnswers);
       savedAnswers.forEach((answer, index) => {
         const payload = { type: "message", role: "assistant", content: answer, messageId: `task-failed-${Date.now()}-${index}`, final: true };
-        if (index === completionIndex && taskDurationMs !== null) payload.taskDurationMs = taskDurationMs;
+        if (index === terminalIndex && taskDurationMs !== null) payload.taskDurationMs = taskDurationMs;
+        if (index === terminalIndex) {
+          payload.taskFailed = true;
+          payload.notificationText = notificationText;
+        }
         broadcastRunner(runner, payload);
       });
     }
-    const taskDoneMessage = completionMessage(savedAnswers);
-    if (ok && taskDoneMessage) {
-      notifyWechatTaskDone(taskDoneMessage);
-      sendWebPushTaskDone(taskDoneMessage).catch((error) => console.error("web push task notification failed", error.message || error));
-      sendNativeTaskDone(taskDoneMessage);
-    }
+    const terminalMessage = ok
+      ? completionMessage(savedAnswers)
+      : failureNotificationMessage(savedAnswers);
+    notifyTaskTerminalOnce(terminalMessage);
   } catch (error) {
     console.error("remote task failed", error);
+    taskOk = false;
     const failureMessage = taskFailureMessage(error);
+    const notificationText = failureNotificationMessage([failureMessage]);
+    notifyTaskTerminalOnce(notificationText);
     state.inflight = null;
     state.messages.push({ role: "assistant", content: failureMessage, at: new Date().toISOString(), taskDurationMs: Number.isFinite(runnerStartedAtMs) ? Math.max(0, Date.now() - runnerStartedAtMs) : undefined });
     state.messages = state.messages.slice(-80);
     runner.state = syncLoadedCounts(state);
-    await rememberMessageMeta(runner.state.threadId, runner.state.messages);
+    await rememberMessageMeta(runner.state.threadId, runner.state.messages)
+      .catch((metaError) => console.error("failed to save task failure metadata", metaError));
     await writeRunnerStateIfSelected(runner).catch((writeError) => console.error("failed to save task failure", writeError));
-    const failurePayload = { type: "message", role: "assistant", content: failureMessage, messageId: `task-failed-${Date.now()}`, final: true };
+    const failurePayload = {
+      type: "message",
+      role: "assistant",
+      content: failureMessage,
+      messageId: `task-failed-${Date.now()}`,
+      final: true,
+      taskFailed: true,
+      notificationText
+    };
     if (Number.isFinite(runnerStartedAtMs)) failurePayload.taskDurationMs = Math.max(0, Date.now() - runnerStartedAtMs);
     broadcastRunner(runner, failurePayload);
   } finally {
@@ -1043,7 +1173,14 @@ function processNextQueuedMessage(runner) {
     .catch((error) => {
       console.error("failed to start queued task", error);
       runner.running = false;
-      broadcastRunner(runner, { type: "error", text: error.message || "队列任务启动失败" });
+      const failureMessage = `❌ 队列任务启动失败：${error.message || "未知错误"}`;
+      broadcastRunner(runner, {
+        type: "error",
+        text: failureMessage,
+        taskFailed: true,
+        messageId: `queued-task-failed-${Date.now()}`
+      });
+      dispatchTaskTerminalNotification(failureMessage, runner.notificationChannels || {});
       processNextQueuedMessage(runner);
     });
 }
@@ -1298,12 +1435,14 @@ export async function markInterruptedInflight(connectorId = "") {
   const state = await readState(connectorId);
   if (!state.inflight) return;
   const startedAt = state.inflight.startedAt ? new Date(state.inflight.startedAt).toLocaleString("zh-CN") : "";
+  const failureMessage = `❌ 上次任务因为网页后台服务重启而中断${startedAt ? `（开始于 ${startedAt}）` : ""}。请重新发送这条任务继续执行。`;
   state.messages.push({
     role: "assistant",
-    content: `上次任务因为网页后台服务重启而中断${startedAt ? `（开始于 ${startedAt}）` : ""}。请重新发送这条任务继续执行。`,
+    content: failureMessage,
     at: new Date().toISOString()
   });
   state.messages = state.messages.slice(-80);
   state.inflight = null;
   await writeState(syncLoadedCounts(state), connectorId);
+  dispatchTaskTerminalNotification(failureMessage);
 }

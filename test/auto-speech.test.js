@@ -179,6 +179,6 @@ test("only final assistant SSE bubbles trigger auto speech", async () => {
   assert.match(handler, /upsertAssistantMessage\([^;]+\);\s*if \(data\.final\) speakCompletedAssistantMessage\(data\)/);
   assert.match(source, /element\.dataset\.speechText\s*=\s*String\(text \|\| ""\)/);
   assert.match(source, /els\.log\.addEventListener\("click", handleUserBubbleSpeechInteraction\)/);
-  assert.match(html, /remote\.js\?v=20260725-project-upload/);
-  assert.match(html, /styles\.css\?v=20260725-project-upload/);
+  assert.match(html, /remote\.js\?v=20260728-fast-mode/);
+  assert.match(html, /styles\.css\?v=20260728-fast-mode/);
 });

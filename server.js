@@ -19,8 +19,8 @@ const server = createServer(handle);
 attachConnectorWebSocket(server);
 attachNativeNotificationWebSocket(server);
 
-await markInterruptedInflight("").catch((error) => console.error("failed to mark interrupted task", error));
 await setupWebPush().catch((error) => console.error("failed to setup web push", error));
+await markInterruptedInflight("").catch((error) => console.error("failed to mark interrupted task", error));
 
 server.listen(port, host, () => {
   console.log(`Codex Remote Web listening on http://${host}:${port}`);

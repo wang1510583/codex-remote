@@ -44,6 +44,33 @@ function normalizeReasoningEffort(value) {
   return compact === "extrahigh" || compact === "xhigh" ? "xhigh" : normalized;
 }
 
+function normalizeServiceTier(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+export function fastServiceTierForModel(model = {}) {
+  const tiers = Array.isArray(model?.serviceTiers) ? model.serviceTiers : [];
+  const fastTier = tiers.find((tier) => normalizeServiceTier(tier?.id) === "priority")
+    || tiers.find((tier) => normalizeServiceTier(tier?.id) === "fast")
+    || tiers.find((tier) => normalizeServiceTier(tier?.name) === "fast");
+  if (fastTier) return { ...fastTier };
+  const legacyTiers = Array.isArray(model?.additionalSpeedTiers) ? model.additionalSpeedTiers : [];
+  if (legacyTiers.some((tier) => normalizeServiceTier(tier) === "fast")) {
+    return { id: "fast", name: "Fast", description: "" };
+  }
+  return null;
+}
+
+export function isFastServiceTier(value, fastTier = null) {
+  const normalized = normalizeServiceTier(value);
+  if (!normalized) return false;
+  return new Set([
+    "fast",
+    "priority",
+    normalizeServiceTier(fastTier?.id)
+  ].filter(Boolean)).has(normalized);
+}
+
 function missingModelProviderName(error) {
   const message = String(error?.message || error || "");
   const match = message.match(/Model provider\s+([`'"]?)([^`'"\s]+)\1\s+not found/i);
@@ -289,6 +316,11 @@ export class CodexAppServer {
       updatedAt: new Date().toISOString(),
       source: "app-server"
     };
+    if (Object.prototype.hasOwnProperty.call(params.threadSettings, "serviceTier")) {
+      update.serviceTier = params.threadSettings.serviceTier === null
+        ? null
+        : String(params.threadSettings.serviceTier || "");
+    }
     const waiters = this.threadSettingsWaiters.get(update.threadId);
     if (waiters) {
       for (const waiter of [...waiters]) {
@@ -669,11 +701,15 @@ export class CodexAppServer {
       ? (this.isRemote ? String(cwd) : projectPath(cwd))
       : null;
     const result = await this.request("config/read", { cwd: targetCwd, includeLayers: false });
-    return {
+    const settings = {
       model: result?.config?.model || this.model || "",
       modelProvider: result?.config?.model_provider || result?.config?.modelProvider || "",
       reasoningEffort: result?.config?.model_reasoning_effort || this.reasoningEffort || ""
     };
+    if (Object.prototype.hasOwnProperty.call(result?.config || {}, "service_tier")) {
+      settings.serviceTier = result.config.service_tier;
+    }
+    return settings;
   }
 
   async modelOptions() {
@@ -693,10 +729,14 @@ export class CodexAppServer {
     );
     this.activeThreadId = result.thread.id;
     this.activeCwd = resolvedCwd;
-    return {
+    const settings = {
       model: result.model || "",
       reasoningEffort: result.reasoningEffort || ""
     };
+    if (Object.prototype.hasOwnProperty.call(result || {}, "serviceTier")) {
+      settings.serviceTier = result.serviceTier;
+    }
+    return settings;
   }
 
   async updateThreadModelSettings(update = {}) {
@@ -815,6 +855,122 @@ export class CodexAppServer {
       model: applied.model || selected.model || selected.id,
       option: { ...option, reasoningEffort: applied.effort || option.reasoningEffort }
     };
+  }
+
+  async fastModeStatus(currentModel = "", threadId = "", cwd = codexWorkDir) {
+    await this.ensureStarted();
+    const resolvedCwd = this.isRemote ? String(cwd || "") : projectPath(cwd || "");
+    const live = threadId
+      ? await this.readThreadSettings(threadId, resolvedCwd, { model: currentModel })
+      : null;
+    const [configResult, models] = await Promise.all([
+      this.readConfig(resolvedCwd),
+      this.modelOptions()
+    ]);
+    const config = configResult?.config || {};
+    const modelId = live?.model || currentModel || config.model || this.model || "";
+    const wanted = String(modelId).trim().toLowerCase();
+    const selected = models.find((item) =>
+      [item?.model, item?.id].some((value) => String(value || "").trim().toLowerCase() === wanted)
+    ) || null;
+    const fastTier = fastServiceTierForModel(selected || {});
+    const configuredServiceTier = config.service_tier ?? null;
+    const hasLiveServiceTier = Boolean(live
+      && Object.prototype.hasOwnProperty.call(live, "serviceTier"));
+    const serviceTier = hasLiveServiceTier ? live.serviceTier : configuredServiceTier;
+    const featureEnabled = config.features?.fast_mode !== false;
+    return {
+      model: selected?.model || selected?.id || modelId,
+      supported: Boolean(featureEnabled && fastTier),
+      featureEnabled,
+      enabled: isFastServiceTier(serviceTier, fastTier),
+      configuredEnabled: isFastServiceTier(configuredServiceTier, fastTier),
+      serviceTier,
+      configuredServiceTier,
+      requestServiceTier: fastTier?.id || "",
+      fastTier
+    };
+  }
+
+  async updateThreadServiceTier(threadId, serviceTier, cwd = codexWorkDir) {
+    if (!threadId) return serviceTier;
+    await this.ensureStarted();
+    const resolvedCwd = this.isRemote ? String(cwd || "") : projectPath(cwd || "");
+    const desired = serviceTier === null ? null : String(serviceTier || "");
+    const matchesDesired = (settings = {}) => (
+      Object.prototype.hasOwnProperty.call(settings, "serviceTier")
+      && normalizeServiceTier(settings.serviceTier) === normalizeServiceTier(desired)
+    );
+    const current = await this.readThreadSettings(threadId, resolvedCwd);
+    if (matchesDesired(current)) return current.serviceTier;
+
+    const waiter = this.waitForThreadSettingsUpdate(threadId, matchesDesired);
+    try {
+      await this.request("thread/settings/update", { threadId, serviceTier: desired });
+      const notified = await waiter.promise;
+      if (notified && matchesDesired(notified)) return notified.serviceTier;
+      const verified = await this.readThreadSettings(threadId, resolvedCwd);
+      if (verified && matchesDesired(verified)) return verified.serviceTier;
+      throw new Error("Codex 没有确认 Fast 模式已应用，请稍后重试。");
+    } catch (error) {
+      waiter.cancel();
+      throw error;
+    }
+  }
+
+  async setFastMode(enabled, currentModel = "", threadId = "", cwd = codexWorkDir) {
+    const previous = this.settingsUpdatePromise;
+    const operation = (async () => {
+      if (previous) await previous.catch(() => {});
+      if (this.turn || this.turnStarting) throw new Error("当前回合正在运行，请结束或中断后再切换 Fast 模式。");
+      return await this.applyFastModeUpdate(Boolean(enabled), currentModel, threadId, cwd);
+    })();
+    this.settingsUpdatePromise = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.settingsUpdatePromise === operation) this.settingsUpdatePromise = null;
+    }
+  }
+
+  async applyFastModeUpdate(enabled, currentModel = "", threadId = "", cwd = codexWorkDir) {
+    const before = await this.fastModeStatus(currentModel, threadId, cwd);
+    if (enabled && !before.featureEnabled) {
+      throw new Error("Codex 配置已禁用 `features.fast_mode`，无法开启 Fast 模式。");
+    }
+    if (enabled && !before.fastTier) {
+      throw new Error(`当前模型 ${before.model || "(默认)"} 不提供 Fast 服务层。`);
+    }
+
+    const desiredConfigTier = enabled ? "fast" : null;
+    const desiredThreadTier = enabled ? before.fastTier.id : null;
+    const previousConfigTier = before.configuredServiceTier ?? null;
+    let configWritten = false;
+    try {
+      await this.request("config/batchWrite", {
+        edits: [{
+          keyPath: "service_tier",
+          value: desiredConfigTier,
+          mergeStrategy: "upsert"
+        }],
+        reloadUserConfig: true
+      });
+      configWritten = true;
+      if (threadId) await this.updateThreadServiceTier(threadId, desiredThreadTier, cwd);
+    } catch (error) {
+      if (configWritten) {
+        await this.request("config/batchWrite", {
+          edits: [{
+            keyPath: "service_tier",
+            value: previousConfigTier,
+            mergeStrategy: "upsert"
+          }],
+          reloadUserConfig: true
+        }).catch(() => {});
+      }
+      throw error;
+    }
+    return await this.fastModeStatus(currentModel, threadId, cwd);
   }
 
   async readConfig(cwd = codexWorkDir) {

@@ -7,7 +7,7 @@ import {
   nativeNotificationToken
 } from "./config.js";
 import { routePath } from "./auth.js";
-import { cleanText, safeCompare } from "./utils.js";
+import { cleanText, safeCompare, taskNotificationTitle } from "./utils.js";
 
 const WEBSOCKET_PATH = "/api/notifications/ws";
 const MAX_STORED_NOTIFICATIONS = 200;
@@ -280,7 +280,7 @@ export function createNativeNotificationHub(options = {}) {
 
   function sendTaskDone(text) {
     if (!text) return { configured: Boolean(token), sent: 0, total: clients.size };
-    return sendNotification({ body: text });
+    return sendNotification({ title: taskNotificationTitle(text), body: text });
   }
 
   return { attach, sendNotification, sendTaskDone, status };

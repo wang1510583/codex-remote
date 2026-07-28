@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { dataDir, pushVapidPath, pushSubscriptionsPath, externalBasePath, wechatGatewayUrl, wechatGatewayToken, wechatTarget, wechatSource } from "./config.js";
-import { cleanText } from "./utils.js";
+import { cleanText, taskNotificationTitle } from "./utils.js";
 import { readJsonFile, updateJsonFile } from "./json-file.js";
 
 export let webPushPublicKey = "";
@@ -21,6 +21,17 @@ export function completionMessage(answers = []) {
     .reverse()
     .map((answer) => String(answer || "").trim())
     .find((answer) => /^✅\s/.test(answer)) || "";
+}
+
+export function failureNotificationMessage(answers = []) {
+  for (const answer of [...answers].reverse()) {
+    const lines = String(answer || "").split(/\r?\n/).map((line) => line.trim());
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (!/^❌(?:\s|$)/.test(lines[index])) continue;
+      return lines.slice(index).filter(Boolean).join(" ");
+    }
+  }
+  return "❌ Codex 任务因错误停止。";
 }
 
 async function readPushVapid() {
@@ -75,9 +86,9 @@ export async function sendWebPushTaskDone(text) {
   const rows = await readPushSubscriptions();
   if (!rows.length) return { sent: 0, removed: 0, total: 0 };
   const payload = JSON.stringify({
-    title: "服务器Codex",
+    title: taskNotificationTitle(text),
     body: pushNotificationBody(text),
-    tag: `codex-done-${createHash("sha256").update(text).digest("hex").slice(0, 16)}`,
+    tag: `codex-task-${createHash("sha256").update(text).digest("hex").slice(0, 16)}`,
     url: `${externalBasePath || "."}/`,
     icon: "icon.svg",
     badge: "icon.svg"

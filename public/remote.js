@@ -71,6 +71,7 @@ const slashCommands = [
   { command: "/model ", title: "切换模型", detail: "输入 /model <模型ID>，只接受 CLI 返回的可用选项" },
   { command: "/effort", title: "查看思考强度", detail: "查看当前模型在 Codex CLI 中支持的强度" },
   { command: "/effort ", title: "切换思考强度", detail: "输入 /effort <强度>，只接受当前模型支持的选项" },
+  { command: "/fast", title: "Fast 快速模式", detail: "切换当前模型的 Fast 服务层并保存；响应更快，但会更快消耗使用额度" },
   { command: "/diff", title: "改动", detail: "通过 gitDiffToRemote 查看当前 Git diff" },
   { command: "/compact", title: "压缩上下文", detail: "通过 thread/compact/start 压缩当前线程" },
   { command: "/restart", title: "重启服务", detail: "重启 Caddy 端口和 Codex Remote 后端服务" },
@@ -495,6 +496,9 @@ async function notifyCodexReply(data = {}) {
   const key = data.messageId || `${data.role}:${notificationBody(data.content)}`;
   if (state.notifiedMessages.has(key)) return;
   state.notifiedMessages.add(key);
+  const title = data.taskFailed || /^\s*❌/.test(data.content || "")
+    ? "Codex任务出错"
+    : "服务器Codex";
   const options = {
     body: notificationBody(data.content),
     icon: "icon.svg",
@@ -506,13 +510,13 @@ async function notifyCodexReply(data = {}) {
   try {
     if ("serviceWorker" in navigator) {
       const registration = await navigator.serviceWorker.ready;
-      await registration.showNotification("服务器Codex", options);
+      await registration.showNotification(title, options);
       return;
     }
-    new Notification("服务器Codex", options);
+    new Notification(title, options);
   } catch {
     try {
-      new Notification("服务器Codex", options);
+      new Notification(title, options);
     } catch {}
   }
 }
@@ -2902,7 +2906,9 @@ function handleRemoteEvent(data) {
       }
       upsertAssistantMessage(data.content, data.final, data.messageId || "assistant", data);
       if (data.final) speakCompletedAssistantMessage(data);
-      if (data.final && /^✅\s/.test(data.content || "")) notifyCodexReply(data);
+      if (data.final && (/^✅\s/.test(data.content || "") || data.taskFailed)) {
+        notifyCodexReply(data.notificationText ? { ...data, content: data.notificationText } : data);
+      }
     } else {
       appendMessage(data.role, data.content, data);
       if (data.role === "user") {
@@ -2936,7 +2942,17 @@ function handleRemoteEvent(data) {
     else state.completedUnreadThreads.delete(data.threadId);
     scheduleThreadListRefresh();
   }
-  if (data.type === "error") upsertAssistantMessage(`错误：${data.text}`, true, "error");
+  if (data.type === "error") {
+    upsertAssistantMessage(`错误：${data.text}`, true, data.messageId || "error");
+    if (data.taskFailed) {
+      notifyCodexReply({
+        role: "assistant",
+        content: data.text,
+        messageId: data.messageId || `task-error-${Date.now()}`,
+        taskFailed: true
+      });
+    }
+  }
   if (data.type === "state") {
     if (state.showFullReplies && data.threadId && !Array.isArray(data.fullMessages)) {
       loadState(currentConnectorId()).catch((error) => console.warn("读取 Codex 完整回复失败", error));
