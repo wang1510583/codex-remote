@@ -24,7 +24,7 @@ import {
 import {
   listProjectFiles, createProjectFolder, deleteProjectFolder, createProjectFile,
   deleteProjectFile, writeProjectFile, renameProjectPath, saveUploadedFiles,
-  projectDownloadTarget, createProjectFolderZip
+  projectDownloadTarget, createProjectFolderZip, saveProjectUploads
 } from "./files.js";
 import { projectPath, relativeProjectPath, isAllowedDownload, allowedDownloadRoots } from "./paths.js";
 import * as ssh from "./ssh.js";
@@ -522,6 +522,15 @@ export async function handle(req, res) {
     if (req.method === "POST" && url.pathname === "/api/remote/upload") {
       const files = await saveUploadedFiles(req);
       return json(res, 200, { ok: true, files });
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/remote/project-upload") {
+      const connectorId = connectorIdFrom(req);
+      if (connectorId) {
+        return json(res, 501, { error: "被控电脑文件上传暂不支持，请先切换到本机项目。" });
+      }
+      const result = await saveProjectUploads(req, url.searchParams.get("dir") || "");
+      return json(res, 200, result);
     }
 
     if (req.method === "GET" && url.pathname === "/api/remote/download") {

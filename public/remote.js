@@ -140,6 +140,13 @@ const els = {
   fileList: document.querySelector("#fileList"),
   filePath: document.querySelector("#filePath"),
   filePreview: document.querySelector("#filePreview"),
+  projectUploadButton: document.querySelector("#uploadProjectRemote"),
+  projectUploadMenu: document.querySelector("#projectUploadMenu"),
+  projectFilesButton: document.querySelector("#selectProjectFilesRemote"),
+  projectFolderButton: document.querySelector("#selectProjectFolderRemote"),
+  projectFilesInput: document.querySelector("#projectFilesRemote"),
+  projectFolderInput: document.querySelector("#projectFolderRemote"),
+  projectUploadStatus: document.querySelector("#projectUploadStatus"),
   createFolder: document.querySelector("#createFolderRemote"),
   createFile: document.querySelector("#createFileRemote"),
   closeFiles: document.querySelector("#closeFiles"),
@@ -1940,6 +1947,113 @@ function displayProjectPath(cwd = "", absoluteCwd = "") {
   return absoluteCwd || (cwd ? `/${cwd}` : "项目根目录");
 }
 
+function setProjectUploadStatus(message = "", type = "") {
+  if (!els.projectUploadStatus) return;
+  els.projectUploadStatus.hidden = !message;
+  els.projectUploadStatus.textContent = message;
+  els.projectUploadStatus.className = `projectUploadStatus${type ? ` ${type}` : ""}`;
+}
+
+function closeProjectUploadMenu() {
+  if (!els.projectUploadMenu) return;
+  els.projectUploadMenu.hidden = true;
+  els.projectUploadButton?.setAttribute("aria-expanded", "false");
+}
+
+function toggleProjectUploadMenu() {
+  if (!els.projectUploadMenu) return;
+  const willOpen = els.projectUploadMenu.hidden;
+  els.projectUploadMenu.hidden = !willOpen;
+  els.projectUploadButton?.setAttribute("aria-expanded", willOpen ? "true" : "false");
+}
+
+function projectUploadRelativePath(file, index = 0) {
+  return String(file?.webkitRelativePath || file?.name || `upload-${Date.now()}-${index}`)
+    .replaceAll("\\", "/");
+}
+
+function sendProjectUploadRequest(url, form, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable && typeof onProgress === "function") {
+        onProgress(Math.max(0, Math.min(100, Math.round(event.loaded / event.total * 100))));
+      }
+    });
+    xhr.addEventListener("load", () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || "{}"); } catch {}
+      if (xhr.status === 401) {
+        location.href = `${basePath}/login.html`;
+        reject(new Error("登录已失效。"));
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(data.error || `HTTP ${xhr.status}`));
+        return;
+      }
+      resolve(data);
+    });
+    xhr.addEventListener("error", () => reject(new Error("网络连接失败。")));
+    xhr.addEventListener("abort", () => reject(new Error("上传已取消。")));
+    xhr.send(form);
+  });
+}
+
+async function uploadProjectItems(files = [], selectionType = "files") {
+  closeProjectUploadMenu();
+  if (!files.length) {
+    if (selectionType === "folder") {
+      setProjectUploadStatus("没有选到可上传的文件；浏览器无法导入完全空的文件夹。", "error");
+    }
+    return;
+  }
+  if (currentConnectorId()) {
+    setProjectUploadStatus("被控电脑文件上传暂不支持，请先切换到本机项目。", "error");
+    return;
+  }
+  if (files.length > 5000) {
+    setProjectUploadStatus("单次最多上传 5000 个文件。", "error");
+    return;
+  }
+  const totalBytes = files.reduce((total, file) => total + (Number(file.size) || 0), 0);
+  if (totalBytes > 512 * 1024 * 1024) {
+    setProjectUploadStatus("单次上传总大小不能超过 512MB。", "error");
+    return;
+  }
+
+  const cwd = state.fileCwd || "";
+  const connectorId = currentConnectorId();
+  const form = new FormData();
+  files.forEach((file, index) => {
+    form.append("files", file, projectUploadRelativePath(file, index));
+  });
+  const params = new URLSearchParams({ dir: cwd });
+  if (connectorId) params.set("connector", connectorId);
+  const buttons = [els.projectUploadButton, els.projectFilesButton, els.projectFolderButton].filter(Boolean);
+  buttons.forEach((button) => { button.disabled = true; });
+  setProjectUploadStatus(`正在上传 ${files.length} 个文件（${formatSize(totalBytes)}）…`);
+  try {
+    const data = await sendProjectUploadRequest(
+      `${basePath}/api/remote/project-upload?${params.toString()}`,
+      form,
+      (percent) => setProjectUploadStatus(`正在上传 ${files.length} 个文件（${formatSize(totalBytes)}）… ${percent}%`)
+    );
+    if (connectorId === currentConnectorId() && cwd === state.fileCwd) {
+      await openFiles(data.cwd ?? cwd);
+    }
+    const folderText = Number(data.directories) > 0 ? `，保留 ${data.directories} 个文件夹层级` : "";
+    setProjectUploadStatus(`上传完成：${data.uploaded || files.length} 个文件${folderText}。`, "success");
+  } catch (error) {
+    setProjectUploadStatus(`上传失败：${error.message}`, "error");
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+    if (els.projectFilesInput) els.projectFilesInput.value = "";
+    if (els.projectFolderInput) els.projectFolderInput.value = "";
+  }
+}
+
 function projectItemName(file = "", fallback = "download") {
   const parts = String(file || "").split(/[\\/]/).filter(Boolean);
   return parts.at(-1) || fallback;
@@ -3133,6 +3247,9 @@ document.addEventListener("click", (event) => {
   if (!els.commandMenu.hidden && !event.target.closest(".commandPicker")) {
     closeCommandMenu();
   }
+  if (!els.projectUploadMenu?.hidden && !event.target.closest(".projectUploadPicker")) {
+    closeProjectUploadMenu();
+  }
   if (!els.queuePanel.hidden && !event.target.closest(".queueWrap")) {
     els.queuePanel.hidden = true;
   }
@@ -3184,6 +3301,7 @@ document.addEventListener("click", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     closeCommandMenu();
+    closeProjectUploadMenu();
     els.threadPanel.hidden = true;
     els.filePanel.hidden = true;
     els.sshConnectPanel.hidden = true;
@@ -3283,8 +3401,26 @@ els.createFolder.addEventListener("click", () => {
 els.createFile.addEventListener("click", () => {
   createFileInCurrentFilePanel().catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
 });
+els.projectUploadButton.addEventListener("click", toggleProjectUploadMenu);
+els.projectFilesButton.addEventListener("click", () => {
+  closeProjectUploadMenu();
+  els.projectFilesInput.value = "";
+  els.projectFilesInput.click();
+});
+els.projectFolderButton.addEventListener("click", () => {
+  closeProjectUploadMenu();
+  els.projectFolderInput.value = "";
+  els.projectFolderInput.click();
+});
+els.projectFilesInput.addEventListener("change", () => {
+  uploadProjectItems([...els.projectFilesInput.files], "files");
+});
+els.projectFolderInput.addEventListener("change", () => {
+  uploadProjectItems([...els.projectFolderInput.files], "folder");
+});
 
 els.closeFiles.addEventListener("click", () => {
+  closeProjectUploadMenu();
   els.filePanel.hidden = true;
 });
 

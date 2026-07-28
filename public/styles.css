@@ -1036,6 +1036,11 @@ textarea:focus {
   gap: 4px;
 }
 
+#filePanel > .filePanelTop > .panelActions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .filePanelTop .panelActions button,
 .threadPanelTop .panelActions button {
   min-height: 29px;
@@ -1043,6 +1048,35 @@ textarea:focus {
   border-radius: 4px;
   font-size: 13px;
   line-height: 1;
+}
+
+.projectUploadPicker {
+  position: relative;
+}
+
+.projectUploadMenu {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  z-index: 12;
+  display: grid;
+  gap: 4px;
+  width: max-content;
+  min-width: 112px;
+  padding: 5px;
+  border: 1px solid #444;
+  border-radius: 6px;
+  background: #111;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.42);
+}
+
+.projectUploadMenu[hidden] {
+  display: none;
+}
+
+.projectUploadMenu button {
+  width: 100%;
+  text-align: left;
 }
 
 .sshConnectForm .panelActions button,
@@ -1067,6 +1101,30 @@ textarea:focus {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.projectUploadStatus {
+  margin: 0 2px 9px;
+  padding: 7px 9px;
+  border: 1px solid #3f4650;
+  border-radius: 6px;
+  color: #c6cbd3;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.projectUploadStatus[hidden] {
+  display: none;
+}
+
+.projectUploadStatus.success {
+  border-color: #3f6650;
+  color: #a9d5b8;
+}
+
+.projectUploadStatus.error {
+  border-color: #75453f;
+  color: #ffbeb3;
 }
 
 .fileItem {
@@ -1962,6 +2020,16 @@ textarea:focus {
 
   .modelSettingsModels {
     grid-template-columns: 1fr;
+  }
+
+  #filePanel > .filePanelTop {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  #filePanel > .filePanelTop > .panelActions {
+    justify-content: flex-start;
   }
 
   .fileItem.sshFileItem {

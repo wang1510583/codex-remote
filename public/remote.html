@@ -8,7 +8,7 @@
     <link rel="manifest" href="site.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="icon.svg" />
     <link rel="apple-touch-icon" href="icon.svg" />
-    <link rel="stylesheet" href="styles.css?v=20260724-project-download" />
+    <link rel="stylesheet" href="styles.css?v=20260725-project-upload" />
   </head>
   <body class="remotePage">
     <main class="remoteApp">
@@ -153,12 +153,22 @@
         <div class="filePanelTop">
           <strong>项目文件夹</strong>
           <div class="panelActions">
+            <div class="projectUploadPicker">
+              <button id="uploadProjectRemote" type="button" aria-haspopup="true" aria-expanded="false">上传</button>
+              <div id="projectUploadMenu" class="projectUploadMenu" hidden>
+                <button id="selectProjectFilesRemote" type="button">选择文件</button>
+                <button id="selectProjectFolderRemote" type="button">选择文件夹</button>
+              </div>
+              <input id="projectFilesRemote" type="file" multiple hidden />
+              <input id="projectFolderRemote" type="file" webkitdirectory directory multiple hidden />
+            </div>
             <button id="createFolderRemote" type="button">新建文件夹</button>
             <button id="createFileRemote" type="button">新建文件</button>
             <button id="closeFiles" type="button">关闭</button>
           </div>
         </div>
         <div id="filePath" class="filePath"></div>
+        <div id="projectUploadStatus" class="projectUploadStatus" role="status" aria-live="polite" hidden></div>
         <div id="fileList" class="fileList"></div>
         <div id="filePreview" class="filePreview" hidden></div>
       </aside>
@@ -211,6 +221,6 @@
       </form>
     </main>
     <script src="pwa.js"></script>
-    <script src="remote.js?v=20260724-project-download"></script>
+    <script src="remote.js?v=20260725-project-upload"></script>
   </body>
 </html>
