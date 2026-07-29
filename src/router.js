@@ -1,6 +1,7 @@
 import { createReadStream, existsSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import path from "node:path";
+import { ZipArchive } from "archiver";
 import { publicDir } from "./config.js";
 import { json, readBody, mimeType, safeCompare, cleanText } from "./utils.js";
 import { isAuthenticated, routePath, routeBase, isPublicPath, redirectToLogin, authCookie } from "./auth.js";
@@ -24,7 +25,7 @@ import {
 import {
   listProjectFiles, createProjectFolder, deleteProjectFolder, createProjectFile,
   deleteProjectFile, writeProjectFile, renameProjectPath, saveUploadedFiles,
-  projectDownloadTarget, createProjectFolderZip, saveProjectUploads
+  projectDownloadTarget, createProjectFolderZip, saveProjectUploads, stageProjectUploads
 } from "./files.js";
 import { projectPath, relativeProjectPath, isAllowedDownload, allowedDownloadRoots } from "./paths.js";
 import * as ssh from "./ssh.js";
@@ -283,7 +284,7 @@ export async function handle(req, res) {
         fullMessageCount,
         connectorId,
         absoluteCwd: state.connectorId ? (state.cwd || "") : absoluteCwdLocal(state.cwd || ""),
-        fileLinkRoots: allowedDownloadRoots(),
+        fileLinkRoots: ssh.isSshConnectorId(connectorId) ? ["/"] : allowedDownloadRoots(),
         threadName: state.threadId ? await threadName(state.threadId) : "",
         draft: await draftForState(state, connectorId),
         running: Boolean(runner?.running || external?.running),
@@ -366,10 +367,21 @@ export async function handle(req, res) {
     }
     if (req.method === "POST" && url.pathname === "/api/remote/ssh/connect") {
       const body = await readBody(req);
-      return json(res, 200, { ok: true, ...await ssh.sshConnect({ target: body.target || "", password: body.password || "" }) });
+      const result = await ssh.sshConnect({ target: body.target || "", password: body.password || "" });
+      const viewState = await writeConnectorViewState(result.connectorId || "");
+      broadcast({ type: "connectors_changed" });
+      broadcast({ type: "connector_selected", selectedConnectorId: viewState.selectedConnectorId, updatedAt: viewState.updatedAt });
+      return json(res, 200, { ok: true, ...result, selectedConnectorId: viewState.selectedConnectorId });
     }
     if (req.method === "POST" && url.pathname === "/api/remote/ssh/disconnect") {
+      const disconnectedId = ssh.sshStatusPayload().connectorId || "";
       ssh.closeSshConnection();
+      const currentView = await readConnectorViewState();
+      if (disconnectedId && currentView.selectedConnectorId === disconnectedId) {
+        const viewState = await writeConnectorViewState("");
+        broadcast({ type: "connector_selected", selectedConnectorId: "", updatedAt: viewState.updatedAt });
+      }
+      broadcast({ type: "connectors_changed" });
       return json(res, 200, { ok: true, connected: false });
     }
     if (req.method === "GET" && url.pathname === "/api/remote/ssh/files") {
@@ -462,7 +474,36 @@ export async function handle(req, res) {
     if (req.method === "GET" && url.pathname === "/api/remote/project-download") {
       const connectorId = connectorIdFrom(req);
       if (connectorId) {
-        return json(res, 501, { error: "被控电脑文件下载暂不支持，请先切换到本机项目。" });
+        if (!ssh.isSshConnectorId(connectorId)) {
+          return json(res, 501, { error: "Connector 被控电脑文件下载暂不支持。" });
+        }
+        const target = await ssh.sshDownloadTarget(
+          connectorId,
+          url.searchParams.get("path") || "",
+          url.searchParams.get("type") || ""
+        );
+        if (target.type === "file") {
+          res.writeHead(200, {
+            "Content-Type": mimeType(target.path),
+            "Content-Length": target.size,
+            "Content-Disposition": attachmentDisposition(target.name),
+            "Cache-Control": "private, no-store"
+          });
+          target.stream().pipe(res);
+          return;
+        }
+        const archive = new ZipArchive({ zlib: { level: 6 } });
+        res.writeHead(200, {
+          "Content-Type": "application/zip",
+          "Content-Disposition": attachmentDisposition(`${target.name}.zip`),
+          "Cache-Control": "private, no-store"
+        });
+        archive.on("error", (error) => { if (!res.destroyed) res.destroy(error); });
+        req.on("close", () => { try { archive.abort(); } catch {} });
+        archive.pipe(res);
+        await ssh.appendSshFolderToArchive(connectorId, archive, target.path, target.name);
+        await archive.finalize();
+        return;
       }
       const target = await projectDownloadTarget(url.searchParams.get("path") || "");
       const expectedType = url.searchParams.get("type") || "";
@@ -521,20 +562,48 @@ export async function handle(req, res) {
 
     if (req.method === "POST" && url.pathname === "/api/remote/upload") {
       const files = await saveUploadedFiles(req);
+      const connectorId = connectorIdFrom(req);
+      if (ssh.isSshConnectorId(connectorId)) {
+        try {
+          const remoteFiles = await ssh.uploadSshAttachments(connectorId, files);
+          return json(res, 200, { ok: true, files: remoteFiles });
+        } finally {
+          if (files[0]?.path) await rm(path.dirname(files[0].path), { recursive: true, force: true }).catch(() => {});
+        }
+      }
       return json(res, 200, { ok: true, files });
     }
 
     if (req.method === "POST" && url.pathname === "/api/remote/project-upload") {
       const connectorId = connectorIdFrom(req);
       if (connectorId) {
-        return json(res, 501, { error: "被控电脑文件上传暂不支持，请先切换到本机项目。" });
+        if (!ssh.isSshConnectorId(connectorId)) {
+          return json(res, 501, { error: "Connector 被控电脑文件上传暂不支持。" });
+        }
+        const staged = await stageProjectUploads(req);
+        try {
+          return json(res, 200, await ssh.uploadSshProject(connectorId, url.searchParams.get("dir") || "", staged));
+        } finally {
+          await staged.cleanup().catch(() => {});
+        }
       }
       const result = await saveProjectUploads(req, url.searchParams.get("dir") || "");
       return json(res, 200, result);
     }
 
     if (req.method === "GET" && url.pathname === "/api/remote/download") {
+      const connectorId = connectorIdFrom(req);
       const requested = url.searchParams.get("p") || "";
+      if (ssh.isSshConnectorId(connectorId)) {
+        const target = await ssh.sshDownloadTarget(connectorId, requested, "file");
+        res.writeHead(200, {
+          "Content-Type": mimeType(target.path),
+          "Content-Length": target.size,
+          "Content-Disposition": `${url.searchParams.get("inline") === "1" ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(target.name)}`
+        });
+        target.stream().pipe(res);
+        return;
+      }
       const file = path.resolve(path.isAbsolute(requested) ? requested : path.join(codexWorkDir, requested));
       if (!isAllowedDownload(file) || !existsSync(file)) return json(res, 404, { error: "文件不存在或不允许下载。" });
       const info = await stat(file);

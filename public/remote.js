@@ -881,7 +881,8 @@ function escapeHtml(text) {
 }
 
 function downloadUrl(file) {
-  return `${basePath}/api/remote/download?p=${encodeURIComponent(file)}`;
+  const connector = typeof currentConnectorId === "function" ? currentConnectorId() : "";
+  return `${basePath}/api/remote/download?p=${encodeURIComponent(file)}${connector ? `&connector=${encodeURIComponent(connector)}` : ""}`;
 }
 
 function inlineUrl(file) {
@@ -1049,7 +1050,9 @@ async function uploadFiles(files) {
   }
   els.uploadButton.disabled = true;
   try {
-    const response = await fetch(`${basePath}/api/remote/upload`, { method: "POST", body: form });
+    const connector = currentConnectorId();
+    const suffix = connector ? `?connector=${encodeURIComponent(connector)}` : "";
+    const response = await fetch(`${basePath}/api/remote/upload${suffix}`, { method: "POST", body: form });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     state.uploads.push(...(data.files || []));
@@ -1938,7 +1941,12 @@ function threadSubtitle(thread, isActive = false) {
   const status = thread.externalRunning
     ? "Codex Desktop/CLI 运行中 · 只读同步"
     : (thread.running ? `运行中${thread.queueLength ? ` · 队列 ${thread.queueLength}` : ""}` : "");
-  return [isActive ? "当前会话" : "", status, date, `${thread.messageCount} 条`].filter(Boolean).join(" · ");
+  const count = thread.messageCount !== null
+    && thread.messageCount !== undefined
+    && Number.isFinite(Number(thread.messageCount))
+    ? `${Number(thread.messageCount)} 条`
+    : "";
+  return [isActive ? "当前会话" : "", status, date, count].filter(Boolean).join(" · ");
 }
 
 function fileIcon(item) {
@@ -2013,8 +2021,8 @@ async function uploadProjectItems(files = [], selectionType = "files") {
     }
     return;
   }
-  if (currentConnectorId()) {
-    setProjectUploadStatus("被控电脑文件上传暂不支持，请先切换到本机项目。", "error");
+  if (currentConnectorId() && selectedConnector()?.connectionType !== "ssh") {
+    setProjectUploadStatus("Connector 被控电脑文件上传暂不支持。", "error");
     return;
   }
   if (files.length > 5000) {
@@ -2074,9 +2082,9 @@ function projectDownloadUrl(file = "", type = "file") {
 }
 
 function downloadProjectItem(file = "", name = "", type = "file") {
-  if (currentConnectorId()) {
+  if (currentConnectorId() && selectedConnector()?.connectionType !== "ssh") {
     upsertAssistantMessage(
-      "被控电脑文件下载暂不支持，请先切换到本机项目。",
+      "Connector 被控电脑文件下载暂不支持。",
       true,
       "project-download-unsupported"
     );
@@ -2310,7 +2318,9 @@ function updateSshStatus(data = {}) {
   state.sshConnected = Boolean(data.connected);
   state.sshLabel = data.label || state.sshLabel || "";
   state.sshCwd = data.cwd || state.sshCwd || "";
-  els.sshStatus.textContent = state.sshConnected ? `已连接：${state.sshLabel}` : "未连接";
+  els.sshStatus.textContent = state.sshConnected
+    ? `已连接并可运行 Codex：${state.sshLabel}${data.codexVersion ? ` · ${data.codexVersion}` : ""}`
+    : "未连接";
 }
 
 function setSshView(view = "config") {
@@ -2349,11 +2359,28 @@ async function connectSsh() {
   });
   els.sshPassword.value = "";
   updateSshStatus(data);
+  await loadConnectors();
+  await request("/api/remote/connectors/select", {
+    method: "POST",
+    connectorId: data.connectorId,
+    body: JSON.stringify({ connectorId: data.connectorId })
+  });
+  await applyConnectorSelection(data.connectorId);
   await openSshComputer(data.cwd || "");
 }
 
 async function disconnectSsh() {
+  const selectedWasSsh = selectedConnector()?.connectionType === "ssh";
   await request("/api/remote/ssh/disconnect", { method: "POST" });
+  if (selectedWasSsh) {
+    await request("/api/remote/connectors/select", {
+      method: "POST",
+      connectorId: "",
+      body: JSON.stringify({ connectorId: "" })
+    });
+    await applyConnectorSelection("");
+  }
+  await loadConnectors();
   updateSshStatus({ connected: false });
   els.sshList.innerHTML = "";
   els.sshPath.textContent = "";
@@ -2614,6 +2641,13 @@ async function openConnectors() {
 }
 
 async function switchConnector(id = "") {
+  const device = state.connectors.find((item) => item.id === id);
+  if (device?.connectionType === "ssh" && !device.online) {
+    els.connectorPanel.hidden = true;
+    await openSshConnect();
+    els.sshStatus.textContent = "此 SSH 设备当前离线，请输入密码重新连接。";
+    return;
+  }
   if (state.selectedConnectorId === id) {
     els.connectorPanel.hidden = true;
     return;

@@ -20,7 +20,10 @@ import {
   freshContextUsage, assistantBubbleText
 } from "./threads.js";
 import { createLocalAppServer } from "./codex-server.js";
-import { getConnectorAppServer, remoteSessionProvider, isConnectorOnline } from "./connectors.js";
+import {
+  connectorSupportsConcurrentAppServers, createConnectorAppServer,
+  connectorThreadSummaries, getConnectorAppServer, remoteSessionProvider, isConnectorOnline
+} from "./connectors.js";
 import {
   completionMessage, failureNotificationMessage, notifyWechatTaskDone, sendWebPushTaskDone
 } from "./webpush.js";
@@ -149,7 +152,14 @@ export function appServerForState(state = {}) {
 // connection so different threads can run at the same time. Connector agents
 // currently expose one app-server channel, so they continue to share it.
 export function runnerAppServerForState(state = {}) {
-  if (state.connectorId) return appServerForState(state);
+  if (state.connectorId) {
+    return bindAppServerSettings(
+      connectorSupportsConcurrentAppServers(state.connectorId)
+        ? createConnectorAppServer(state.connectorId)
+        : getConnectorAppServer(state.connectorId),
+      state.connectorId
+    );
+  }
   return bindAppServerSettings(createLocalAppServer(), "");
 }
 
@@ -588,7 +598,7 @@ export async function createRunner(state = {}) {
     steerMessages: [],
     contextUsage: contextUsage || null,
     reconnecting: false,
-    ownsAppServer: !state.connectorId,
+    ownsAppServer: !state.connectorId || connectorSupportsConcurrentAppServers(state.connectorId),
     emit: null
   };
   runner.emit = (event) => broadcastRunner(runner, event);
@@ -657,7 +667,7 @@ export async function runnerForIncomingState(state = {}) {
 
 export function executionConflictForState(state = {}, exceptRunner = null) {
   const connectorId = state.connectorId || "";
-  if (!connectorId) return null;
+  if (!connectorId || connectorSupportsConcurrentAppServers(connectorId)) return null;
   return uniqueRunners().find((runner) => runner.running
     && (runner.connectorId || "") === connectorId
     && runner !== exceptRunner) || null;
@@ -1263,9 +1273,22 @@ export async function submitRemoteMessage(message, requestedFollowMode = "", con
   return { ok: true, accepted: true, queued: false, threadId: runner.state.threadId, runningThreads: runningThreads() };
 }
 
+export async function mapWithConcurrency(items, limit, mapper) {
+  const output = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      output[index] = await mapper(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return output;
+}
+
 export async function listThreads(connectorId = "") {
   const provider = connectorId ? remoteSessionProvider(connectorId) : localSessionProvider;
-  const entries = await listSessionEntries(provider);
   const names = await readThreadNames();
   const completions = await readThreadCompletions();
   const rows = [];
@@ -1283,13 +1306,68 @@ export async function listThreads(connectorId = "") {
       messageCount: runner.state.messages?.length || 0, running: true, queueLength: runner.messageQueue.length
     });
   }
-  for (const item of entries) {
-    const parsed = (await import("./threads.js")).parseSessionFile(
-      await provider.readFile(item.file),
-      item.file,
-      undefined,
-      { includeFull: false }
-    );
+  if (connectorSupportsConcurrentAppServers(connectorId)) {
+    try {
+      const summaries = await connectorThreadSummaries(connectorId, 80);
+      for (const thread of summaries || []) {
+        if (!thread?.id || thread.parentThreadId || includedThreadIds.has(thread.id)) continue;
+        const name = typeof names[thread.id] === "string" ? names[thread.id] : "";
+        const runner = runningByThread.get(thread.id);
+        const running = Boolean(runner?.running);
+        includedThreadIds.add(thread.id);
+        rows.push({
+          threadId: thread.id,
+          title: name || thread.name || thread.preview || "未命名会话",
+          originalTitle: thread.name || thread.preview || "未命名会话",
+          name,
+          cwd: runner?.cwd || thread.cwd || "",
+          updatedAt: runner?.state.inflight?.startedAt
+            || (Number(thread.updatedAt) > 0 ? new Date(Number(thread.updatedAt) * 1000).toISOString() : ""),
+          messageCount: runner?.state.messages?.length ?? null,
+          running,
+          externalRunning: false,
+          completedUnread: Boolean(!running && completions[thread.id]),
+          queueLength: runner?.messageQueue.length || 0
+        });
+      }
+      for (const runner of uniqueRunners().filter((item) => item.running
+        && item.state.threadId
+        && (item.connectorId || "") === connectorId
+        && !includedThreadIds.has(item.state.threadId))) {
+        runningRows.push({
+          threadId: runner.state.threadId, runtimeKey: runner.key,
+          title: threadTitle(runner.state.messages || [], runner.cwd ? `/${runner.cwd}` : "根目录会话"),
+          originalTitle: threadTitle(runner.state.messages || []), name: "", cwd: runner.cwd,
+          updatedAt: runner.state.inflight?.startedAt || new Date().toISOString(),
+          messageCount: runner.state.messages?.length || 0, running: true, queueLength: runner.messageQueue.length
+        });
+      }
+      return [...runningRows, ...rows];
+    } catch (error) {
+      console.warn(`SSH Codex 会话索引读取失败，回退到日志扫描：${error?.message || error}`);
+    }
+  }
+  const entries = await listSessionEntries(provider);
+  const { parseSessionFile } = await import("./threads.js");
+  const parsedEntries = await mapWithConcurrency(entries, connectorId ? 6 : 12, async (item) => {
+    try {
+      return {
+        item,
+        parsed: parseSessionFile(
+          await provider.readFile(item.file),
+          item.file,
+          undefined,
+          { includeFull: false }
+        )
+      };
+    } catch (error) {
+      console.warn(`会话文件读取失败，已跳过 ${item.file}: ${error?.message || error}`);
+      return null;
+    }
+  });
+  for (const entry of parsedEntries) {
+    if (!entry) continue;
+    const { item, parsed } = entry;
     if (!parsed.threadId || parsed.threadSource === "subagent" || includedThreadIds.has(parsed.threadId)) continue;
     const name = typeof names[parsed.threadId] === "string" ? names[parsed.threadId] : "";
     const runner = runningByThread.get(parsed.threadId);

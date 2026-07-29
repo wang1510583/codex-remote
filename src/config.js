@@ -55,6 +55,7 @@ export const pushSubscriptionsPath = path.join(dataDir, "push-subscriptions.json
 export const nativeNotificationQueuePath = path.join(dataDir, "native-notification-queue.json");
 export const connectorStatePath = path.join(dataDir, "connectors.json");
 export const connectorsViewStatePath = path.join(dataDir, "connector-view.json");
+export const sshProfilePath = path.join(dataDir, "ssh-profile.json");
 export const sessionsDir = path.join(os.homedir(), ".codex", "sessions");
 
 export const wechatGatewayUrl = (process.env.WECHAT_GATEWAY_URL || "").replace(/\/+$/, "");

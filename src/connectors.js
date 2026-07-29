@@ -9,6 +9,10 @@ import { broadcast } from "./sse.js";
 import { CodexAppServer } from "./codex-server.js";
 import { RemoteTransport } from "./transport/remote.js";
 import { readJsonFile, updateJsonFile } from "./json-file.js";
+import {
+  createSshAppServer, getSshAppServer, isSshConnectorId, isSshOnline, savedSshDevice,
+  setSshRemark, sshFileOp, sshSessionProvider
+} from "./ssh.js";
 
 const tunnels = new Map();
 
@@ -110,13 +114,21 @@ export async function remoteConnectorsPayload() {
   const devices = Object.values(state.devices).map(publicConnectorDevice).sort((a, b) => (b.lastSeen || "").localeCompare(a.lastSeen || ""));
   for (const device of devices) {
     device.tunnelConnected = tunnels.has(device.id);
+    device.connectionType = "connector";
   }
+  const sshDevice = await savedSshDevice();
+  if (sshDevice) devices.unshift(sshDevice);
   return { devices, jobs: [], localRemark: state.localRemark || "" };
 }
 
 export async function setConnectorRemark(connectorIdValue, remarkValue) {
   const id = cleanConnectorId(connectorIdValue);
   const remark = cleanText(remarkValue, 120).trim();
+  if (isSshConnectorId(id)) {
+    const result = await setSshRemark(id, remark);
+    broadcast({ type: "connectors_changed" });
+    return result;
+  }
   await updateConnectorState((state) => {
     if (id) {
       const device = state.devices[id];
@@ -136,7 +148,12 @@ export async function setConnectorRemark(connectorIdValue, remarkValue) {
 }
 
 export function isConnectorOnline(connectorId) {
-  return tunnels.has(cleanConnectorId(connectorId));
+  const id = cleanConnectorId(connectorId);
+  return isSshConnectorId(id) ? isSshOnline(id) : tunnels.has(id);
+}
+
+export function connectorSupportsConcurrentAppServers(connectorId = "") {
+  return isSshConnectorId(cleanConnectorId(connectorId));
 }
 
 export async function listConnectorDevices() {
@@ -162,6 +179,7 @@ function makeChannel(tunnel) {
 
 export function getConnectorAppServer(connectorIdValue) {
   const id = cleanConnectorId(connectorIdValue);
+  if (isSshConnectorId(id)) return getSshAppServer(id);
   let tunnel = tunnels.get(id);
   if (!tunnel) throw Object.assign(new Error("被控端未连接。"), { statusCode: 409 });
   if (tunnel.appServer) return tunnel.appServer;
@@ -175,6 +193,33 @@ export function getConnectorAppServer(connectorIdValue) {
   });
   tunnel.appServer.connectorId = id;
   return tunnel.appServer;
+}
+
+export function createConnectorAppServer(connectorIdValue) {
+  const id = cleanConnectorId(connectorIdValue);
+  if (isSshConnectorId(id)) return createSshAppServer(id);
+  return getConnectorAppServer(id);
+}
+
+export async function connectorThreadSummaries(connectorIdValue, limit = 80) {
+  const id = cleanConnectorId(connectorIdValue);
+  if (!isSshConnectorId(id)) return null;
+  const server = getSshAppServer(id);
+  await server.ensureStarted();
+  const baseParams = {
+    limit: Math.max(1, Math.min(Number(limit) || 80, 100)),
+    sortKey: "updated_at",
+    sortDirection: "desc",
+    archived: false
+  };
+  let result;
+  try {
+    result = await server.request("thread/list", { ...baseParams, useStateDbOnly: true }, null, 20000);
+  } catch (error) {
+    if (!/useStateDbOnly|invalid params|unknown field|unexpected field/i.test(error?.message || "")) throw error;
+    result = await server.request("thread/list", baseParams, null, 20000);
+  }
+  return Array.isArray(result?.data) ? result.data : [];
 }
 
 async function tunnelRequest(tunnel, type, op, params, timeoutMs = 120000) {
@@ -196,6 +241,7 @@ async function tunnelRequest(tunnel, type, op, params, timeoutMs = 120000) {
 }
 
 export async function connectorFileOp(connectorId, op, params, timeoutMs) {
+  if (isSshConnectorId(cleanConnectorId(connectorId))) return sshFileOp(cleanConnectorId(connectorId), op, params);
   const tunnel = getTunnel(connectorId);
   if (!tunnel) throw Object.assign(new Error("被控端未连接。"), { statusCode: 409 });
   return tunnelRequest(tunnel, "file/request", op, params, timeoutMs);
@@ -203,6 +249,7 @@ export async function connectorFileOp(connectorId, op, params, timeoutMs) {
 
 export function remoteSessionProvider(connectorIdValue) {
   const id = cleanConnectorId(connectorIdValue);
+  if (isSshConnectorId(id)) return sshSessionProvider(id);
   return {
     async listFiles() {
       const tunnel = getTunnel(id);
