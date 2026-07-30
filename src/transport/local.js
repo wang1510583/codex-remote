@@ -273,8 +273,16 @@ function sharedTransportEnabled(env = process.env) {
   return !/^(0|false|no|off)$/i.test(String(env.CODEX_REMOTE_SHARED_APP_SERVER ?? "true"));
 }
 
-export function createLocalAppServerTransport({ bin, model, reasoningEffort, cwd, env }) {
-  const args = ["app-server", "--stdio"];
+export function createLocalAppServerTransport({
+  bin,
+  model,
+  reasoningEffort,
+  cwd,
+  env,
+  extraArgs = [],
+  useShared = true
+}) {
+  const args = ["app-server", "--stdio", ...extraArgs];
   if (model) args.push("-c", `model="${model}"`);
   if (reasoningEffort) args.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
   const standalone = new LocalTransport({
@@ -283,7 +291,7 @@ export function createLocalAppServerTransport({ bin, model, reasoningEffort, cwd
     cwd,
     env
   });
-  if (!sharedTransportEnabled(env)) return standalone;
+  if (!useShared || !sharedTransportEnabled(env)) return standalone;
   const preferred = new UnixWebSocketTransport({ socketPath: sharedSocketPath(env) });
   return new FallbackTransport({
     preferred,

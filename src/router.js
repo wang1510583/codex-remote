@@ -38,6 +38,11 @@ import {
   externalSessionSnapshot, externalSnapshotFromThread,
   monitorExternalSession, stopExternalSessionMonitor
 } from "./external-sessions.js";
+import { handleLiveVoiceHttp } from "./live-voice/index.js";
+import {
+  isLiveVoiceThreadActive,
+  liveVoiceThreadSnapshot
+} from "./live-voice/leases.js";
 
 function serveStatic(req, res) {
   const url = new URL(req.url, "http://localhost");
@@ -178,6 +183,8 @@ export async function handle(req, res) {
     const basePath = routeBase(url.pathname, req);
     url.pathname = routePath(url.pathname);
 
+    if (await handleLiveVoiceHttp(req, res, url)) return;
+
     if (req.method === "POST" && url.pathname === "/api/remote/login") {
       if (!remotePassword) return json(res, 500, { error: "服务端没有配置登录密码。" });
       const password = (await readBody(req)).password;
@@ -240,6 +247,9 @@ export async function handle(req, res) {
       let loadedThread = null;
       let external = null;
       let runner = await runnerForIncomingState(state);
+      const liveVoice = !connectorId && state.threadId
+        ? liveVoiceThreadSnapshot(state.threadId)
+        : null;
       if (runner?.running) {
         stopExternalSessionMonitor(connectorId);
         state = runner.state;
@@ -250,8 +260,12 @@ export async function handle(req, res) {
         const thread = await loadThreadPage(state.threadId, connectorId).catch(() => null);
         if (thread) {
           loadedThread = thread;
-          external = externalSnapshotFromThread(thread, connectorId);
-          monitorExternalSession(state.threadId, connectorId, external);
+          if (liveVoice) {
+            stopExternalSessionMonitor(connectorId);
+          } else {
+            external = externalSnapshotFromThread(thread, connectorId);
+            monitorExternalSession(state.threadId, connectorId, external);
+          }
           const sessionMessages = await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages);
           const messages = mergeStateMessages(sessionMessages, state.messages);
           state = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length), inflight: null };
@@ -261,7 +275,9 @@ export async function handle(req, res) {
       }
       state = await ensureStateModelSettings(state, loadedThread).catch(() => state);
       state = await syncSharedThreadSettings(state).catch(() => state);
-      if (loadedThread && !runner?.running) await writeStateIfIdle(state, connectorId);
+      if (loadedThread && !runner?.running && !liveVoice) {
+        await writeStateIfIdle(state, connectorId);
+      }
       setSelectedRunnerKey(runner ? runner.key : runnerKeyForState(state));
       // A running state must include the app-server turn's current transient
       // messages. Otherwise a tab restored from the background clears the
@@ -287,10 +303,13 @@ export async function handle(req, res) {
         fileLinkRoots: ssh.isSshConnectorId(connectorId) ? ["/"] : allowedDownloadRoots(),
         threadName: state.threadId ? await threadName(state.threadId) : "",
         draft: await draftForState(state, connectorId),
-        running: Boolean(runner?.running || external?.running),
-        externalRunning: Boolean(!runner?.running && external?.running),
+        running: Boolean(runner?.running || liveVoice || external?.running),
+        externalRunning: Boolean(!runner?.running && !liveVoice && external?.running),
         externalTaskStartedAt: external?.externalTaskStartedAt || "",
-        reconnecting: Boolean(runner?.reconnecting),
+        liveVoiceRunning: Boolean(liveVoice),
+        liveVoiceConnected: Boolean(liveVoice?.connected),
+        liveVoiceTaskRunning: Boolean(liveVoice?.taskRunning),
+        reconnecting: Boolean(runner?.reconnecting || (liveVoice && !liveVoice.connected)),
         queueLength: runner?.messageQueue.length || 0,
         queueMessages: (runner?.messageQueue || []).map((item, i) => ({ index: i + 1, message: item.message })),
         steerLength: runner?.steerMessages.length || 0,
@@ -545,8 +564,20 @@ export async function handle(req, res) {
         const viewState = await readConnectorViewState();
         const connectorId = viewState.selectedConnectorId || "";
         const state = await readState(connectorId);
-        const external = externalSessionSnapshot(state.threadId || "", connectorId);
-        if (external?.running) {
+        const liveVoice = !connectorId && state.threadId
+          ? liveVoiceThreadSnapshot(state.threadId)
+          : null;
+        const external = liveVoice
+          ? null
+          : externalSessionSnapshot(state.threadId || "", connectorId);
+        if (liveVoice) {
+          initialStatus.running = true;
+          initialStatus.externalRunning = false;
+          initialStatus.liveVoiceRunning = true;
+          initialStatus.liveVoiceConnected = Boolean(liveVoice.connected);
+          initialStatus.liveVoiceTaskRunning = Boolean(liveVoice.taskRunning);
+          initialStatus.reconnecting = !liveVoice.connected;
+        } else if (external?.running) {
           initialStatus.running = true;
           initialStatus.externalRunning = true;
           initialStatus.externalTaskStartedAt = external.externalTaskStartedAt || "";
@@ -682,6 +713,9 @@ export async function handle(req, res) {
       const { runners } = await import("./runner.js");
       const runningRunner = runners.get(`${connectorId ? `${connectorId}:` : ""}thread:${threadId}`);
       if (runningRunner?.running) return json(res, 409, { error: "这个会话正在运行，不能删除。" });
+      if (!connectorId && isLiveVoiceThreadActive(threadId)) {
+        return json(res, 409, { error: "这个会话正在进行 Live Voice，不能删除。" });
+      }
       await deleteThread(threadId, connectorId);
       await clearThreadCompletedUnread(threadId);
       const state = await readState(connectorId);

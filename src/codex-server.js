@@ -102,14 +102,24 @@ export class CodexAppServer {
     this.onContextUpdate = null;
     this.onThreadSettingsUpdate = null;
     this.threadSettingsWaiters = new Map();
+    this.notificationListeners = new Set();
     this.starting = null;
     this.settingsUpdatePromise = null;
     this.turnStarting = false;
+    this.optOutNotificationMethods = Array.isArray(options.optOutNotificationMethods)
+      ? options.optOutNotificationMethods.filter(Boolean)
+      : [];
   }
 
   emit(event) {
     if (this.runner?.emit) this.runner.emit(event);
     else broadcast(event);
+  }
+
+  onRawNotification(listener) {
+    if (typeof listener !== "function") return () => {};
+    this.notificationListeners.add(listener);
+    return () => this.notificationListeners.delete(listener);
   }
 
   async ensureStarted() {
@@ -144,7 +154,13 @@ export class CodexAppServer {
 
     const initialize = () => this.request("initialize", {
         clientInfo: { name: "codex-remote-web", title: "Codex Remote Web", version: "1.0.0" },
-        capabilities: { experimentalApi: true, requestAttestation: false }
+        capabilities: {
+          experimentalApi: true,
+          requestAttestation: false,
+          ...(this.optOutNotificationMethods.length
+            ? { optOutNotificationMethods: this.optOutNotificationMethods }
+            : {})
+        }
       }, null, this.transport.mode === "shared" ? 3000 : 15000);
     await this.transport.start();
     try {
@@ -371,6 +387,16 @@ export class CodexAppServer {
   }
 
   onNotification(message) {
+    for (const listener of [...this.notificationListeners]) {
+      try {
+        const pending = listener(message);
+        if (pending && typeof pending.catch === "function") {
+          pending.catch((error) => console.error("raw Codex notification listener failed", error));
+        }
+      } catch (error) {
+        console.error("raw Codex notification listener failed", error);
+      }
+    }
     const method = message.method;
     const params = message.params || {};
     const payload = params.payload || params.event || params;
@@ -1041,20 +1067,40 @@ export class CodexAppServer {
   get usingSharedAppServer() {
     return Boolean(this.transport?.usingShared);
   }
+
+  close() {
+    const error = new Error("Codex app-server connection closed.");
+    try { this.transport.kill?.(); } catch {}
+    this.rejectAll(error);
+    this.initialized = false;
+    this.activeThreadId = "";
+    this.activeCwd = "";
+    this.notificationListeners.clear();
+  }
 }
 
-export function createLocalAppServer() {
+export function createLocalAppServer(options = {}) {
+  const realtime = Boolean(options.realtime);
   const transport = createLocalAppServerTransport({
     bin: codexBin,
     model: codexModel,
     reasoningEffort: codexReasoningEffort,
     cwd: codexWorkDir,
-    env: process.env
+    env: process.env,
+    extraArgs: realtime ? ["--enable", "realtime_conversation"] : [],
+    // Callers can opt out of the shared daemon when a capability must be fixed
+    // at process/thread load time (Live Voice does this for realtime).
+    // FallbackTransport starts the same explicitly feature-enabled standalone
+    // process whenever shared transport is disabled or unavailable.
+    useShared: options.useShared !== false
   });
   return new CodexAppServer(transport, {
     model: codexModel,
     reasoningEffort: codexReasoningEffort,
     isRemote: false,
-    resolveCwd: (state = {}) => absoluteStateCwd(state)
+    resolveCwd: (state = {}) => absoluteStateCwd(state),
+    optOutNotificationMethods: realtime
+      ? ["thread/realtime/outputAudio/delta"]
+      : []
   });
 }

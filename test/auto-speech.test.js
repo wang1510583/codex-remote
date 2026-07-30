@@ -176,9 +176,12 @@ test("only final assistant SSE bubbles trigger auto speech", async () => {
   const html = await readFile(new URL("../public/remote.html", import.meta.url), "utf8");
 
   assert.match(source, /command:\s*"\/tts"[\s\S]*?action:\s*toggleAutoSpeech/);
-  assert.match(handler, /upsertAssistantMessage\([^;]+\);\s*if \(data\.final\) speakCompletedAssistantMessage\(data\)/);
+  assert.match(
+    handler,
+    /upsertAssistantMessage\([^;]+\);\s*if \(data\.final && !data\.liveVoiceTranscript\) speakCompletedAssistantMessage\(data\)/
+  );
   assert.match(source, /element\.dataset\.speechText\s*=\s*String\(text \|\| ""\)/);
   assert.match(source, /els\.log\.addEventListener\("click", handleUserBubbleSpeechInteraction\)/);
-  assert.match(html, /remote\.js\?v=20260728-fast-mode/);
-  assert.match(html, /styles\.css\?v=20260728-fast-mode/);
+  assert.match(html, /remote\.js\?v=20260730-live-voice-coordinator/);
+  assert.match(html, /styles\.css\?v=20260730-live-voice-coordinator/);
 });

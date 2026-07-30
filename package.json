@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "verify:live-voice": "node scripts/verify-live-voice.mjs"
   },
   "dependencies": {
     "archiver": "^8.0.0",

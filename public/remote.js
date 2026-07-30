@@ -2,6 +2,9 @@ const state = {
   running: false,
   reconnecting: false,
   externalRunning: false,
+  liveVoiceRunning: false,
+  liveVoiceConnected: false,
+  liveVoiceTaskRunning: false,
   externalTaskStartedAt: "",
   threadId: "",
   threadName: "",
@@ -533,19 +536,27 @@ function updateStatusIcon() {
     els.statusIcon.className = `remoteStatusIcon ${state.externalRunning ? "status-external" : "status-running"}`;
     els.statusIcon.title = state.externalRunning
       ? "Codex Desktop/CLI 正在执行，网页端正在实时同步"
-      : (state.reconnecting ? "Codex 正在重新连接，任务继续等待" : "Codex 正在处理");
+      : state.liveVoiceRunning
+        ? (state.liveVoiceConnected
+            ? (state.liveVoiceTaskRunning ? "Live Voice 已连接，Codex 任务执行中" : "Live Voice 已连接")
+            : (state.liveVoiceTaskRunning ? "Live Voice 已断线，Codex 任务仍在后台执行" : "Live Voice 已断线，等待自动重连"))
+        : (state.reconnecting ? "Codex 正在重新连接，任务继续等待" : "Codex 正在处理");
   } else {
     els.statusIcon.className = "remoteStatusIcon status-idle";
     els.statusIcon.title = "Codex 空闲";
   }
 }
 
-function setRunning(running, queueLength = state.queueLength, queueMessages = state.queueMessages, followMode = state.followMode, steerLength = state.steerLength, steerMessages = state.steerMessages, contextUsage = state.contextUsage, runningThreads = state.runningThreads, reconnecting = false, externalRunning = false) {
+function setRunning(running, queueLength = state.queueLength, queueMessages = state.queueMessages, followMode = state.followMode, steerLength = state.steerLength, steerMessages = state.steerMessages, contextUsage = state.contextUsage, runningThreads = state.runningThreads, reconnecting = false, externalRunning = false, liveVoiceRunning = state.liveVoiceRunning, liveVoiceConnected = state.liveVoiceConnected, liveVoiceTaskRunning = state.liveVoiceTaskRunning) {
   const wasRunning = state.running;
   const wasExternalRunning = state.externalRunning;
+  const wasLiveVoiceRunning = state.liveVoiceRunning;
   const previousRunningThreads = runningThreadsSignature(state.runningThreads);
   state.running = Boolean(running);
-  state.externalRunning = state.running && Boolean(externalRunning);
+  state.liveVoiceRunning = state.running && Boolean(liveVoiceRunning);
+  state.liveVoiceConnected = state.liveVoiceRunning && Boolean(liveVoiceConnected);
+  state.liveVoiceTaskRunning = state.liveVoiceRunning && Boolean(liveVoiceTaskRunning);
+  state.externalRunning = state.running && !state.liveVoiceRunning && Boolean(externalRunning);
   state.reconnecting = state.running && !state.externalRunning && Boolean(reconnecting);
   state.queueLength = Number(queueLength) || 0;
   state.queueMessages = Array.isArray(queueMessages) ? queueMessages : [];
@@ -559,7 +570,7 @@ function setRunning(running, queueLength = state.queueLength, queueMessages = st
   els.sendSteer.disabled = state.externalRunning;
   els.sendQueue.title = state.externalRunning ? "Codex Desktop/CLI 正在执行，网页端当前为只读同步" : "队列模式发送（备用）";
   els.sendSteer.title = state.externalRunning ? "外部 Codex 任务不能从网页端引导" : "引导模式发送（默认，Ctrl+Enter）";
-  if (els.newChat) els.newChat.disabled = state.running;
+  if (els.newChat) els.newChat.disabled = state.running && !state.liveVoiceRunning;
   els.threadButton.disabled = false;
   updateMeta();
   renderQueuePanel();
@@ -568,6 +579,7 @@ function setRunning(running, queueLength = state.queueLength, queueMessages = st
   if (
     wasRunning !== state.running
     || wasExternalRunning !== state.externalRunning
+    || wasLiveVoiceRunning !== state.liveVoiceRunning
     || previousRunningThreads !== runningThreadsSignature(state.runningThreads)
   ) scheduleThreadListRefresh();
 }
@@ -581,7 +593,15 @@ function updateMeta() {
   const externalLabel = state.selectedConnectorId ? "被控电脑 Codex 正在执行 · 实时同步中" : "本机 Codex Desktop/CLI 正在执行 · 实时同步中";
   const modeText = state.externalRunning
     ? externalLabel
-    : (state.reconnecting ? "Codex 正在重新连接 · 任务继续等待" : normalModeText);
+    : state.liveVoiceRunning
+      ? (state.liveVoiceConnected
+          ? (state.liveVoiceTaskRunning
+              ? "Live Voice 已连接 · Codex 任务执行中 · 网页可继续引导"
+              : "Live Voice 已连接 · 网页输入会进入同一会话")
+          : (state.liveVoiceTaskRunning
+              ? "Live Voice 已断线 · 后台任务继续执行 · 等待重连"
+              : "Live Voice 已断线 · 等待安卓自动重连"))
+      : (state.reconnecting ? "Codex 正在重新连接 · 任务继续等待" : normalModeText);
   els.meta.textContent = `${connectorTag}${title}`;
   els.meta.title = `${connectorTag}${title}`;
   els.mode.textContent = modeText;
@@ -1690,7 +1710,21 @@ function renderState(data) {
   if (shouldFollow) scrollToLatest(true);
   else els.logWrap.scrollTop = previousTop;
   updateLoadMore();
-  setRunning(data.running, data.queueLength, data.queueMessages, data.followMode, data.steerLength, data.steerMessages, data.contextUsage, data.runningThreads, data.reconnecting, data.externalRunning);
+  setRunning(
+    data.running,
+    data.queueLength,
+    data.queueMessages,
+    data.followMode,
+    data.steerLength,
+    data.steerMessages,
+    data.contextUsage,
+    data.runningThreads,
+    data.reconnecting,
+    data.externalRunning,
+    Boolean(data.liveVoiceRunning),
+    Boolean(data.liveVoiceConnected),
+    Boolean(data.liveVoiceTaskRunning)
+  );
   const taskStartedAt = state.externalRunning ? state.externalTaskStartedAt : data.inflight?.startedAt;
   if (state.running && taskStartedAt) {
     const startedAtMs = Date.parse(taskStartedAt);
@@ -1940,7 +1974,11 @@ function threadSubtitle(thread, isActive = false) {
   const date = thread.updatedAt ? new Date(thread.updatedAt).toLocaleString() : "";
   const status = thread.externalRunning
     ? "Codex Desktop/CLI 运行中 · 只读同步"
-    : (thread.running ? `运行中${thread.queueLength ? ` · 队列 ${thread.queueLength}` : ""}` : "");
+    : thread.liveVoiceRunning
+      ? (thread.liveVoiceConnected
+          ? (thread.liveVoiceTaskRunning ? "Live Voice 已连接 · 任务执行中" : "Live Voice 已连接")
+          : (thread.liveVoiceTaskRunning ? "Live Voice 已断线 · 后台任务执行中" : "Live Voice 等待重连"))
+      : (thread.running ? `运行中${thread.queueLength ? ` · 队列 ${thread.queueLength}` : ""}` : "");
   const count = thread.messageCount !== null
     && thread.messageCount !== undefined
     && Number.isFinite(Number(thread.messageCount))
@@ -2663,6 +2701,9 @@ async function switchConnector(id = "") {
 async function applyConnectorSelection(id = "", options = {}) {
   state.selectedConnectorId = id;
   state.externalRunning = false;
+  state.liveVoiceRunning = false;
+  state.liveVoiceConnected = false;
+  state.liveVoiceTaskRunning = false;
   state.externalTaskStartedAt = "";
   state.threadId = "";
   state.threadName = "";
@@ -2696,7 +2737,14 @@ let threadListRefreshTimer = null;
 
 function runningThreadsSignature(rows = []) {
   return (Array.isArray(rows) ? rows : [])
-    .map((item) => `${item.connectorId || ""}:${item.threadId || item.runnerKey || ""}:${item.externalRunning ? 1 : 0}`)
+    .map((item) => [
+      item.connectorId || "",
+      item.threadId || item.runnerKey || "",
+      item.externalRunning ? 1 : 0,
+      item.liveVoiceRunning ? 1 : 0,
+      item.liveVoiceConnected ? 1 : 0,
+      item.liveVoiceTaskRunning ? 1 : 0
+    ].join(":"))
     .sort()
     .join("|");
 }
@@ -2916,13 +2964,32 @@ function handleRemoteEvent(data) {
       data.contextUsage || state.contextUsage,
       state.runningThreads,
       false,
-      data.externalRunning
+      data.externalRunning,
+      false,
+      false,
+      false
     );
     scheduleExternalSessionRefresh(currentConnectorId());
     scheduleThreadListRefresh();
     return;
   }
-  if (data.type === "status") setRunning(data.running, data.queueLength, data.queueMessages, data.followMode, data.steerLength, data.steerMessages, data.contextUsage, data.runningThreads, data.reconnecting, data.externalRunning);
+  if (data.type === "status") {
+    setRunning(
+      data.running,
+      data.queueLength,
+      data.queueMessages,
+      data.followMode,
+      data.steerLength,
+      data.steerMessages,
+      data.contextUsage,
+      data.runningThreads,
+      data.reconnecting,
+      data.externalRunning,
+      Boolean(data.liveVoiceRunning),
+      Boolean(data.liveVoiceConnected),
+      Boolean(data.liveVoiceTaskRunning)
+    );
+  }
   if (data.type === "reconnecting") {
     state.reconnecting = Boolean(data.reconnecting);
     updateMeta();
@@ -2939,7 +3006,7 @@ function handleRemoteEvent(data) {
         data.taskDurationMs = Math.max(0, Date.now() - state.currentTaskStartedAtMs);
       }
       upsertAssistantMessage(data.content, data.final, data.messageId || "assistant", data);
-      if (data.final) speakCompletedAssistantMessage(data);
+      if (data.final && !data.liveVoiceTranscript) speakCompletedAssistantMessage(data);
       if (data.final && (/^✅\s/.test(data.content || "") || data.taskFailed)) {
         notifyCodexReply(data.notificationText ? { ...data, content: data.notificationText } : data);
       }
@@ -3097,6 +3164,12 @@ async function sendMessage(mode = "steer") {
   }
   const outgoingMessage = messageWithUploads(message);
   const sendMode = mode === "steer" ? "steer" : "queue";
+  const liveVoiceBeforeSend = {
+    running: state.liveVoiceRunning,
+    connected: state.liveVoiceConnected,
+    taskRunning: state.liveVoiceTaskRunning,
+    reconnecting: state.reconnecting
+  };
   els.input.value = "";
   clearDraft();
   autosizeInput();
@@ -3114,11 +3187,43 @@ async function sendMessage(mode = "steer") {
     if (connectorId !== currentConnectorId()) return;
     state.uploads = [];
     renderUploadList();
-    if (result?.local) setRunning(result.running, result.queueLength, result.queueMessages, result.followMode, result.steerLength, result.steerMessages, result.contextUsage, result.runningThreads, result.reconnecting, result.externalRunning);
-    if (result?.queued || result?.steered) setRunning(true, result.queueLength, result.queueMessages, result.followMode, result.steerLength, result.steerMessages, result.contextUsage, result.runningThreads, result.reconnecting, result.externalRunning);
+    if (result?.local || result?.liveVoice) {
+      setRunning(
+        result.running,
+        result.queueLength,
+        result.queueMessages,
+        result.followMode,
+        result.steerLength,
+        result.steerMessages,
+        result.contextUsage,
+        result.runningThreads,
+        result.reconnecting,
+        result.externalRunning,
+        Boolean(result.liveVoiceRunning),
+        Boolean(result.liveVoiceConnected),
+        Boolean(result.liveVoiceTaskRunning)
+      );
+    }
+    if ((result?.queued || result?.steered) && !result?.liveVoice) {
+      setRunning(true, result.queueLength, result.queueMessages, result.followMode, result.steerLength, result.steerMessages, result.contextUsage, result.runningThreads, result.reconnecting, result.externalRunning);
+    }
   } catch (error) {
     upsertAssistantMessage(`错误：${error.message}`, true);
-    setRunning(false);
+    setRunning(
+      liveVoiceBeforeSend.running,
+      0,
+      [],
+      state.followMode,
+      0,
+      [],
+      state.contextUsage,
+      state.runningThreads,
+      liveVoiceBeforeSend.reconnecting,
+      false,
+      liveVoiceBeforeSend.running,
+      liveVoiceBeforeSend.connected,
+      liveVoiceBeforeSend.taskRunning
+    );
   }
 }
 

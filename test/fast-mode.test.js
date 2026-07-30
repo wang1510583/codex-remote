@@ -197,5 +197,5 @@ test("the slash panel and local command router expose Fast mode", async () => {
   assert.match(source, /command:\s*"\/fast"[\s\S]*?title:\s*"Fast 快速模式"/);
   assert.match(runner, /\/fast on\|off\|status/);
   assert.match(runner, /commandServer\.setFastMode/);
-  assert.match(html, /remote\.js\?v=20260728-fast-mode/);
+  assert.match(html, /remote\.js\?v=20260730-live-voice-coordinator/);
 });

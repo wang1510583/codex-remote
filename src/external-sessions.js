@@ -1,5 +1,6 @@
 import { externalSessionPollMs, externalSessionStaleMs } from "./config.js";
 import { remoteSessionProvider } from "./connectors.js";
+import { isLiveVoiceThreadActive } from "./live-voice/leases.js";
 import { broadcast } from "./sse.js";
 import {
   localSessionProvider, parseSessionFile, threadIdFromFile
@@ -95,6 +96,7 @@ async function readSnapshot(threadId, connectorId = "", previous = null) {
 }
 
 export function externalSessionSnapshot(threadId = "", connectorId = "") {
+  if (!connectorId && isLiveVoiceThreadActive(threadId)) return null;
   const snapshot = snapshots.get(snapshotKey(threadId, connectorId)) || null;
   if (!snapshot) return null;
   const running = isExternalTaskRunning(snapshot, snapshot.mtimeMs);
@@ -103,6 +105,10 @@ export function externalSessionSnapshot(threadId = "", connectorId = "") {
 
 export async function refreshExternalSession(threadId = "", connectorId = "") {
   if (!threadId) return null;
+  if (!connectorId && isLiveVoiceThreadActive(threadId)) {
+    stopExternalSessionMonitor(connectorId);
+    return null;
+  }
   const key = snapshotKey(threadId, connectorId);
   const snapshot = await readSnapshot(threadId, connectorId, snapshots.get(key));
   snapshots.set(key, snapshot);
@@ -111,6 +117,10 @@ export async function refreshExternalSession(threadId = "", connectorId = "") {
 
 async function pollMonitor(monitor) {
   if (monitor.polling) return;
+  if (!monitor.connectorId && isLiveVoiceThreadActive(monitor.threadId)) {
+    stopExternalSessionMonitor(monitor.connectorId);
+    return;
+  }
   monitor.polling = true;
   try {
     const previous = snapshots.get(monitor.snapshotKey) || null;
@@ -150,6 +160,10 @@ async function pollMonitor(monitor) {
 
 export function monitorExternalSession(threadId = "", connectorId = "", initialSnapshot = null) {
   if (!threadId) return null;
+  if (!connectorId && isLiveVoiceThreadActive(threadId)) {
+    stopExternalSessionMonitor(connectorId);
+    return null;
+  }
   const scope = scopeKey(connectorId);
   const existing = monitors.get(scope);
   if (existing?.threadId === threadId) {
@@ -195,5 +209,8 @@ export function externalRunningSnapshots() {
       const running = isExternalTaskRunning(snapshot, snapshot.mtimeMs);
       return { ...snapshot, running, externalRunning: running };
     })
-    .filter((snapshot) => snapshot.running);
+    .filter((snapshot) => (
+      snapshot.running
+      && (snapshot.connectorId || !isLiveVoiceThreadActive(snapshot.threadId))
+    ));
 }

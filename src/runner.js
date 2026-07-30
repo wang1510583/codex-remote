@@ -29,6 +29,13 @@ import {
 } from "./webpush.js";
 import { sendNativeTaskDone } from "./native-notifications.js";
 import {
+  activeLiveVoiceThreadSnapshots,
+  interruptLiveVoiceThreadTask,
+  isLiveVoiceThreadActive,
+  liveVoiceThreadSnapshot,
+  sendLiveVoiceThreadInput
+} from "./live-voice/leases.js";
+import {
   externalRunningSnapshots, externalSessionSnapshot, externalSnapshotFromThread,
   isExternalTaskRunning, monitorExternalSession, refreshExternalSession,
   stopExternalSessionMonitor
@@ -327,8 +334,13 @@ export async function sessionModelSettingsPayload(connectorId = "") {
   const state = await readState(connectorId);
   state.connectorId = state.connectorId || connectorId;
   const runner = await runnerForState(state, false);
-  const external = runner?.running ? null : await externalStatusForState(state, true);
-  const running = Boolean(runner?.running || external?.running);
+  const liveVoice = !connectorId && state.threadId
+    ? liveVoiceThreadSnapshot(state.threadId)
+    : null;
+  const external = runner?.running || liveVoice
+    ? null
+    : await externalStatusForState(state, true);
+  const running = Boolean(runner?.running || liveVoice || external?.running);
   const selectedState = runner?.state || state;
   await ensureStateModelSettings(selectedState, external);
   const server = runner?.appServer || appServerForState(selectedState);
@@ -371,6 +383,12 @@ export async function updateSessionModelSettings(update = {}, connectorId = "") 
   state.connectorId = state.connectorId || connectorId;
   const runner = await runnerForState(state, false);
   if (runner?.running) throw Object.assign(new Error("当前会话正在处理，请结束或中断后再切换。"), { statusCode: 409 });
+  if (!connectorId && state.threadId && isLiveVoiceThreadActive(state.threadId)) {
+    throw Object.assign(
+      new Error("当前会话正在由 Live Voice 使用，请关闭语音并等待任务结束后再切换模型。"),
+      { statusCode: 409 }
+    );
+  }
   const observed = await assertExternalSessionIdle(state);
   await ensureStateModelSettings(state, observed);
   const server = runner?.appServer || appServerForState(state);
@@ -467,8 +485,27 @@ export function runningThreads() {
       externalRunning: false
     }));
   const internalKeys = new Set(internal.map((item) => `${item.connectorId || ""}:${item.threadId || ""}`));
+  const liveVoice = activeLiveVoiceThreadSnapshots()
+    .filter((snapshot) => snapshot.threadId && !internalKeys.has(`:${snapshot.threadId}`))
+    .map((snapshot) => ({
+      runnerKey: `live-voice:${snapshot.threadId}`,
+      connectorId: "",
+      threadId: snapshot.threadId,
+      cwd: snapshot.cwd || "",
+      title: snapshot.cwd ? `Live Voice · ${snapshot.cwd}` : "Live Voice 会话",
+      messageCount: 0,
+      queueLength: 0,
+      externalRunning: false,
+      liveVoiceRunning: true,
+      liveVoiceConnected: Boolean(snapshot.connected),
+      liveVoiceTaskRunning: Boolean(snapshot.taskRunning)
+    }));
+  const ownedKeys = new Set([
+    ...internalKeys,
+    ...liveVoice.map((item) => `:${item.threadId}`)
+  ]);
   const external = externalRunningSnapshots()
-    .filter((snapshot) => snapshot.threadId && !internalKeys.has(`${snapshot.connectorId || ""}:${snapshot.threadId}`))
+    .filter((snapshot) => snapshot.threadId && !ownedKeys.has(`${snapshot.connectorId || ""}:${snapshot.threadId}`))
     .map((snapshot) => ({
       runnerKey: `external:${snapshot.connectorId || "local"}:${snapshot.threadId}`,
       connectorId: snapshot.connectorId || "",
@@ -479,7 +516,7 @@ export function runningThreads() {
       queueLength: 0,
       externalRunning: true
     }));
-  return [...internal, ...external];
+  return [...internal, ...liveVoice, ...external];
 }
 
 export function isRunnerSelected(runner) {
@@ -1195,12 +1232,110 @@ function processNextQueuedMessage(runner) {
     });
 }
 
+async function submitLiveVoiceMessage(text, selectedState) {
+  let delivery = null;
+  let localAnswer = "";
+  if (text.trim().toLowerCase() === "/stop") {
+    const interrupted = await interruptLiveVoiceThreadTask(selectedState.threadId)
+      .catch(() => false);
+    localAnswer = interrupted
+      ? "已中断当前 Live Voice Codex 任务；语音连接仍然保留。"
+      : "当前 Live Voice 会话没有可中断的 Codex 任务。";
+  } else {
+    try {
+      delivery = await sendLiveVoiceThreadInput(selectedState.threadId, text);
+    } catch (error) {
+      if (error && typeof error === "object") {
+        if (!error.statusCode) error.statusCode = 409;
+        throw error;
+      }
+      throw Object.assign(new Error(String(error)), { statusCode: 409 });
+    }
+  }
+
+  const state = await readState("");
+  await saveDraftForState(state, "", "");
+  if (state.threadId === selectedState.threadId) {
+    const userMessage = {
+      role: "user",
+      content: text,
+      at: new Date().toISOString(),
+      liveVoiceTranscript: true
+    };
+    const last = state.messages?.at?.(-1);
+    if (last?.role !== userMessage.role || last?.content !== userMessage.content) {
+      state.messages = [...(state.messages || []), userMessage].slice(-80);
+      broadcast({
+        type: "message",
+        connectorId: "",
+        threadId: state.threadId,
+        ...userMessage
+      });
+    }
+    if (localAnswer) {
+      const assistantMessage = {
+        role: "assistant",
+        content: localAnswer,
+        at: new Date().toISOString(),
+        liveVoiceTranscript: true
+      };
+      state.messages.push(assistantMessage);
+      state.messages = state.messages.slice(-80);
+      broadcast({
+        type: "message",
+        connectorId: "",
+        threadId: state.threadId,
+        ...assistantMessage,
+        final: true,
+        messageId: `live-voice-command-${Date.now()}`
+      });
+    }
+    await writeState(syncLoadedCounts(state), "");
+  }
+
+  const liveVoice = liveVoiceThreadSnapshot(selectedState.threadId);
+  const mode = await followModeForState(selectedState, "");
+  const response = {
+    ok: true,
+    accepted: true,
+    liveVoice: true,
+    running: Boolean(liveVoice),
+    externalRunning: false,
+    liveVoiceRunning: Boolean(liveVoice),
+    liveVoiceConnected: Boolean(liveVoice?.connected),
+    liveVoiceTaskRunning: Boolean(liveVoice?.taskRunning),
+    reconnecting: Boolean(liveVoice && !liveVoice.connected),
+    queued: false,
+    steered: delivery?.mode === "steer",
+    queueLength: 0,
+    queueMessages: [],
+    steerLength: 0,
+    steerMessages: [],
+    followMode: mode,
+    threadId: selectedState.threadId,
+    runningThreads: runningThreads()
+  };
+  if (localAnswer) {
+    response.local = true;
+    response.answer = localAnswer;
+  }
+  broadcast({
+    type: "status",
+    connectorId: "",
+    ...response
+  });
+  return response;
+}
+
 export async function submitRemoteMessage(message, requestedFollowMode = "", connectorId = "") {
   const text = cleanText(message, 30000).trim();
   if (!text) throw Object.assign(new Error("请先输入内容。"), { statusCode: 400 });
   const oneShotFollowMode = requestedFollowMode === "steer" ? "steer" : requestedFollowMode === "queue" ? "queue" : "";
   const selectedState = await readState(connectorId);
   selectedState.connectorId = selectedState.connectorId || connectorId;
+  if (!connectorId && selectedState.threadId && isLiveVoiceThreadActive(selectedState.threadId)) {
+    return submitLiveVoiceMessage(text, selectedState);
+  }
   const selectedRunner = await runnerForState(selectedState, false);
   if (!selectedRunner?.running) {
     const observed = await assertExternalSessionIdle(selectedState);
@@ -1295,6 +1430,11 @@ export async function listThreads(connectorId = "") {
   const includedThreadIds = new Set();
   const runningByThread = new Map();
   const runningRows = [];
+  const liveVoiceByThread = new Map(
+    connectorId
+      ? []
+      : activeLiveVoiceThreadSnapshots().map((snapshot) => [snapshot.threadId, snapshot])
+  );
   for (const runner of uniqueRunners().filter((item) => item.running && (item.connectorId || "") === connectorId)) {
     if (runner.state.threadId) runningByThread.set(runner.state.threadId, runner);
     else runningRows.push({
@@ -1371,8 +1511,11 @@ export async function listThreads(connectorId = "") {
     if (!parsed.threadId || parsed.threadSource === "subagent" || includedThreadIds.has(parsed.threadId)) continue;
     const name = typeof names[parsed.threadId] === "string" ? names[parsed.threadId] : "";
     const runner = runningByThread.get(parsed.threadId);
-    const externalRunning = !runner?.running && isExternalTaskRunning(parsed, item.mtimeMs);
-    const running = Boolean(runner?.running || externalRunning);
+    const liveVoice = liveVoiceByThread.get(parsed.threadId) || null;
+    const externalRunning = !runner?.running
+      && !liveVoice
+      && isExternalTaskRunning(parsed, item.mtimeMs);
+    const running = Boolean(runner?.running || liveVoice || externalRunning);
     includedThreadIds.add(parsed.threadId);
     rows.push({
       threadId: parsed.threadId,
@@ -1383,6 +1526,9 @@ export async function listThreads(connectorId = "") {
       messageCount: runner?.state.messages?.length || parsed.messageCount,
       running,
       externalRunning,
+      liveVoiceRunning: Boolean(liveVoice),
+      liveVoiceConnected: Boolean(liveVoice?.connected),
+      liveVoiceTaskRunning: Boolean(liveVoice?.taskRunning),
       completedUnread: Boolean(!running && completions[parsed.threadId]),
       queueLength: runner?.messageQueue.length || 0
     });
@@ -1394,6 +1540,26 @@ export async function listThreads(connectorId = "") {
       originalTitle: threadTitle(runner.state.messages || []), name: "", cwd: runner.cwd,
       updatedAt: runner.state.inflight?.startedAt || new Date().toISOString(),
       messageCount: runner.state.messages?.length || 0, running: true, queueLength: runner.messageQueue.length
+    });
+  }
+  for (const liveVoice of liveVoiceByThread.values()) {
+    if (!liveVoice.threadId || includedThreadIds.has(liveVoice.threadId)) continue;
+    runningRows.push({
+      threadId: liveVoice.threadId,
+      runtimeKey: `live-voice:${liveVoice.threadId}`,
+      title: liveVoice.cwd ? `Live Voice · ${liveVoice.cwd}` : "Live Voice 会话",
+      originalTitle: "Live Voice 会话",
+      name: typeof names[liveVoice.threadId] === "string" ? names[liveVoice.threadId] : "",
+      cwd: liveVoice.cwd || "",
+      updatedAt: liveVoice.updatedAt || new Date().toISOString(),
+      messageCount: 0,
+      running: true,
+      externalRunning: false,
+      liveVoiceRunning: true,
+      liveVoiceConnected: Boolean(liveVoice.connected),
+      liveVoiceTaskRunning: Boolean(liveVoice.taskRunning),
+      completedUnread: false,
+      queueLength: 0
     });
   }
   return [...runningRows, ...rows];
@@ -1426,8 +1592,10 @@ export async function selectRemoteThread(rawThreadId, connectorId = "") {
     return payload;
   }
   const thread = await loadThreadFromProvider(threadId, provider);
-  const external = externalSnapshotFromThread(thread, connectorId);
-  monitorExternalSession(threadId, connectorId, external);
+  const liveVoice = !connectorId ? liveVoiceThreadSnapshot(threadId) : null;
+  const external = liveVoice ? null : externalSnapshotFromThread(thread, connectorId);
+  if (liveVoice) stopExternalSessionMonitor(connectorId);
+  else monitorExternalSession(threadId, connectorId, external);
   await clearThreadCompletedUnread(threadId);
   const messages = await mergeLocalMessageMeta(thread.threadId, thread.messages, []);
   const state = { threadId: thread.threadId, connectorId, cwd: thread.cwd || "", model: thread.model || "", reasoningEffort: thread.reasoningEffort || "", messages, loadedCount: messages.length, messageCount: thread.messageCount, inflight: null };
@@ -1445,10 +1613,13 @@ export async function selectRemoteThread(rawThreadId, connectorId = "") {
     draft,
     followMode: mode,
     contextUsage,
-    running: external.running,
-    externalRunning: external.running,
-    externalTaskStartedAt: external.externalTaskStartedAt,
-    reconnecting: false,
+    running: Boolean(liveVoice || external?.running),
+    externalRunning: Boolean(external?.running),
+    externalTaskStartedAt: external?.externalTaskStartedAt || "",
+    liveVoiceRunning: Boolean(liveVoice),
+    liveVoiceConnected: Boolean(liveVoice?.connected),
+    liveVoiceTaskRunning: Boolean(liveVoice?.taskRunning),
+    reconnecting: Boolean(liveVoice && !liveVoice.connected),
     runningThreads: runningThreads()
   };
   broadcast({ type: "state", connectorId, ...payload });
@@ -1461,6 +1632,12 @@ export async function loadThreadPage(threadId, connectorId = "") {
 }
 
 export async function deleteThread(threadId, connectorId = "") {
+  if (!connectorId && isLiveVoiceThreadActive(threadId)) {
+    throw Object.assign(
+      new Error("这个会话正在由 Live Voice 使用，暂时不能删除。"),
+      { statusCode: 409 }
+    );
+  }
   await assertExternalSessionIdle({ threadId, connectorId });
   const provider = connectorId ? remoteSessionProvider(connectorId) : localSessionProvider;
   await deleteThreadFromProvider(threadId, provider);

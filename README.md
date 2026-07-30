@@ -10,6 +10,9 @@
 浏览器 PWA  <--HTTP+SSE-->  总控端 server.js  <--Unix WebSocket-->  Codex Desktop 共享 app-server（本机）
                               |                    └─不可用时回退 stdio 独立进程
                               |
+Android 语音 App <--HTTP+WS--> Live Voice 兼容层 <--WebRTC信令--> 专用 realtime app-server
+                              |                                  └─恢复并持有网页当前 thread
+                              |
                               +--<WebSocket 隧道>-->  被控端 connector  -->  被控端 codex app-server
                               |
                               +-- Web Push / 微信 -->  任务完成通知
@@ -17,7 +20,7 @@
 
 - 后端：纯 Node.js（ESM），原生 `http` + `ws`，依赖 `ssh2` + `web-push` + `ws`
 - 前端：原生 HTML/CSS/JS（PWA），无构建步骤
-- 模块化：`server.js` 入口 + `src/` 下 13 个模块（router/runner/codex-server/connectors/store/sse/files/ssh/webpush/threads/transport 等）
+- 模块化：`server.js` 入口 + `src/` 下按职责拆分的模块（router/runner/codex-server/connectors/store/live-voice/transport 等）
 - 本机会话可并行执行：不同会话各用独立 app-server 客户端；同一会话的新消息仍按 `queue` / `steer` 设置处理。被控端 connector 当前只有一个执行通道，因此仍按设备串行。
 
 ## 要求
@@ -65,6 +68,11 @@ cp .env.example .env
 | `CODEX_EXTERNAL_SESSION_STALE_MS` | `7200000` | 无 `task_complete` 且长时间无文件活动时的故障兜底 |
 | `CODEX_REMOTE_PASSWORD` | — | **必填**，网页登录密码 |
 | `CODEX_REMOTE_CONNECTOR_TOKEN` | =登录密码 | 被控端配对令牌（建议单独设置，与登录密码不同） |
+| `CODEX_REMOTE_VOICE_TOKEN` | =登录密码 | Android Live Voice Basic Auth 密码（建议按需单独设置） |
+| `CODEX_REMOTE_LIVE_VOICE_ENABLED` | `1` | 是否启用 Android Live Voice 兼容接口 |
+| `CODEX_REMOTE_LIVE_VOICE_VOICE` | `cove` | Live Voice v3 声音 |
+| `CODEX_REMOTE_LIVE_VOICE_RECONNECT_GRACE_MS` | `60000` | 安卓断线后保留原实时运行时、等待重连的时间 |
+| `CODEX_REMOTE_LIVE_VOICE_TASK_RETENTION_MS` | `1800000` | 音频关闭后，仍在执行的 Codex 回合最长保留时间 |
 | `CODEX_REMOTE_ROUTE_PREFIX` | `/codex-remote` | 路由前缀，用于反向代理子路径 |
 | `WEB_PUSH_SUBJECT` | `mailto:admin@...` | Web Push VAPID subject |
 | `CODEX_REMOTE_NOTIFICATION_TOKEN` | — | WebToApp APK 原生 WebSocket 通知专用令牌 |
@@ -151,6 +159,70 @@ location /codex-remote/ {
 ```
 
 > 反向代理用子路径时，`X-Forwarded-Prefix` 头要让后端知道前缀，否则静态资源路径会错。
+
+## Android Codex Live Voice
+
+本项目内置了与现有 HomeRail Android 语音 App 兼容的接口。无需修改或重新构建 APK，只需在 App 的连接设置中切换目标：
+
+- 服务器：`https://你的域名/<CODEX_REMOTE_ROUTE_PREFIX>`，必须包含实际子路径。例如本机当前部署使用 `/codexremote` 时，地址应写成 `https://域名/codexremote`。
+- 用户名：任意非空名称即可，建议保留现有值。
+- 密码：`CODEX_REMOTE_VOICE_TOKEN`；没有单独设置时就是 `CODEX_REMOTE_PASSWORD`。
+
+连接时，服务端会读取 Codex Remote 网页当前选择的本机会话，恢复同一个 Codex `threadId` 和工作目录，再启动 WebRTC Live Voice。关闭语音只释放实时连接，不删除 thread；之后的文字和语音仍会继续同一上下文。
+
+网页文字端可以继续使用共享 app-server daemon；Live Voice 则由兼容层启动并持有一个专用、明确启用实时能力的 app-server：
+
+```sh
+codex features enable realtime_conversation
+```
+
+这是因为 Codex 会在线程载入时确定它是否支持 Realtime。即使旧的共享 daemon 后来修改了配置，它已经载入的 thread 仍可能拒绝 `thread/realtime/start`。专用进程会用 `--enable realtime_conversation` 启动，避开这个旧线程状态；兼容层的租约仍保证网页和 Android 不会同时写入同一个 thread。
+
+协调规则：
+
+- Android 网络短暂中断时，服务端默认保留原运行时 60 秒；自动重连会复用同一个 app-server 和 thread。
+- 关闭语音时只停止 WebRTC 音频。如果已经委派了 Codex 任务，任务会继续在后台运行，完成后再释放会话。
+- 网页选中同一 thread 时不会再显示成“其他客户端”；网页输入会发送到当前 Live Voice，或用 `turn/steer` 引导已委派的任务。网页输入 `/stop` 可以中断该任务。
+- 真正由 Codex Desktop/其他 CLI 占用的同一 thread 仍保持只读同步，避免双写。
+
+当前限制：
+
+- 只支持总控服务器的“本机”会话；网页若切换到 connector/SSH 被控端，接口会明确返回 `409`，不会误连到别的目录。
+- 同一 thread 同时只允许一个 Live Voice 连接；第二台安卓设备不会抢占已有连接。
+- Codex 的 `thread/realtime/*` 仍属于实验能力。兼容代码被隔离在 `src/live-voice/runtime.js`，以后 CLI 协议变化时只需替换这一层。
+- 当前安卓端保存一个连接目标。切换 HomeRail 与 Codex Remote 时可直接修改 App 内的服务器地址；若需要一键切换多个目标，可在安卓端后续增加配置列表，不必改动语音核心。
+
+兼容层目录按职责拆分：
+
+```text
+src/live-voice/
+├── auth.js           # Android Basic Auth 与同源检查
+├── tickets.js        # 60 秒、一次性 WebSocket 票据
+├── leases.js         # 同一 Codex thread 的单写入租约
+├── thread-adapter.js # 网页当前会话 <-> Android session 适配
+├── runtime.js        # 唯一依赖实验 thread/realtime 协议的模块
+├── gateway.js        # HTTP + WebSocket 协议网关
+└── index.js          # 组装与对外入口
+```
+
+Android 使用的兼容端点为：
+
+```text
+GET  /api/voice-agent/current-session
+POST /api/voice-agent/sessions
+GET  /api/voice-agent/sessions/:threadId
+PUT  /api/voice-agent/current-session
+POST /api/voice-agent/sessions/:threadId/live-ticket
+WS   /api/voice-agent/sessions/:threadId/live
+```
+
+部署后可在服务器运行无音频的鉴权/信令自检（不会启动或消耗一段语音会话）：
+
+```sh
+npm run verify:live-voice
+# 也可验证反向代理：
+npm run verify:live-voice -- https://你的域名/codex-remote
+```
 
 ## 自动语音朗读
 
@@ -240,6 +312,7 @@ CODEX_REMOTE_DISABLE_LOCAL=1
 │   ├── router.js      # HTTP 路由
 │   ├── runner.js      # 会话/任务/命令管理
 │   ├── codex-server.js# Codex app-server 封装（transport 抽象）
+│   ├── live-voice/    # Android Live Voice 模块化兼容层
 │   ├── transport/     # local(spawn) / remote(ws 隧道)
 │   ├── connectors.js  # 被控端设备 + WebSocket 隧道
 │   ├── store.js       # 持久化（按 connectorId 隔离）

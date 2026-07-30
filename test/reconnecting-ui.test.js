@@ -8,7 +8,10 @@ test("state refresh preserves the server reconnecting state", async () => {
     source.indexOf("function renderState(data)"),
     source.indexOf("function renderModelSettings")
   );
-  assert.match(renderState, /setRunning\([^;]+data\.runningThreads,\s*data\.reconnecting,\s*data\.externalRunning\)/);
+  assert.match(
+    renderState,
+    /setRunning\([^;]+data\.runningThreads,\s*data\.reconnecting,\s*data\.externalRunning,[\s\S]*?data\.liveVoiceRunning/
+  );
 });
 
 test("reconnecting remains a running state in the browser", async () => {

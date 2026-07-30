@@ -90,3 +90,20 @@ export const externalSessionStaleMs = Number(process.env.CODEX_EXTERNAL_SESSION_
 export const connectorPollMs = Number(process.env.CODEX_REMOTE_CONNECTOR_POLL_MS || 3000);
 export const connectorHeartbeatTimeoutMs = Number(process.env.CODEX_REMOTE_CONNECTOR_HEARTBEAT_MS || 180000);
 export const disableLocal = /^(1|true|yes|on)$/i.test(process.env.CODEX_REMOTE_DISABLE_LOCAL || "");
+
+// Android Live Voice compatibility gateway. A dedicated token is preferred,
+// while falling back to the web password keeps existing single-user installs
+// compatible with the current Android app configuration.
+export const codexLiveVoiceToken = process.env.CODEX_REMOTE_VOICE_TOKEN || remotePassword;
+export const codexLiveVoiceEnabled = Boolean(codexLiveVoiceToken)
+  && !disableLocal
+  && !/^(0|false|no|off)$/i.test(process.env.CODEX_REMOTE_LIVE_VOICE_ENABLED || "1");
+export const codexLiveVoiceVoice = process.env.CODEX_REMOTE_LIVE_VOICE_VOICE || "cove";
+export const codexLiveVoiceTicketTtlMs = Number(process.env.CODEX_REMOTE_LIVE_VOICE_TICKET_TTL_MS || 60000);
+export const codexLiveVoiceAuthTimeoutMs = Number(process.env.CODEX_REMOTE_LIVE_VOICE_AUTH_TIMEOUT_MS || 5000);
+export const codexLiveVoiceReconnectGraceMs = Number(
+  process.env.CODEX_REMOTE_LIVE_VOICE_RECONNECT_GRACE_MS || 60000
+);
+export const codexLiveVoiceTaskRetentionMs = Number(
+  process.env.CODEX_REMOTE_LIVE_VOICE_TASK_RETENTION_MS || 30 * 60 * 1000
+);
