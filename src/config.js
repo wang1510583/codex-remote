@@ -79,7 +79,8 @@ export const codexConnectWaitMs = Number(process.env.CODEX_CONNECT_WAIT_MS || 50
 export const codexConnectTimeoutMs = Number(process.env.CODEX_CONNECT_TIMEOUT_MS || 60000);
 // A turn can legitimately take a while, but it must not leave the web session
 // permanently busy when app-server fails to emit turn/completed.
-export const codexTurnTimeoutMs = Number(process.env.CODEX_TURN_TIMEOUT_MS || 20 * 60 * 1000);
+// Default 0 means no timeout limit: wait until Codex CLI completes or exits.
+export const codexTurnTimeoutMs = Number(process.env.CODEX_TURN_TIMEOUT_MS || 0);
 // Sessions started by Codex Desktop/CLI are observed through their JSONL
 // rollout files. Polling also works through the existing remote connector
 // session API, so controlled computers do not need a protocol upgrade.
