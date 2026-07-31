@@ -435,6 +435,8 @@ export function parseSessionFile(text, file = "", limit = defaultMessageLimit, o
     taskCompletedAt: ""
   };
   let ownerMetaSeen = false;
+  let parseTurnCount = 0;
+  let currentTurnId = "turn-0";
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let row;
@@ -531,12 +533,17 @@ export function parseSessionFile(text, file = "", limit = defaultMessageLimit, o
     const content = messageText(row.payload);
     if (role === "user" && isInternalMessage(content)) continue;
     if (!content) continue;
+    if (role === "user") {
+      parseTurnCount += 1;
+      currentTurnId = row.payload.internal_chat_message_metadata_passthrough?.turn_id || `turn-${parseTurnCount}`;
+    }
+    const turnId = row.payload.internal_chat_message_metadata_passthrough?.turn_id || meta.activeTurnId || currentTurnId;
     const displayContent = role === "assistant" ? assistantBubbleText(content, row.payload.phase) : content;
     messages.push({
       role,
       content: cleanText(displayContent, 20000),
       at: row.timestamp || "",
-      _turnId: row.payload.internal_chat_message_metadata_passthrough?.turn_id || meta.activeTurnId || "",
+      _turnId: turnId,
       _phase: row.payload.phase || ""
     });
     meta.updatedAt = row.timestamp || meta.updatedAt;

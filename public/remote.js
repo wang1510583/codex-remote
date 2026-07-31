@@ -1422,7 +1422,11 @@ function appendCompletionEvent(data) {
 }
 
 function renderedMessageKey(message = {}) {
-  return `${message.role || ""}\n${message.content || ""}`;
+  let content = String(message.content || "").trim();
+  if (message.role === "assistant") {
+    content = content.replace(/^[🤔✅]\s*/u, "");
+  }
+  return `${message.role || ""}\n${content}`;
 }
 
 function shouldPersistLocalAssistantBubble(final, meta = {}) {

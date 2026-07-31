@@ -71,20 +71,33 @@ function cleanConnectorIdValue(value) {
 }
 
 function messageMergeKey(message = {}) {
-  return [message.role || "", message.content || ""].join("\n");
+  let content = String(message.content || "").trim();
+  if (message.role === "assistant") {
+    content = content.replace(/^[🤔✅]\s*/u, "");
+  }
+  return [message.role || "", content].join("\n");
 }
 
 function mergeStateMessages(sessionMessages = [], stateMessages = []) {
-  const rows = [];
-  const seen = new Set();
+  const byKey = new Map();
+  const order = [];
   for (const message of [...sessionMessages, ...stateMessages]) {
     if (!message?.role || !message?.content) continue;
     if (message.role === "user" && isInternalMessage(message.content)) continue;
     const key = messageMergeKey(message);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    rows.push(message);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, message);
+      order.push(key);
+    } else {
+      if (/^✅\s/u.test(message.content) && !/^✅\s/u.test(existing.content)) {
+        byKey.set(key, message);
+      } else if (message.taskDurationMs !== undefined && existing.taskDurationMs === undefined) {
+        byKey.set(key, { ...existing, ...message });
+      }
+    }
   }
+  const rows = order.map((key) => byKey.get(key));
   rows.sort((left, right) => {
     const leftTime = left.at ? Date.parse(left.at) : 0;
     const rightTime = right.at ? Date.parse(right.at) : 0;
@@ -97,7 +110,7 @@ function mergeStateMessages(sessionMessages = [], stateMessages = []) {
 function mergeFullReplyMessages(sessionMessages = [], stateMessages = [], liveMessages = []) {
   const rows = [];
   const byMessageId = new Map();
-  const byContent = new Set();
+  const byContentKey = new Map();
   const add = (message, replaceById = false) => {
     if (!message?.role || !message?.content) return;
     if (message.role === "user" && isInternalMessage(message.content)) return;
@@ -105,15 +118,22 @@ function mergeFullReplyMessages(sessionMessages = [], stateMessages = [], liveMe
     const contentKey = messageMergeKey(message);
     if (replaceById && messageId && byMessageId.has(messageId)) {
       const index = byMessageId.get(messageId);
-      byContent.delete(messageMergeKey(rows[index]));
+      const oldKey = messageMergeKey(rows[index]);
+      byContentKey.delete(oldKey);
       rows[index] = message;
-      byContent.add(contentKey);
+      byContentKey.set(contentKey, index);
       return;
     }
-    if (byContent.has(contentKey)) return;
+    if (byContentKey.has(contentKey)) {
+      const index = byContentKey.get(contentKey);
+      if (/^✅\s/u.test(message.content) && !/^✅\s/u.test(rows[index].content)) {
+        rows[index] = message;
+      }
+      return;
+    }
     const index = rows.length;
     rows.push(message);
-    byContent.add(contentKey);
+    byContentKey.set(contentKey, index);
     if (messageId) byMessageId.set(messageId, index);
   };
   for (const message of sessionMessages) add(message);

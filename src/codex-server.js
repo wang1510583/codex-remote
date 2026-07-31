@@ -530,6 +530,8 @@ export class CodexAppServer {
                 if (turn.answerMessages && turn.answerMessages[lastIdx]) {
                   turn.answerMessages[lastIdx].content = answers[lastIdx];
                 }
+                const msgId = turn.answerMessages?.[lastIdx]?.messageId || `assistant-${Date.now()}`;
+                this.emit({ type: "message", role: "assistant", content: answers[lastIdx], messageId: msgId, final: true });
               }
             }
             turn.resolve(answers.map((answer) => answer.trim()).filter(Boolean));
