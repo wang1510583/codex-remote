@@ -512,7 +512,9 @@ export class CodexAppServer {
       if (status === "inProgress") return;
       Promise.allSettled(turn.pendingImages)
         .then(() => {
-          const answers = turn.answers.length ? turn.answers : [turn.currentMessage?.text || ""].filter(Boolean);
+          const answers = turn.answers.length
+            ? turn.answers
+            : (turn.currentMessage?.text ? [assistantBubbleText(turn.currentMessage.text, turn.currentMessage.phase)] : []);
           if (this.turn === turn) this.turn = null;
           this.setTurnReconnecting(turn, false);
           if (status === "completed") {

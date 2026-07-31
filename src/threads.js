@@ -33,7 +33,7 @@ export function messageText(payload = {}) {
 
 export function assistantBubbleText(text, phase) {
   if (/^[✅🤔]\s/.test(text)) return text;
-  const icon = phase === "final_answer" ? "✅" : "🤔";
+  const icon = phase === "commentary" ? "🤔" : "✅";
   return `${icon} ${text}`;
 }
 
@@ -542,11 +542,11 @@ export function parseSessionFile(text, file = "", limit = defaultMessageLimit, o
     meta.updatedAt = row.timestamp || meta.updatedAt;
   }
   const publicMessages = messages.map(({ _turnId, _phase, ...message }) => {
-    const taskDurationMs = _phase === "final_answer" ? taskDurations.get(_turnId) : null;
+    const taskDurationMs = _phase !== "commentary" ? taskDurations.get(_turnId) : null;
     return taskDurationMs === undefined || taskDurationMs === null ? message : { ...message, taskDurationMs };
   });
   const publicFullMessages = fullMessages.map(({ _turnId, _phase, ...message }) => {
-    const taskDurationMs = _phase === "final_answer" ? taskDurations.get(_turnId) : null;
+    const taskDurationMs = _phase !== "commentary" ? taskDurations.get(_turnId) : null;
     return taskDurationMs === undefined || taskDurationMs === null ? message : { ...message, taskDurationMs };
   });
   return {

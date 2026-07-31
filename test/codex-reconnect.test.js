@@ -120,7 +120,7 @@ test("activity after reconnect clears the reconnecting indicator without complet
   assert.equal(runner.reconnecting, false);
   assert.equal(server.turn, turn);
   server.onNotification(completedNotification("completed"));
-  assert.deepEqual(await promise, ["继续执行"]);
+  assert.deepEqual(await promise, ["✅ 继续执行"]);
 });
 
 test("context usage emits only the runner's complete status payload", () => {
