@@ -18,6 +18,15 @@ export const supplementalModelOptions = Object.freeze([
     supportedReasoningEfforts: Object.freeze([
       Object.freeze({ reasoningEffort: "high" })
     ])
+  }),
+  Object.freeze({
+    id: "mimo-v2.5-pro",
+    model: "mimo-v2.5-pro",
+    displayName: "mimo-v2.5-pro",
+    defaultReasoningEffort: "high",
+    supportedReasoningEfforts: Object.freeze([
+      Object.freeze({ reasoningEffort: "high" })
+    ])
   })
 ]);
 

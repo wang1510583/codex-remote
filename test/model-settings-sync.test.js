@@ -11,7 +11,7 @@ function jsonl(rows) {
   return rows.map((row) => JSON.stringify(row)).join("\n");
 }
 
-test("Gemini 3.6 Flash High is added to the selectable model list", () => {
+test("Gemini 3.6 Flash High and mimo-v2.5-pro are added to the selectable model list", () => {
   const options = withSupplementalModelOptions([{
     id: "gpt-5.6-sol",
     model: "gpt-5.6-sol",
@@ -24,18 +24,31 @@ test("Gemini 3.6 Flash High is added to the selectable model list", () => {
   assert.equal(gemini.displayName, "Gemini 3.6 Flash High");
   assert.equal(gemini.defaultReasoningEffort, "high");
   assert.deepEqual(gemini.supportedReasoningEfforts, [{ reasoningEffort: "high" }]);
+
+  const mimo = options.find((item) => item.model === "mimo-v2.5-pro");
+  assert.ok(mimo);
+  assert.equal(mimo.id, "mimo-v2.5-pro");
+  assert.equal(mimo.displayName, "mimo-v2.5-pro");
+  assert.equal(mimo.defaultReasoningEffort, "high");
+  assert.deepEqual(mimo.supportedReasoningEfforts, [{ reasoningEffort: "high" }]);
 });
 
 test("a model already reported by Codex is not duplicated by the supplemental list", () => {
-  const reported = {
+  const reportedGemini = {
     id: "gemini-3.6-flash-high",
     model: "gemini-3.6-flash-high",
     displayName: "Provider Gemini"
   };
-  const options = withSupplementalModelOptions([reported]);
+  const reportedMimo = {
+    id: "mimo-v2.5-pro",
+    model: "mimo-v2.5-pro",
+    displayName: "Provider Mimo"
+  };
+  const options = withSupplementalModelOptions([reportedGemini, reportedMimo]);
 
-  assert.equal(options.length, 1);
-  assert.equal(options[0], reported);
+  assert.equal(options.length, 2);
+  assert.equal(options[0], reportedGemini);
+  assert.equal(options[1], reportedMimo);
 });
 
 test("Gemini 3.6 Flash High can be selected and applies High effort", async () => {

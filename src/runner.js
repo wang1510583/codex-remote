@@ -87,6 +87,7 @@ function fastModeStatusMessage(status = {}) {
 
 const modelDescriptionsZh = {
   "gemini-3.6-flash-high": "Gemini 3.6 Flash 高强度快速模型，适合需要快速响应的任务。",
+  "mimo-v2.5-pro": "mimo-v2.5-pro 自定义模型，适合需要深度推理与开发的任务。",
   "gpt-5.6-sol": "最新的前沿智能体编程模型，适合复杂任务。",
   "gpt-5.6-terra": "能力与速度均衡，适合日常开发工作。",
   "gpt-5.6-luna": "快速且经济，适合较轻量的编程任务。",
