@@ -1258,7 +1258,12 @@ function renderMarkdown(text) {
             : (icon.startsWith("🤔") || icon.startsWith("⏳")
               ? "thinking"
               : (icon.startsWith("❌") || icon.startsWith("⚠") ? "warning" : "info"));
-          html.push(`<div class="messageLead messageLead-${kind}"><span class="messageLeadIcon" aria-hidden="true">${icon}</span><span class="messageLeadText">${renderInlineMarkdown(status[2])}</span></div>`);
+          let leadContent = String(status[2] || "").trim();
+          const leadHeading = leadContent.match(/^(#{1,6})[ 	]+(.+?)[ 	]*$/);
+          if (leadHeading) {
+            leadContent = leadHeading[2].replace(/[ 	]+#+[ 	]*$/, "");
+          }
+          html.push(`<div class="messageLead messageLead-${kind}"><span class="messageLeadIcon" aria-hidden="true">${icon}</span><span class="messageLeadText">${renderInlineMarkdown(leadContent)}</span></div>`);
         } else if (/^[^：:\n]{1,32}[：:]$/u.test(trimmed)) {
           flushParagraph();
           html.push(`<h4 class="messageSectionTitle">${renderInlineMarkdown(trimmed)}</h4>`);
