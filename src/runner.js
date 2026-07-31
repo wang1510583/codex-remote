@@ -1034,6 +1034,7 @@ export async function runRemoteTask(message, runner) {
   let rejectTurnTimeout = null;
   const armTurnTimeout = () => {
     clearTurnTimeout();
+    if (!codexTurnTimeoutMs || codexTurnTimeoutMs <= 0) return;
     turnTimeoutTimer = setTimeout(() => {
       const error = new Error(`Codex 连续 ${Math.round(codexTurnTimeoutMs / 60000)} 分钟没有活动，已自动中断。`);
       error.turnTimeout = true;
