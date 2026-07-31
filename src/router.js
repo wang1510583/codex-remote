@@ -81,7 +81,17 @@ function messageMergeKey(message = {}) {
 function mergeStateMessages(sessionMessages = [], stateMessages = []) {
   const byKey = new Map();
   const order = [];
-  for (const message of [...sessionMessages, ...stateMessages]) {
+  const hasSession = Array.isArray(sessionMessages) && sessionMessages.length > 0;
+  for (const message of sessionMessages) {
+    if (!message?.role || !message?.content) continue;
+    if (message.role === "user" && isInternalMessage(message.content)) continue;
+    const key = messageMergeKey(message);
+    if (!byKey.has(key)) {
+      byKey.set(key, message);
+      order.push(key);
+    }
+  }
+  for (const message of stateMessages) {
     if (!message?.role || !message?.content) continue;
     if (message.role === "user" && isInternalMessage(message.content)) continue;
     const key = messageMergeKey(message);
@@ -89,11 +99,15 @@ function mergeStateMessages(sessionMessages = [], stateMessages = []) {
     if (!existing) {
       byKey.set(key, message);
       order.push(key);
-    } else {
+    } else if (!hasSession) {
       if (/^✅\s/u.test(message.content) && !/^✅\s/u.test(existing.content)) {
         byKey.set(key, message);
       } else if (message.taskDurationMs !== undefined && existing.taskDurationMs === undefined) {
         byKey.set(key, { ...existing, ...message });
+      }
+    } else {
+      if (message.taskDurationMs !== undefined && existing.taskDurationMs === undefined) {
+        byKey.set(key, { ...existing, taskDurationMs: message.taskDurationMs });
       }
     }
   }

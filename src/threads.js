@@ -548,35 +548,61 @@ export function parseSessionFile(text, file = "", limit = defaultMessageLimit, o
     });
     meta.updatedAt = row.timestamp || meta.updatedAt;
   }
-  const turnLastAssistant = new Map();
+  const turnAssistantIndices = new Map();
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (msg.role === "assistant" && msg.content) {
-      turnLastAssistant.set(msg._turnId || "", i);
+      const turnKey = msg._turnId || "";
+      const list = turnAssistantIndices.get(turnKey) || [];
+      list.push(i);
+      turnAssistantIndices.set(turnKey, list);
     }
   }
-  for (const [turnId, lastIdx] of turnLastAssistant.entries()) {
-    const msg = messages[lastIdx];
-    if (msg && !/^✅\s/u.test(msg.content) && msg._phase !== "commentary") {
-      msg.content = msg.content.replace(/^🤔\s*/u, "✅ ");
-      if (!/^✅\s/u.test(msg.content)) {
-        msg.content = `✅ ${msg.content}`;
+  for (const [turnId, indices] of turnAssistantIndices.entries()) {
+    const isTurnComplete = !meta.taskRunning || (meta.activeTurnId && turnId !== meta.activeTurnId) || Boolean(meta.taskCompletedAt);
+    const lastIndex = indices[indices.length - 1];
+    for (const idx of indices) {
+      const msg = messages[idx];
+      if (!msg) continue;
+      if (idx === lastIndex && isTurnComplete && msg._phase !== "commentary") {
+        msg.content = msg.content.replace(/^[🤔]\s*/u, "✅ ");
+        if (!/^✅\s/u.test(msg.content)) {
+          msg.content = `✅ ${msg.content}`;
+        }
+      } else {
+        msg.content = msg.content.replace(/^[✅]\s*/u, "🤔 ");
+        if (!/^🤔\s/u.test(msg.content)) {
+          msg.content = `🤔 ${msg.content}`;
+        }
       }
     }
   }
-  const fullTurnLastAssistant = new Map();
+  const fullTurnAssistantIndices = new Map();
   for (let i = 0; i < fullMessages.length; i++) {
     const msg = fullMessages[i];
     if (msg.role === "assistant" && msg.fullKind === "assistant" && msg.content) {
-      fullTurnLastAssistant.set(msg._turnId || "", i);
+      const turnKey = msg._turnId || "";
+      const list = fullTurnAssistantIndices.get(turnKey) || [];
+      list.push(i);
+      fullTurnAssistantIndices.set(turnKey, list);
     }
   }
-  for (const [turnId, lastIdx] of fullTurnLastAssistant.entries()) {
-    const msg = fullMessages[lastIdx];
-    if (msg && !/^✅\s/u.test(msg.content) && msg._phase !== "commentary") {
-      msg.content = msg.content.replace(/^🤔\s*/u, "✅ ");
-      if (!/^✅\s/u.test(msg.content)) {
-        msg.content = `✅ ${msg.content}`;
+  for (const [turnId, indices] of fullTurnAssistantIndices.entries()) {
+    const isTurnComplete = !meta.taskRunning || (meta.activeTurnId && turnId !== meta.activeTurnId) || Boolean(meta.taskCompletedAt);
+    const lastIndex = indices[indices.length - 1];
+    for (const idx of indices) {
+      const msg = fullMessages[idx];
+      if (!msg) continue;
+      if (idx === lastIndex && isTurnComplete && msg._phase !== "commentary") {
+        msg.content = msg.content.replace(/^[🤔]\s*/u, "✅ ");
+        if (!/^✅\s/u.test(msg.content)) {
+          msg.content = `✅ ${msg.content}`;
+        }
+      } else {
+        msg.content = msg.content.replace(/^[✅]\s*/u, "🤔 ");
+        if (!/^🤔\s/u.test(msg.content)) {
+          msg.content = `🤔 ${msg.content}`;
+        }
       }
     }
   }
