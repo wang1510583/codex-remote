@@ -33,7 +33,7 @@ export function messageText(payload = {}) {
 
 export function assistantBubbleText(text, phase) {
   if (/^[✅🤔]\s/.test(text)) return text;
-  const icon = phase === "commentary" ? "🤔" : "✅";
+  const icon = phase === "final_answer" ? "✅" : "🤔";
   return `${icon} ${text}`;
 }
 
@@ -540,6 +540,38 @@ export function parseSessionFile(text, file = "", limit = defaultMessageLimit, o
       _phase: row.payload.phase || ""
     });
     meta.updatedAt = row.timestamp || meta.updatedAt;
+  }
+  const turnLastAssistant = new Map();
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.role === "assistant" && msg.content) {
+      turnLastAssistant.set(msg._turnId || "", i);
+    }
+  }
+  for (const [turnId, lastIdx] of turnLastAssistant.entries()) {
+    const msg = messages[lastIdx];
+    if (msg && !/^✅\s/u.test(msg.content) && msg._phase !== "commentary") {
+      msg.content = msg.content.replace(/^🤔\s*/u, "✅ ");
+      if (!/^✅\s/u.test(msg.content)) {
+        msg.content = `✅ ${msg.content}`;
+      }
+    }
+  }
+  const fullTurnLastAssistant = new Map();
+  for (let i = 0; i < fullMessages.length; i++) {
+    const msg = fullMessages[i];
+    if (msg.role === "assistant" && msg.fullKind === "assistant" && msg.content) {
+      fullTurnLastAssistant.set(msg._turnId || "", i);
+    }
+  }
+  for (const [turnId, lastIdx] of fullTurnLastAssistant.entries()) {
+    const msg = fullMessages[lastIdx];
+    if (msg && !/^✅\s/u.test(msg.content) && msg._phase !== "commentary") {
+      msg.content = msg.content.replace(/^🤔\s*/u, "✅ ");
+      if (!/^✅\s/u.test(msg.content)) {
+        msg.content = `✅ ${msg.content}`;
+      }
+    }
   }
   const publicMessages = messages.map(({ _turnId, _phase, ...message }) => {
     const taskDurationMs = _phase !== "commentary" ? taskDurations.get(_turnId) : null;

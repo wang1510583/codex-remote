@@ -471,6 +471,7 @@ export class CodexAppServer {
         const content = assistantBubbleText(text, phase);
         const taskDurationMs = /^✅\s/.test(content) ? Math.max(0, Date.now() - this.turn.startedAtMs) : null;
         this.turn.answers.push(content);
+        (this.turn.answerPhases || (this.turn.answerPhases = [])).push(phase);
         const answerMessages = this.turn.answerMessages || (this.turn.answerMessages = []);
         answerMessages.push({ content, messageId, final: true, taskDurationMs });
         this.emit({ type: "message", role: "assistant", content, messageId, final: true, taskDurationMs });
@@ -518,6 +519,19 @@ export class CodexAppServer {
           if (this.turn === turn) this.turn = null;
           this.setTurnReconnecting(turn, false);
           if (status === "completed") {
+            if (answers.length) {
+              const lastIdx = answers.length - 1;
+              const lastPhase = turn.answerPhases?.[lastIdx] || turn.currentMessage?.phase || null;
+              if (lastPhase !== "commentary" && !/^✅\s/u.test(answers[lastIdx])) {
+                answers[lastIdx] = answers[lastIdx].replace(/^[🤔]\s*/u, "✅ ");
+                if (!/^✅\s/u.test(answers[lastIdx])) {
+                  answers[lastIdx] = `✅ ${answers[lastIdx]}`;
+                }
+                if (turn.answerMessages && turn.answerMessages[lastIdx]) {
+                  turn.answerMessages[lastIdx].content = answers[lastIdx];
+                }
+              }
+            }
             turn.resolve(answers.map((answer) => answer.trim()).filter(Boolean));
             return;
           }
