@@ -21,6 +21,7 @@ export function isInternalMessage(text = "") {
     "<skills_instructions>",
     "<apps_instructions>",
     "<plugins_instructions>",
+    "<realtime_delegation>",
     "# AGENTS.md instructions"
   ];
   return !trimmed || internalPrefixes.some((prefix) => trimmed.startsWith(prefix));

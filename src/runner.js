@@ -11,7 +11,9 @@ import {
   readThreadNames, threadName,
   readThreadCompletions, setThreadCompletion, syncLoadedCounts,
   modelSettingsForThread, saveThreadModelSettings, deleteThreadModelSettings,
-  updateStateModelSettings, deleteLiveVoiceTranscripts
+  updateStateModelSettings, deleteLiveVoiceTranscripts,
+  labelLiveVoiceTranscript, readLiveVoiceTranscripts,
+  appendThreadNotice, readThreadNotices, deleteThreadNotices
 } from "./store.js";
 import { stateAbsoluteCwd, safeStateCwdValue, stateCwdValue, assertProjectDirectory } from "./paths.js";
 import {
@@ -46,6 +48,58 @@ const runnerCreations = new Map();
 export let selectedRunnerKey = "";
 export let followMode = "queue";
 export let contextUsage = null;
+
+export function mergePersistentLiveVoiceMessages(messages = [], voiceMessages = []) {
+  const rows = [];
+  const keys = new Set();
+  for (const rawMessage of [...messages, ...voiceMessages]) {
+    if (!rawMessage?.role || !rawMessage?.content) continue;
+    const message = rawMessage.liveVoiceTranscript
+      ? { ...rawMessage, content: labelLiveVoiceTranscript(rawMessage.content) }
+      : rawMessage;
+    const key = [message.role, message.content, message.at || ""].join("\n");
+    if (keys.has(key)) continue;
+    keys.add(key);
+    rows.push(message);
+  }
+  rows.sort((left, right) => {
+    const leftAt = Date.parse(left.at || "");
+    const rightAt = Date.parse(right.at || "");
+    if (Number.isFinite(leftAt) && Number.isFinite(rightAt) && leftAt !== rightAt) {
+      return leftAt - rightAt;
+    }
+    return 0;
+  });
+  return rows.slice(-80);
+}
+
+async function restorePersistentLiveVoiceMessages(payload = {}, connectorId = "") {
+  if (!payload.threadId) return payload;
+  const [voiceMessages, notices] = await Promise.all([
+    connectorId ? [] : readLiveVoiceTranscripts(payload.threadId).catch(() => []),
+    readThreadNotices(payload.threadId, connectorId).catch(() => [])
+  ]);
+  if (!voiceMessages.length && !notices.length) return payload;
+  payload.messages = mergePersistentLiveVoiceMessages(
+    payload.messages || [],
+    [...voiceMessages, ...notices]
+  );
+  payload.loadedCount = payload.messages.length;
+  payload.messageCount = Math.max(Number(payload.messageCount) || 0, payload.messages.length);
+  return payload;
+}
+
+async function persistExistingFailureNotices(state = {}, connectorId = "") {
+  if (!state.threadId) return;
+  const failures = (state.messages || []).filter((message) => (
+    message?.role === "assistant"
+    && (message.taskFailed || /^(?:❌|错误：)/u.test(String(message.content || "").trim()))
+  ));
+  for (const message of failures) {
+    await appendThreadNotice(state.threadId, { ...message, taskFailed: true }, connectorId)
+      .catch((error) => console.error("failed to migrate existing task failure bubble", error));
+  }
+}
 
 const reasoningEffortLabels = {
   low: "Low",
@@ -1254,6 +1308,12 @@ export async function runRemoteTask(message, runner) {
     state.inflight = null;
     runner.state = syncLoadedCounts(state);
     await rememberMessageMeta(runner.state.threadId, savedMessages);
+    if (!ok) {
+      for (const message of savedMessages) {
+        await appendThreadNotice(runner.state.threadId, { ...message, taskFailed: true }, runner.connectorId || "")
+          .catch((noticeError) => console.error("failed to persist task failure bubble", noticeError));
+      }
+    }
     await writeRunnerStateIfSelected(runner);
     broadcastRunner(runner, { type: "state_saved", threadId: runner.state.threadId });
     if (!ok) {
@@ -1279,11 +1339,14 @@ export async function runRemoteTask(message, runner) {
     const notificationText = failureNotificationMessage([failureMessage]);
     notifyTaskTerminalOnce(notificationText);
     state.inflight = null;
-    state.messages.push({ role: "assistant", content: failureMessage, at: new Date().toISOString(), taskDurationMs: Number.isFinite(runnerStartedAtMs) ? Math.max(0, Date.now() - runnerStartedAtMs) : undefined });
+    const savedFailure = { role: "assistant", content: failureMessage, at: new Date().toISOString(), taskFailed: true, taskDurationMs: Number.isFinite(runnerStartedAtMs) ? Math.max(0, Date.now() - runnerStartedAtMs) : undefined };
+    state.messages.push(savedFailure);
     state.messages = state.messages.slice(-80);
     runner.state = syncLoadedCounts(state);
     await rememberMessageMeta(runner.state.threadId, runner.state.messages)
       .catch((metaError) => console.error("failed to save task failure metadata", metaError));
+    await appendThreadNotice(runner.state.threadId, savedFailure, runner.connectorId || "")
+      .catch((noticeError) => console.error("failed to persist task failure bubble", noticeError));
     await writeRunnerStateIfSelected(runner).catch((writeError) => console.error("failed to save task failure", writeError));
     const failurePayload = {
       type: "message",
@@ -1349,10 +1412,21 @@ function processNextQueuedMessage(runner) {
     return;
   }
   startRemoteTask(next.message, runner.state, runner, { skipUserMessage: Boolean(next.displayed) })
-    .catch((error) => {
+    .catch(async (error) => {
       console.error("failed to start queued task", error);
       runner.running = false;
       const failureMessage = `❌ 队列任务启动失败：${error.message || "未知错误"}`;
+      const savedFailure = {
+        role: "assistant",
+        content: `错误：${failureMessage}`,
+        at: new Date().toISOString(),
+        taskFailed: true
+      };
+      runner.state.messages = [...(runner.state.messages || []), savedFailure].slice(-80);
+      await appendThreadNotice(runner.state.threadId, savedFailure, runner.connectorId || "")
+        .catch((noticeError) => console.error("failed to persist queued task failure bubble", noticeError));
+      await writeRunnerStateIfSelected(runner)
+        .catch((writeError) => console.error("failed to save queued task failure", writeError));
       broadcastRunner(runner, {
         type: "error",
         text: failureMessage,
@@ -1714,6 +1788,7 @@ export async function listThreads(connectorId = "") {
 
 export async function selectRemoteThread(rawThreadId, connectorId = "") {
   const threadId = cleanText(rawThreadId, 120).trim();
+  await persistExistingFailureNotices(await readState(connectorId), connectorId);
   const provider = connectorId ? remoteSessionProvider(connectorId) : localSessionProvider;
   if (threadId.startsWith("runtime:")) {
     const runner = runners.get(threadId.slice("runtime:".length));
@@ -1722,6 +1797,7 @@ export async function selectRemoteThread(rawThreadId, connectorId = "") {
     selectedRunnerKey = runner.key;
     await writeState(runner.state, runner.connectorId || "");
     const payload = runnerStatePayload(runner, { threadName: "" });
+    await restorePersistentLiveVoiceMessages(payload, runner.connectorId || "");
     payload.draft = await draftForState(runner.state, runner.connectorId || "");
     broadcast({ type: "state", connectorId, ...payload });
     return payload;
@@ -1734,6 +1810,7 @@ export async function selectRemoteThread(rawThreadId, connectorId = "") {
     await writeState(existingRunner.state, existingRunner.connectorId || "");
     const name = existingRunner.state.threadId ? await threadName(existingRunner.state.threadId) : "";
     const payload = runnerStatePayload(existingRunner, { threadName: name });
+    await restorePersistentLiveVoiceMessages(payload, existingRunner.connectorId || "");
     payload.draft = await draftForState(existingRunner.state, existingRunner.connectorId || "");
     broadcast({ type: "state", connectorId, ...payload });
     return payload;
@@ -1744,8 +1821,13 @@ export async function selectRemoteThread(rawThreadId, connectorId = "") {
   if (liveVoice) stopExternalSessionMonitor(connectorId);
   else monitorExternalSession(threadId, connectorId, external);
   await clearThreadCompletedUnread(threadId);
-  const messages = await mergeLocalMessageMeta(thread.threadId, thread.messages, []);
-  const state = { threadId: thread.threadId, connectorId, cwd: thread.cwd || "", model: thread.model || "", reasoningEffort: thread.reasoningEffort || "", messages, loadedCount: messages.length, messageCount: thread.messageCount, inflight: null };
+  const sessionMessages = await mergeLocalMessageMeta(thread.threadId, thread.messages, []);
+  const voiceMessages = !connectorId
+    ? await readLiveVoiceTranscripts(thread.threadId).catch(() => [])
+    : [];
+  const notices = await readThreadNotices(thread.threadId, connectorId).catch(() => []);
+  const messages = mergePersistentLiveVoiceMessages(sessionMessages, [...voiceMessages, ...notices]);
+  const state = { threadId: thread.threadId, connectorId, cwd: thread.cwd || "", model: thread.model || "", reasoningEffort: thread.reasoningEffort || "", messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length), inflight: null };
   await ensureStateModelSettings(state, thread);
   selectedRunnerKey = runnerKeyForState(state);
   contextUsage = thread.contextUsage || null;
@@ -1790,9 +1872,11 @@ export async function deleteThread(threadId, connectorId = "") {
   await deleteThreadFromProvider(threadId, provider);
   await deleteThreadModelSettings(threadId, connectorId);
   if (!connectorId) await deleteLiveVoiceTranscripts(threadId);
+  await deleteThreadNotices(threadId, connectorId);
 }
 
 export async function createRemoteSession(rawCwd = "", connectorId = "") {
+  await persistExistingFailureNotices(await readState(connectorId), connectorId);
   const cwd = connectorId ? String(rawCwd || "") : stateCwdValue(rawCwd || "");
   if (!connectorId) await assertProjectDirectory(cwd);
   const busy = executionConflictForState({ cwd, connectorId });
@@ -1844,6 +1928,7 @@ export async function markInterruptedInflight(connectorId = "") {
     content: failureMessage,
     at: new Date().toISOString()
   });
+  await appendThreadNotice(state.threadId, state.messages.at(-1), connectorId);
   state.messages = state.messages.slice(-80);
   state.inflight = null;
   await writeState(syncLoadedCounts(state), connectorId);

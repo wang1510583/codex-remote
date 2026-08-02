@@ -10,7 +10,8 @@ import { clients, broadcast, sendSnapshot, changesSince, currentEventSeq } from 
 import {
   readState, writeState, saveDraftForState, draftForState, syncLoadedCounts,
   readConnectorViewState, writeConnectorViewState, setThreadName, writeStateIfIdle,
-  labelLiveVoiceTranscript, readLiveVoiceTranscripts
+  labelLiveVoiceTranscript, readLiveVoiceTranscripts,
+  appendThreadNotice, readThreadNotices
 } from "./store.js";
 import {
   submitRemoteMessage, selectRemoteThread, createRemoteSession, loadThreadPage,
@@ -288,6 +289,9 @@ export async function handle(req, res) {
       const persistentVoiceMessages = !connectorId && state.threadId
         ? await readLiveVoiceTranscripts(state.threadId).catch(() => [])
         : [];
+      const persistentNotices = state.threadId
+        ? await readThreadNotices(state.threadId, connectorId).catch(() => [])
+        : [];
       let loadedThread = null;
       let external = null;
       let runner = await runnerForIncomingState(state);
@@ -300,12 +304,13 @@ export async function handle(req, res) {
         if (wantsFullReplies && state.threadId) {
           loadedThread = await loadThreadPage(state.threadId, connectorId).catch(() => null);
         }
-        if (persistentVoiceMessages.length) {
+        if (persistentVoiceMessages.length || persistentNotices.length) {
           state = {
             ...state,
             messages: mergeStateMessages([], [
               ...(state.messages || []),
-              ...persistentVoiceMessages
+              ...persistentVoiceMessages,
+              ...persistentNotices
             ])
           };
         }
@@ -323,13 +328,15 @@ export async function handle(req, res) {
           const sessionMessages = await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages);
           const messages = mergeStateMessages(sessionMessages, [
             ...(state.messages || []),
-            ...persistentVoiceMessages
+            ...persistentVoiceMessages,
+            ...persistentNotices
           ]);
           state = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length), inflight: null };
-        } else if (persistentVoiceMessages.length) {
+        } else if (persistentVoiceMessages.length || persistentNotices.length) {
           const messages = mergeStateMessages([], [
             ...(state.messages || []),
-            ...persistentVoiceMessages
+            ...persistentVoiceMessages,
+            ...persistentNotices
           ]);
           state = { ...state, messages, loadedCount: messages.length, messageCount: Math.max(Number(state.messageCount) || 0, messages.length) };
         }
@@ -723,6 +730,7 @@ export async function handle(req, res) {
       const message = { role: "assistant", content, at: new Date().toISOString() };
       state.messages.push(message);
       state.messages = state.messages.slice(-80);
+      await appendThreadNotice(state.threadId, message, connectorId);
       await writeState(syncLoadedCounts(state), connectorId);
       broadcast({ type: "message", connectorId, ...message, messageId: cleanText(body.messageId || "", 120).trim() || `notice-${Date.now()}`, final: true });
       return json(res, 200, { ok: true, message });
@@ -745,9 +753,11 @@ export async function handle(req, res) {
       const persistentVoiceMessages = !connectorId
         ? await readLiveVoiceTranscripts(state.threadId).catch(() => [])
         : [];
+      const persistentNotices = await readThreadNotices(state.threadId, connectorId).catch(() => []);
       const messages = mergeStateMessages(sessionMessages, [
         ...(state.messages || []),
-        ...persistentVoiceMessages
+        ...persistentVoiceMessages,
+        ...persistentNotices
       ]);
       const nextState = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length) };
       await writeState(nextState, connectorId);

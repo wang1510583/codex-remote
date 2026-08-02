@@ -45,6 +45,7 @@ export const generatedImageDir = path.join(dataDir, "generated-images");
 export const restartScript = path.join(rootDir, "restart-codex-remote.cmd");
 export const statePath = path.join(dataDir, "remote-state.json");
 export const liveVoiceTranscriptsPath = path.join(dataDir, "live-voice-transcripts.json");
+export const threadNoticesPath = path.join(dataDir, "thread-notices.json");
 export const threadNamesPath = path.join(dataDir, "thread-names.json");
 export const draftsPath = path.join(dataDir, "drafts.json");
 export const followModesPath = path.join(dataDir, "follow-modes.json");

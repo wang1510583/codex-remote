@@ -30,6 +30,24 @@ test("session JSONL exposes external task lifecycle and final duration", () => {
   assert.equal(parsed.messages[1].taskDurationMs, 4000);
 });
 
+test("Live Voice realtime delegation envelopes stay hidden from thread history", () => {
+  const threadId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const delegated = [
+    "<realtime_delegation>",
+    "  <input>帮我执行任务，我先挂断。</input>",
+    "  <transcript_delta>user: 帮我执行任务</transcript_delta>",
+    "</realtime_delegation>"
+  ].join("\n");
+  const parsed = parseSessionFile(jsonl([
+    { timestamp: "2026-08-02T12:00:00.000Z", type: "session_meta", payload: { id: threadId, cwd: "/workspace" } },
+    { timestamp: "2026-08-02T12:00:01.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: delegated }] } },
+    { timestamp: "2026-08-02T12:00:02.000Z", type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "任务完成" }] } }
+  ]), `/tmp/rollout-test-${threadId}.jsonl`);
+
+  assert.deepEqual(parsed.messages.map((message) => message.content), ["✅ 任务完成"]);
+  assert.equal(parsed.fullMessages.some((message) => message.content?.includes("realtime_delegation")), false);
+});
+
 test("an unmatched recent task_started is externally running", () => {
   const threadId = "33333333-3333-4333-8333-333333333333";
   const turnId = "44444444-4444-4444-8444-444444444444";

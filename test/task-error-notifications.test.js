@@ -127,8 +127,12 @@ test("runner and browser mark only terminal failures, while retryable errors sti
   assert.match(runTask, /if \(ok && !completionMessage\(answers\)\)/);
   assert.match(runTask, /payload\.taskFailed = true/);
   assert.match(runTask, /payload\.notificationText = notificationText/);
+  assert.match(runTask, /appendThreadNotice\(runner\.state\.threadId,[\s\S]*?taskFailed: true/);
   assert.match(runTask, /taskOk = false;[\s\S]*?notifyTaskTerminalOnce\(notificationText\)/);
   assert.match(runnerSource, /队列任务启动失败[\s\S]*?dispatchTaskTerminalNotification\(failureMessage/);
+  assert.match(runnerSource, /队列任务启动失败[\s\S]*?appendThreadNotice\(runner\.state\.threadId, savedFailure/);
+  assert.match(runnerSource, /markInterruptedInflight[\s\S]*?appendThreadNotice\(state\.threadId/);
+  assert.match(runnerSource, /selectRemoteThread[\s\S]*?persistExistingFailureNotices\(await readState\(connectorId\)/);
   assert.match(runnerSource, /type: "error",[\s\S]*?taskFailed: true/);
   assert.match(runnerSource, /markInterruptedInflight[\s\S]*?dispatchTaskTerminalNotification\(failureMessage\)/);
   assert.match(browserSource, /data\.final && \(\/\^✅\\s\/\.test\(data\.content \|\| ""\) \|\| data\.taskFailed\)/);

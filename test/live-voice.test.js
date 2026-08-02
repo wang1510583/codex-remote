@@ -18,6 +18,7 @@ import {
 } from "../src/live-voice/leases.js";
 import { CodexLiveVoiceRuntime } from "../src/live-voice/runtime.js";
 import { CodexRemoteThreadAdapter } from "../src/live-voice/thread-adapter.js";
+import { mergePersistentLiveVoiceMessages } from "../src/runner.js";
 import { LiveVoiceTicketStore } from "../src/live-voice/tickets.js";
 import {
   codexLiveVoiceOrDefault,
@@ -210,6 +211,33 @@ test("thread adapter restores completed bubbles from the web-selected Codex thre
     { role: "user", text: "请修改安卓软件", channel: "final" },
     { role: "assistant", text: "✅ 新的 APK 已生成。", channel: "final" },
     { role: "assistant", text: "✅ 已推送到主分支。", channel: "final" }
+  ]);
+});
+
+test("thread selection restores persistent Live Voice bubbles without duplicates", () => {
+  const voiceMessage = {
+    role: "assistant",
+    content: "语音对话：已经完成。",
+    at: "2026-08-02T11:00:02.000Z",
+    liveVoiceTranscript: true
+  };
+  const messages = mergePersistentLiveVoiceMessages([
+    { role: "user", content: "普通消息", at: "2026-08-02T11:00:01.000Z" },
+    voiceMessage
+  ], [
+    voiceMessage,
+    {
+      role: "user",
+      content: "切回来还能看到吗",
+      at: "2026-08-02T11:00:03.000Z",
+      liveVoiceTranscript: true
+    }
+  ]);
+
+  assert.deepEqual(messages.map((message) => message.content), [
+    "普通消息",
+    "语音对话：已经完成。",
+    "语音对话：切回来还能看到吗"
   ]);
 });
 

@@ -3,7 +3,7 @@ import path from "node:path";
 import {
   dataDir, statePath, draftsPath, followModesPath, messageMetaPath,
   threadNamesPath, threadCompletionsPath, connectorsViewStatePath, threadModelSettingsPath,
-  liveVoiceTranscriptsPath
+  liveVoiceTranscriptsPath, threadNoticesPath
 } from "./config.js";
 import { cleanText } from "./utils.js";
 import { readJsonFile, updateJsonFile, writeJsonFile } from "./json-file.js";
@@ -88,6 +88,66 @@ export async function deleteLiveVoiceTranscripts(threadId = "") {
   if (!id) return;
   await updateJson(liveVoiceTranscriptsPath, {}, (all) => {
     delete all[id];
+    return all;
+  });
+}
+
+const threadNoticeLimit = 200;
+
+function threadNoticeKey(threadId = "", connectorId = "") {
+  const id = String(threadId || "").trim();
+  return id ? `${connectorPrefix(connectorId)}${id}` : "";
+}
+
+function storedThreadNotice(message = {}) {
+  const role = String(message.role || "assistant").toLowerCase();
+  const content = cleanText(message.content || "", 20000).trim();
+  if ((role !== "user" && role !== "assistant") || !content) return null;
+  return {
+    role,
+    content,
+    at: String(message.at || new Date().toISOString()),
+    threadNotice: true,
+    ...(message.taskFailed ? { taskFailed: true } : {}),
+    ...(Number.isFinite(message.taskDurationMs) ? { taskDurationMs: message.taskDurationMs } : {})
+  };
+}
+
+export async function appendThreadNotice(threadId = "", message = {}, connectorId = "") {
+  const key = threadNoticeKey(threadId, connectorId);
+  const next = storedThreadNotice(message);
+  if (!key || !next) return { added: false, message: null };
+  let result = { added: false, message: null };
+  await updateJson(threadNoticesPath, {}, (all) => {
+    const rows = Array.isArray(all[key]) ? all[key] : [];
+    const duplicate = rows.at(-1)?.role === next.role
+      && rows.at(-1)?.content === next.content
+      ? rows.at(-1)
+      : null;
+    if (duplicate) {
+      result = { added: false, message: duplicate };
+      return all;
+    }
+    all[key] = [...rows, next].slice(-threadNoticeLimit);
+    result = { added: true, message: next };
+    return all;
+  });
+  return result;
+}
+
+export async function readThreadNotices(threadId = "", connectorId = "") {
+  const key = threadNoticeKey(threadId, connectorId);
+  if (!key) return [];
+  const all = await readJson(threadNoticesPath, {});
+  const rows = Array.isArray(all?.[key]) ? all[key] : [];
+  return rows.map(storedThreadNotice).filter(Boolean);
+}
+
+export async function deleteThreadNotices(threadId = "", connectorId = "") {
+  const key = threadNoticeKey(threadId, connectorId);
+  if (!key) return;
+  await updateJson(threadNoticesPath, {}, (all) => {
+    delete all[key];
     return all;
   });
 }
