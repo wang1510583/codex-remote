@@ -113,6 +113,18 @@ test("assistant bubbles have no outer background color", async () => {
   assert.doesNotMatch(assistant, /linear-gradient/);
 });
 
+test("Codex voice transcript bubbles are green while user bubbles stay purple", async () => {
+  const [css, source] = await Promise.all([
+    readFile(new URL("../public/styles.css", import.meta.url), "utf8"),
+    readFile(new URL("../public/remote.js", import.meta.url), "utf8")
+  ]);
+
+  assert.match(source, /const isLiveVoiceAssistant = role === "assistant" && Boolean\(meta\.liveVoiceTranscript\);/);
+  assert.match(source, /message \$\{role\}[^`]*\$\{isLiveVoiceAssistant \? " liveVoiceAssistant" : ""\}/);
+  assert.match(css, /\.message\.assistant\.liveVoiceAssistant\s*\{[\s\S]*?background:\s*#174b35;[\s\S]*?border-color:\s*#2f8a60;/);
+  assert.match(css, /\.message\.user\s*\{[\s\S]*?background:\s*#36345f;/);
+});
+
 test("thinking status text uses normal weight while completion stays emphasized", async () => {
   const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
   const source = await readFile(new URL("../public/remote.js", import.meta.url), "utf8");

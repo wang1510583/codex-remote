@@ -1082,13 +1082,35 @@ export class CodexAppServer {
 
   async steerCurrentTurn(message) {
     if (!this.turn?.threadId || !this.turn?.turnId) throw new Error("no active turn to steer");
+    return await this.steerTurn(this.turn.threadId, this.turn.turnId, message);
+  }
+
+  async steerTurn(threadId, turnId, message) {
+    if (!threadId || !turnId) throw new Error("no active turn to steer");
+    await this.ensureStarted();
     await this.request("turn/steer", {
-      threadId: this.turn.threadId,
-      turnId: this.turn.turnId,
-      expectedTurnId: this.turn.turnId,
+      threadId,
+      expectedTurnId: turnId,
       input: [{ type: "text", text: message, text_elements: [] }]
     });
     return true;
+  }
+
+  async interruptTurn(threadId, turnId) {
+    if (!threadId || !turnId) return false;
+    await this.ensureStarted();
+    await this.request("turn/interrupt", { threadId, turnId });
+    return true;
+  }
+
+  async loadedThreadRuntimeStatus(threadId) {
+    if (!threadId) return null;
+    await this.ensureStarted();
+    if (!this.usingSharedAppServer) return null;
+    const loaded = await this.request("thread/loaded/list", {});
+    if (!Array.isArray(loaded?.data) || !loaded.data.includes(threadId)) return null;
+    const result = await this.request("thread/read", { threadId, includeTurns: false });
+    return result?.thread?.status || null;
   }
 
   get usingSharedAppServer() {

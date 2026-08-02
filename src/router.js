@@ -9,7 +9,8 @@ import { remotePassword, authToken, codexWorkDir, disableLocal } from "./config.
 import { clients, broadcast, sendSnapshot, changesSince, currentEventSeq } from "./sse.js";
 import {
   readState, writeState, saveDraftForState, draftForState, syncLoadedCounts,
-  readConnectorViewState, writeConnectorViewState, setThreadName, writeStateIfIdle
+  readConnectorViewState, writeConnectorViewState, setThreadName, writeStateIfIdle,
+  labelLiveVoiceTranscript, readLiveVoiceTranscripts
 } from "./store.js";
 import {
   submitRemoteMessage, selectRemoteThread, createRemoteSession, loadThreadPage,
@@ -17,7 +18,7 @@ import {
   selectedRunner, setSelectedRunnerKey, clearThreadCompletedUnread, markInterruptedInflight,
   runningThreads, runnerKeyForState, ensureStateModelSettings,
   runnerStatePayload, sessionModelSettingsPayload, updateSessionModelSettings, usagePayload, resetUsageLimit,
-  syncSharedThreadSettings, liveFullMessagesFor
+  syncSharedThreadSettings, liveFullMessagesFor, reconcileExternalSessionStatus
 } from "./runner.js";
 import {
   isInternalMessage, mergeLocalMessageMeta, limitFullReplyMessages
@@ -82,7 +83,10 @@ function mergeStateMessages(sessionMessages = [], stateMessages = []) {
   const byKey = new Map();
   const order = [];
   const hasSession = Array.isArray(sessionMessages) && sessionMessages.length > 0;
-  for (const message of sessionMessages) {
+  for (const rawMessage of sessionMessages) {
+    const message = rawMessage?.liveVoiceTranscript
+      ? { ...rawMessage, content: labelLiveVoiceTranscript(rawMessage.content) }
+      : rawMessage;
     if (!message?.role || !message?.content) continue;
     if (message.role === "user" && isInternalMessage(message.content)) continue;
     const key = messageMergeKey(message);
@@ -91,7 +95,10 @@ function mergeStateMessages(sessionMessages = [], stateMessages = []) {
       order.push(key);
     }
   }
-  for (const message of stateMessages) {
+  for (const rawMessage of stateMessages) {
+    const message = rawMessage?.liveVoiceTranscript
+      ? { ...rawMessage, content: labelLiveVoiceTranscript(rawMessage.content) }
+      : rawMessage;
     if (!message?.role || !message?.content) continue;
     if (message.role === "user" && isInternalMessage(message.content)) continue;
     const key = messageMergeKey(message);
@@ -278,6 +285,9 @@ export async function handle(req, res) {
       const connectorId = requestedConnectorId || viewState.selectedConnectorId || "";
       let state = await readState(connectorId);
       state.connectorId = state.connectorId || connectorId;
+      const persistentVoiceMessages = !connectorId && state.threadId
+        ? await readLiveVoiceTranscripts(state.threadId).catch(() => [])
+        : [];
       let loadedThread = null;
       let external = null;
       let runner = await runnerForIncomingState(state);
@@ -285,10 +295,19 @@ export async function handle(req, res) {
         ? liveVoiceThreadSnapshot(state.threadId)
         : null;
       if (runner?.running) {
-        stopExternalSessionMonitor(connectorId);
+        if (!runner.externalTurn) stopExternalSessionMonitor(connectorId);
         state = runner.state;
         if (wantsFullReplies && state.threadId) {
           loadedThread = await loadThreadPage(state.threadId, connectorId).catch(() => null);
+        }
+        if (persistentVoiceMessages.length) {
+          state = {
+            ...state,
+            messages: mergeStateMessages([], [
+              ...(state.messages || []),
+              ...persistentVoiceMessages
+            ])
+          };
         }
       } else if (state.threadId) {
         const thread = await loadThreadPage(state.threadId, connectorId).catch(() => null);
@@ -299,10 +318,20 @@ export async function handle(req, res) {
           } else {
             external = externalSnapshotFromThread(thread, connectorId);
             monitorExternalSession(state.threadId, connectorId, external);
+            external = await reconcileExternalSessionStatus(state, external);
           }
           const sessionMessages = await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages);
-          const messages = mergeStateMessages(sessionMessages, state.messages);
+          const messages = mergeStateMessages(sessionMessages, [
+            ...(state.messages || []),
+            ...persistentVoiceMessages
+          ]);
           state = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length), inflight: null };
+        } else if (persistentVoiceMessages.length) {
+          const messages = mergeStateMessages([], [
+            ...(state.messages || []),
+            ...persistentVoiceMessages
+          ]);
+          state = { ...state, messages, loadedCount: messages.length, messageCount: Math.max(Number(state.messageCount) || 0, messages.length) };
         }
       } else {
         stopExternalSessionMonitor(connectorId);
@@ -338,8 +367,8 @@ export async function handle(req, res) {
         threadName: state.threadId ? await threadName(state.threadId) : "",
         draft: await draftForState(state, connectorId),
         running: Boolean(runner?.running || liveVoice || external?.running),
-        externalRunning: Boolean(!runner?.running && !liveVoice && external?.running),
-        externalTaskStartedAt: external?.externalTaskStartedAt || "",
+        externalRunning: Boolean(runner?.externalTurn || (!runner?.running && !liveVoice && external?.running)),
+        externalTaskStartedAt: runner?.externalTurn?.taskStartedAt || external?.externalTaskStartedAt || "",
         liveVoiceRunning: Boolean(liveVoice),
         liveVoiceConnected: Boolean(liveVoice?.connected),
         liveVoiceTaskRunning: Boolean(liveVoice?.taskRunning),
@@ -713,7 +742,13 @@ export async function handle(req, res) {
       if (!state.threadId) return json(res, 400, { error: "当前没有会话。" });
       const thread = await loadThreadPage(state.threadId, connectorId);
       const sessionMessages = await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages);
-      const messages = mergeStateMessages(sessionMessages, state.messages);
+      const persistentVoiceMessages = !connectorId
+        ? await readLiveVoiceTranscripts(state.threadId).catch(() => [])
+        : [];
+      const messages = mergeStateMessages(sessionMessages, [
+        ...(state.messages || []),
+        ...persistentVoiceMessages
+      ]);
       const nextState = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length) };
       await writeState(nextState, connectorId);
       const name = await threadName(state.threadId);

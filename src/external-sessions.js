@@ -8,6 +8,24 @@ import {
 
 const monitors = new Map();
 const snapshots = new Map();
+const updateListeners = new Set();
+
+export function onExternalSessionUpdate(listener) {
+  if (typeof listener !== "function") return () => {};
+  updateListeners.add(listener);
+  return () => updateListeners.delete(listener);
+}
+
+async function notifyExternalSessionUpdate(next, previous) {
+  const results = await Promise.allSettled(
+    [...updateListeners].map((listener) => listener(next, previous))
+  );
+  for (const result of results) {
+    if (result.status === "rejected") {
+      console.warn(`external session update listener failed: ${result.reason?.message || result.reason}`);
+    }
+  }
+}
 
 function scopeKey(connectorId = "") {
   return connectorId || "local";
@@ -143,6 +161,7 @@ async function pollMonitor(monitor) {
         fullMessageCount: next.fullMessageCount,
         updatedAt: next.updatedAt
       });
+      await notifyExternalSessionUpdate(next, previous);
     }
     monitor.signature = signature;
     monitor.ready = true;

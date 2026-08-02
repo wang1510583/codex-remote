@@ -31,7 +31,7 @@ test("web messages are routed to the existing Live Voice owner before starting a
   assert.match(submit, /return submitLiveVoiceMessage\(text, selectedState\)/);
   assert.ok(
     submit.indexOf("submitLiveVoiceMessage(text, selectedState)")
-      < submit.indexOf("assertExternalSessionIdle(selectedState)")
+      < submit.indexOf("externalStatusForState(selectedState, true)")
   );
 
   const coordinator = source.slice(
@@ -54,7 +54,7 @@ test("browser status distinguishes connected voice, detached voice task, and ext
   );
   assert.match(setRunning, /state\.liveVoiceRunning/);
   assert.match(setRunning, /state\.externalRunning\s*=\s*state\.running\s*&&\s*!state\.liveVoiceRunning/);
-  assert.match(setRunning, /els\.sendSteer\.disabled\s*=\s*state\.externalRunning/);
+  assert.match(setRunning, /els\.sendSteer\.disabled\s*=\s*false/);
   assert.match(source, /Live Voice 已断线 · 后台任务继续执行 · 等待重连/);
 });
 

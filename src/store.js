@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   dataDir, statePath, draftsPath, followModesPath, messageMetaPath,
-  threadNamesPath, threadCompletionsPath, connectorsViewStatePath, threadModelSettingsPath
+  threadNamesPath, threadCompletionsPath, connectorsViewStatePath, threadModelSettingsPath,
+  liveVoiceTranscriptsPath
 } from "./config.js";
 import { cleanText } from "./utils.js";
 import { readJsonFile, updateJsonFile, writeJsonFile } from "./json-file.js";
@@ -25,6 +26,70 @@ async function writeJson(file, data) {
 
 async function updateJson(file, fallback, update) {
   return updateJsonFile(file, fallback, update);
+}
+
+export const liveVoiceTranscriptPrefix = "语音对话：";
+const liveVoiceTranscriptLimit = 500;
+
+export function labelLiveVoiceTranscript(content = "") {
+  const text = cleanText(content, 20000).trim();
+  if (!text) return "";
+  return text.startsWith(liveVoiceTranscriptPrefix)
+    ? text
+    : `${liveVoiceTranscriptPrefix}${text}`;
+}
+
+function storedLiveVoiceTranscript(message = {}) {
+  const role = String(message.role || "").toLowerCase();
+  const content = labelLiveVoiceTranscript(message.content || "");
+  if ((role !== "user" && role !== "assistant") || !content) return null;
+  return {
+    role,
+    content,
+    at: String(message.at || new Date().toISOString()),
+    liveVoiceTranscript: true
+  };
+}
+
+/**
+ * Live Voice transcript events can arrive after the web UI switches threads.
+ * Keep them in a separate, thread-keyed file so ordinary state refreshes can
+ * never overwrite a completed voice turn.
+ */
+export async function appendLiveVoiceTranscript(threadId = "", message = {}) {
+  const id = String(threadId || "").trim();
+  const next = storedLiveVoiceTranscript(message);
+  if (!id || !next) return { added: false, message: null };
+  let result = { added: false, message: null };
+  await updateJson(liveVoiceTranscriptsPath, {}, (all) => {
+    const rows = Array.isArray(all[id]) ? all[id] : [];
+    const last = rows.at(-1);
+    if (last?.role === next.role && last?.content === next.content) {
+      result = { added: false, message: last };
+      return all;
+    }
+    all[id] = [...rows, next].slice(-liveVoiceTranscriptLimit);
+    result = { added: true, message: next };
+    return all;
+  });
+  return result;
+}
+
+export async function readLiveVoiceTranscripts(threadId = "") {
+  const id = String(threadId || "").trim();
+  if (!id) return [];
+  const all = await readJson(liveVoiceTranscriptsPath, {});
+  const rows = Array.isArray(all?.[id]) ? all[id] : [];
+  return rows.map(storedLiveVoiceTranscript).filter(Boolean);
+}
+
+export async function deleteLiveVoiceTranscripts(threadId = "") {
+  const id = String(threadId || "").trim();
+  if (!id) return;
+  await updateJson(liveVoiceTranscriptsPath, {}, (all) => {
+    delete all[id];
+    return all;
+  });
 }
 
 export async function readState(connectorId = "") {

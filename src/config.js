@@ -44,6 +44,7 @@ export const uploadDir = path.join(dataDir, "uploads");
 export const generatedImageDir = path.join(dataDir, "generated-images");
 export const restartScript = path.join(rootDir, "restart-codex-remote.cmd");
 export const statePath = path.join(dataDir, "remote-state.json");
+export const liveVoiceTranscriptsPath = path.join(dataDir, "live-voice-transcripts.json");
 export const threadNamesPath = path.join(dataDir, "thread-names.json");
 export const draftsPath = path.join(dataDir, "drafts.json");
 export const followModesPath = path.join(dataDir, "follow-modes.json");
@@ -107,4 +108,7 @@ export const codexLiveVoiceReconnectGraceMs = Number(
 );
 export const codexLiveVoiceTaskRetentionMs = Number(
   process.env.CODEX_REMOTE_LIVE_VOICE_TASK_RETENTION_MS || 30 * 60 * 1000
+);
+export const codexLiveVoiceTaskStatusPollMs = Number(
+  process.env.CODEX_REMOTE_LIVE_VOICE_TASK_STATUS_POLL_MS || 2000
 );

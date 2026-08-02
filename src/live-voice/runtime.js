@@ -233,6 +233,28 @@ export class CodexLiveVoiceRuntime {
     return true;
   }
 
+  completeTrackedTurn(status = "completed") {
+    if (!this.taskRunning) return false;
+    this.taskRunning = false;
+    this.activeTurnId = "";
+    this.emit({ type: "manager.turn.completed", status });
+    return true;
+  }
+
+  async reconcileTaskStatus() {
+    if (!this.taskRunning || !this.appServer) return this.taskRunning;
+    const result = await this.appServer.request(
+      "thread/read",
+      { threadId: this.threadId, includeTurns: false },
+      null,
+      10_000
+    );
+    if (result?.thread?.status?.type === "idle") {
+      this.completeTrackedTurn("completed");
+    }
+    return this.taskRunning;
+  }
+
   async stopRealtime() {
     return this.queueAudioOperation(() => this.stopRealtimeNow());
   }
@@ -390,12 +412,15 @@ export class CodexLiveVoiceRuntime {
           !this.taskRunning
           || (completedTurnId && this.activeTurnId && completedTurnId !== this.activeTurnId)
         ) break;
-        this.taskRunning = false;
-        this.activeTurnId = "";
-        this.emit({
-          type: "manager.turn.completed",
-          status: typeof turn.status === "string" ? turn.status : undefined
-        });
+        this.completeTrackedTurn(
+          typeof turn.status === "string" ? turn.status : "completed"
+        );
+        break;
+      }
+      case "thread/status/changed": {
+        if (params.status?.type === "idle") {
+          this.completeTrackedTurn("completed");
+        }
         break;
       }
       case "thread/realtime/error":

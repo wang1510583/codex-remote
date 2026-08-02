@@ -533,9 +533,9 @@ function updateStatusIcon() {
     els.statusIcon.className = "remoteStatusIcon status-connecting";
     els.statusIcon.title = "断开连接，正在连接";
   } else if (state.running) {
-    els.statusIcon.className = `remoteStatusIcon ${state.externalRunning ? "status-external" : "status-running"}`;
+    els.statusIcon.className = "remoteStatusIcon status-running";
     els.statusIcon.title = state.externalRunning
-      ? "Codex Desktop/CLI 正在执行，网页端正在实时同步"
+      ? "Codex 正在处理，网页端可以引导、排队或中断"
       : state.liveVoiceRunning
         ? (state.liveVoiceConnected
             ? (state.liveVoiceTaskRunning ? "Live Voice 已连接，Codex 任务执行中" : "Live Voice 已连接")
@@ -566,10 +566,10 @@ function setRunning(running, queueLength = state.queueLength, queueMessages = st
   state.followMode = followMode === "steer" ? "steer" : "queue";
   setContextUsage(contextUsage);
   if (state.running) state.replyDone = false;
-  els.sendQueue.disabled = state.externalRunning;
-  els.sendSteer.disabled = state.externalRunning;
-  els.sendQueue.title = state.externalRunning ? "Codex Desktop/CLI 正在执行，网页端当前为只读同步" : "队列模式发送（备用）";
-  els.sendSteer.title = state.externalRunning ? "外部 Codex 任务不能从网页端引导" : "引导模式发送（默认，Ctrl+Enter）";
+  els.sendQueue.disabled = false;
+  els.sendSteer.disabled = false;
+  els.sendQueue.title = state.externalRunning ? "等当前 Codex 回合结束后继续执行" : "队列模式发送（备用）";
+  els.sendSteer.title = state.externalRunning ? "引导当前 Codex 回合（默认，Ctrl+Enter）" : "引导模式发送（默认，Ctrl+Enter）";
   if (els.newChat) els.newChat.disabled = state.running && !state.liveVoiceRunning;
   els.threadButton.disabled = false;
   updateMeta();
@@ -590,7 +590,7 @@ function updateMeta() {
   const mode = state.followMode === "steer" ? "引导模式" : "队列模式";
   const percent = state.contextUsage ? Math.max(0, Math.min(100, Math.round(Number(state.contextUsage.remainingPercent)))) : null;
   const normalModeText = Number.isFinite(percent) ? `${mode} · 上下文 ${percent}%` : mode;
-  const externalLabel = state.selectedConnectorId ? "被控电脑 Codex 正在执行 · 实时同步中" : "本机 Codex Desktop/CLI 正在执行 · 实时同步中";
+  const externalLabel = "Codex 正在处理 · 网页可引导或排队";
   const modeText = state.externalRunning
     ? externalLabel
     : state.liveVoiceRunning
@@ -1369,10 +1369,12 @@ function appendMessage(role, text, meta = {}) {
   if (!text) return;
   const shouldFollow = isNearBottom();
   const isCompletion = role === "assistant" && /^✅\s/.test(text || "");
+  const isLiveVoiceAssistant = role === "assistant" && Boolean(meta.liveVoiceTranscript);
   const wrapper = document.createElement("div");
-  wrapper.className = `messageBlock ${role}Block${isCompletion ? " completionBlock" : ""}`;
+  wrapper.className = `messageBlock ${role}Block${isCompletion ? " completionBlock" : ""}${isLiveVoiceAssistant ? " liveVoiceAssistantBlock" : ""}`;
   const item = document.createElement("div");
-  item.className = `message ${role}${isCompletion ? " completion" : ""}`;
+  item.className = `message ${role}${isCompletion ? " completion" : ""}${isLiveVoiceAssistant ? " liveVoiceAssistant" : ""}`;
+  if (isLiveVoiceAssistant) item.dataset.liveVoiceTranscript = "true";
   const fullKind = String(meta.fullKind || "").replace(/[^a-z-]/gi, "");
   if (fullKind) {
     wrapper.classList.add("fullReplyBlock", `fullReply-${fullKind}`);
@@ -3163,20 +3165,18 @@ async function sendMessage(mode = "steer") {
   const connectorId = currentConnectorId();
   const message = composerText().trim();
   if (!message && !state.uploads.length) return;
-  if (state.externalRunning) {
-    upsertAssistantMessage("Codex Desktop/CLI 正在执行这个会话，网页端当前为只读实时同步。请等任务结束后再发送。", true, "external-session-readonly", { persist: false });
-    return;
-  }
   if (state.disableLocal && !connectorId) {
     upsertAssistantMessage("当前为纯控制中心模式，请先在「PC 被控电脑」面板添加并切换到一台被控电脑。", true);
     return;
   }
   const outgoingMessage = messageWithUploads(message);
   const sendMode = mode === "steer" ? "steer" : "queue";
-  const liveVoiceBeforeSend = {
-    running: state.liveVoiceRunning,
-    connected: state.liveVoiceConnected,
-    taskRunning: state.liveVoiceTaskRunning,
+  const stateBeforeSend = {
+    running: state.running,
+    externalRunning: state.externalRunning,
+    liveVoiceRunning: state.liveVoiceRunning,
+    liveVoiceConnected: state.liveVoiceConnected,
+    liveVoiceTaskRunning: state.liveVoiceTaskRunning,
     reconnecting: state.reconnecting
   };
   els.input.value = "";
@@ -3186,7 +3186,7 @@ async function sendMessage(mode = "steer") {
   state.replyDone = false;
   state.currentTaskStartedAtMs = Date.now();
   const followMatch = outgoingMessage.trim().toLowerCase().match(/^\/follow\s+(queue|steer)$/);
-  setRunning(true, state.queueLength, state.queueMessages, followMatch ? followMatch[1] : state.followMode, state.steerLength, state.steerMessages, state.contextUsage, state.runningThreads, false, false);
+  setRunning(true, state.queueLength, state.queueMessages, followMatch ? followMatch[1] : state.followMode, state.steerLength, state.steerMessages, state.contextUsage, state.runningThreads, false, state.externalRunning);
   try {
     const result = await request("/api/remote/send", {
       method: "POST",
@@ -3219,7 +3219,7 @@ async function sendMessage(mode = "steer") {
   } catch (error) {
     upsertAssistantMessage(`错误：${error.message}`, true);
     setRunning(
-      liveVoiceBeforeSend.running,
+      stateBeforeSend.running,
       0,
       [],
       state.followMode,
@@ -3227,11 +3227,11 @@ async function sendMessage(mode = "steer") {
       [],
       state.contextUsage,
       state.runningThreads,
-      liveVoiceBeforeSend.reconnecting,
-      false,
-      liveVoiceBeforeSend.running,
-      liveVoiceBeforeSend.connected,
-      liveVoiceBeforeSend.taskRunning
+      stateBeforeSend.reconnecting,
+      stateBeforeSend.externalRunning,
+      stateBeforeSend.liveVoiceRunning,
+      stateBeforeSend.liveVoiceConnected,
+      stateBeforeSend.liveVoiceTaskRunning
     );
   }
 }

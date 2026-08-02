@@ -62,6 +62,7 @@ export class LiveVoiceGateway {
     authTimeoutMs = 5_000,
     reconnectGraceMs = 60_000,
     taskRetentionMs = 30 * 60_000,
+    taskStatusPollMs = 2_000,
     ticketStore,
     threadAdapter,
     runtimeFactory,
@@ -75,6 +76,7 @@ export class LiveVoiceGateway {
     this.authTimeoutMs = positiveMs(authTimeoutMs, 5_000);
     this.reconnectGraceMs = positiveMs(reconnectGraceMs, 60_000);
     this.taskRetentionMs = positiveMs(taskRetentionMs, 30 * 60_000);
+    this.taskStatusPollMs = positiveMs(taskStatusPollMs, 2_000);
     this.ticketStore = ticketStore;
     this.threadAdapter = threadAdapter;
     this.runtimeFactory = runtimeFactory;
@@ -176,6 +178,21 @@ export class LiveVoiceGateway {
             expires_in_ms: this.ticketStore.ttlMs
           }
         });
+        return true;
+      }
+
+      const conversationMatch = pathname.match(
+        /^\/api\/voice-agent\/sessions\/([^/]+)\/conversation$/
+      );
+      if (conversationMatch) {
+        if (req.method !== "GET") {
+          jsonResponse(res, 405, { success: false, message: "Method not allowed" });
+          return true;
+        }
+        const conversation = await this.threadAdapter.currentSessionConversation(
+          conversationMatch[1]
+        );
+        jsonResponse(res, 200, { success: true, data: { conversation } });
         return true;
       }
 
@@ -344,8 +361,10 @@ export class LiveVoiceGateway {
   clearSessionTimers(session) {
     if (session.detachTimer) this.clearTimeoutFn(session.detachTimer);
     if (session.retentionTimer) this.clearTimeoutFn(session.retentionTimer);
+    if (session.taskStatusTimer) this.clearTimeoutFn(session.taskStatusTimer);
     session.detachTimer = null;
     session.retentionTimer = null;
+    session.taskStatusTimer = null;
   }
 
   scheduleTaskRetention(session) {
@@ -355,6 +374,29 @@ export class LiveVoiceGateway {
       void this.destroySession(session);
     }, this.taskRetentionMs);
     session.retentionTimer?.unref?.();
+  }
+
+  scheduleTaskStatusPoll(session) {
+    if (
+      session.taskStatusTimer
+      || session.socket
+      || this.activeSessions.get(session.threadId) !== session
+    ) return;
+    session.taskStatusTimer = this.setTimeoutFn(async () => {
+      session.taskStatusTimer = null;
+      if (session.socket || this.activeSessions.get(session.threadId) !== session) return;
+      try {
+        await session.runtime.reconcileTaskStatus?.();
+      } catch (error) {
+        console.warn(`Live Voice task status check failed: ${error?.message || error}`);
+      }
+      if (this.activeSessions.get(session.threadId) !== session) return;
+      const status = this.runtimeStatus(session);
+      this.publishStatus(session);
+      if (status.taskRunning) this.scheduleTaskStatusPoll(session);
+      else await this.destroySession(session);
+    }, this.taskStatusPollMs);
+    session.taskStatusTimer?.unref?.();
   }
 
   scheduleReconnectCleanup(session) {
@@ -367,6 +409,7 @@ export class LiveVoiceGateway {
       this.publishStatus(session);
       if (this.runtimeStatus(session).taskRunning) {
         this.scheduleTaskRetention(session);
+        this.scheduleTaskStatusPoll(session);
       } else {
         await this.destroySession(session);
       }
@@ -395,6 +438,7 @@ export class LiveVoiceGateway {
     this.publishStatus(session, { connected: false, realtimeActive: false });
     if (this.runtimeStatus(session).taskRunning) {
       this.scheduleTaskRetention(session);
+      this.scheduleTaskStatusPoll(session);
     } else {
       await this.destroySession(session);
     }
@@ -437,6 +481,7 @@ export class LiveVoiceGateway {
       graceExpired: false,
       detachTimer: null,
       retentionTimer: null,
+      taskStatusTimer: null,
       destroying: false,
       destroyPromise: null
     };

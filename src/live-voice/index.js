@@ -3,6 +3,7 @@ import {
   codexLiveVoiceEnabled,
   codexLiveVoiceReconnectGraceMs,
   codexLiveVoiceTaskRetentionMs,
+  codexLiveVoiceTaskStatusPollMs,
   codexLiveVoiceTicketTtlMs,
   codexLiveVoiceToken,
   codexLiveVoiceVoice
@@ -20,6 +21,7 @@ const gateway = new LiveVoiceGateway({
   authTimeoutMs: codexLiveVoiceAuthTimeoutMs,
   reconnectGraceMs: codexLiveVoiceReconnectGraceMs,
   taskRetentionMs: codexLiveVoiceTaskRetentionMs,
+  taskStatusPollMs: codexLiveVoiceTaskStatusPollMs,
   ticketStore: new LiveVoiceTicketStore({
     ttlMs: codexLiveVoiceTicketTtlMs
   }),

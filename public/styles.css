@@ -133,6 +133,15 @@ textarea:focus {
   font-weight: 400;
 }
 
+/* Voice replies are preserved with a \"语音对话：\" prefix. Give only
+   Codex's side of those exchanges a distinct green bubble; user messages
+   intentionally retain their existing purple treatment. */
+.message.assistant.liveVoiceAssistant {
+  background: #174b35;
+  border-color: #2f8a60;
+  color: #e4f8ec;
+}
+
 .message.assistant.completion {
   border-color: transparent;
   background: transparent;
@@ -632,9 +641,6 @@ textarea:focus {
 }
 .remoteStatusIcon.status-running {
   color: #ef4444;
-}
-.remoteStatusIcon.status-external {
-  color: #f59e0b;
 }
 .remoteStatusIcon.status-idle {
   color: #22c55e;

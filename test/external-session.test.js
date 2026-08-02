@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { CodexAppServer } from "../src/codex-server.js";
 import { externalSnapshotFromThread, isExternalTaskRunning } from "../src/external-sessions.js";
 import { parseSessionFile } from "../src/threads.js";
 
@@ -92,12 +93,82 @@ test("external session monitor supports local and connector session providers", 
   assert.match(source, /provider\.readFile\(hit\.file\)/);
 });
 
-test("sending is rejected before a second writer starts on an external session", async () => {
+test("an external session is proxied for steering and safe queued continuation", async () => {
   const source = await readFile(new URL("../src/runner.js", import.meta.url), "utf8");
   const submit = source.slice(
     source.indexOf("export async function submitRemoteMessage"),
     source.indexOf("export async function listThreads")
   );
-  assert.match(submit, /if \(!selectedRunner\?\.running\)\s*\{[\s\S]*?await assertExternalSessionIdle\(selectedState\)/);
-  assert.ok(submit.indexOf("assertExternalSessionIdle(selectedState)") < submit.indexOf("localCommandResponse(text, connectorId)"));
+  assert.match(submit, /const observed = await externalStatusForState\(selectedState, true\)/);
+  assert.match(submit, /attachExternalTurn\(selectedRunner, observed\)/);
+  assert.ok(submit.indexOf("attachExternalTurn(selectedRunner, observed)") < submit.indexOf("localCommandResponse(text, connectorId)"));
+  assert.match(submit, /runner\.appServer\.steerTurn\(/);
+  assert.match(submit, /runner\.messageQueue\.push\(\{ message: text, displayed: true \}\)/);
+
+  const lifecycle = source.slice(
+    source.indexOf("async function handleExternalRunnerUpdate"),
+    source.indexOf("export async function rememberRunnerThread")
+  );
+  assert.match(lifecycle, /runner\.externalTurn = null/);
+  assert.match(lifecycle, /processNextQueuedMessage\(runner\)/);
+});
+
+test("external turn controls target the observed thread and turn ids", async () => {
+  const server = new CodexAppServer({});
+  const requests = [];
+  server.ensureStarted = async () => {};
+  server.request = async (method, params) => {
+    requests.push({ method, params });
+    return {};
+  };
+
+  await server.steerTurn("thread-external", "turn-external", "focus on tests");
+  await server.interruptTurn("thread-external", "turn-external");
+
+  assert.deepEqual(requests, [
+    {
+      method: "turn/steer",
+      params: {
+        threadId: "thread-external",
+        expectedTurnId: "turn-external",
+        input: [{ type: "text", text: "focus on tests", text_elements: [] }]
+      }
+    },
+    {
+      method: "turn/interrupt",
+      params: { threadId: "thread-external", turnId: "turn-external" }
+    }
+  ]);
+});
+
+test("a loaded shared thread exposes its authoritative runtime status", async () => {
+  const server = new CodexAppServer({});
+  const requests = [];
+  server.ensureStarted = async () => {};
+  Object.defineProperty(server, "usingSharedAppServer", { value: true });
+  server.request = async (method, params) => {
+    requests.push({ method, params });
+    if (method === "thread/loaded/list") return { data: ["thread-stale"] };
+    return { thread: { id: "thread-stale", status: { type: "idle" } } };
+  };
+
+  assert.deepEqual(await server.loadedThreadRuntimeStatus("thread-stale"), { type: "idle" });
+  assert.deepEqual(requests, [
+    { method: "thread/loaded/list", params: {} },
+    { method: "thread/read", params: { threadId: "thread-stale", includeTurns: false } }
+  ]);
+});
+
+test("an unloaded thread does not override the safer JSONL running state", async () => {
+  const server = new CodexAppServer({});
+  const requests = [];
+  server.ensureStarted = async () => {};
+  Object.defineProperty(server, "usingSharedAppServer", { value: true });
+  server.request = async (method, params) => {
+    requests.push({ method, params });
+    return { data: [] };
+  };
+
+  assert.equal(await server.loadedThreadRuntimeStatus("thread-external-cli"), null);
+  assert.deepEqual(requests, [{ method: "thread/loaded/list", params: {} }]);
 });

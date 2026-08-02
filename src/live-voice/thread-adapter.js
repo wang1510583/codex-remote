@@ -2,14 +2,20 @@ import { disableLocal } from "../config.js";
 import { createLocalAppServer } from "../codex-server.js";
 import { liveVoiceThreadSnapshot } from "./leases.js";
 import { absoluteStateCwd } from "../paths.js";
-import { runningThreads } from "../runner.js";
+import { loadThreadPage, runningThreads } from "../runner.js";
 import { broadcast } from "../sse.js";
+import { isInternalMessage } from "../threads.js";
 import {
+  appendLiveVoiceTranscript,
+  labelLiveVoiceTranscript,
   readConnectorViewState,
+  readLiveVoiceTranscripts,
   readState,
   syncLoadedCounts,
   writeState
 } from "../store.js";
+
+const RECENT_CONVERSATION_LIMIT = 10;
 
 export function liveVoiceHttpError(message, statusCode = 400) {
   return Object.assign(new Error(message), { statusCode });
@@ -39,6 +45,58 @@ function sessionPayload(state) {
   };
 }
 
+function conversationKey(message = {}) {
+  const role = String(message.role || "").toLowerCase();
+  const text = String(message.content || "").trim()
+    .replace(/^[✅🤔]\s*/u, "");
+  return `${role}\n${text}`;
+}
+
+function visibleConversationEntry(message = {}) {
+  const role = String(message.role || "").toLowerCase();
+  const text = String(message.content || "").trim();
+  if ((role !== "user" && role !== "assistant") || !text) return null;
+  if (role === "user" && isInternalMessage(text)) return null;
+  // The web UI labels unfinished assistant bubbles with 🤔. The Android
+  // recent-history panel should restore only completed Codex replies.
+  if (role === "assistant" && /^🤔\s*/u.test(text)) return null;
+  return {
+    role,
+    text,
+    channel: "final",
+    at: String(message.at || "")
+  };
+}
+
+function recentConversation(threadMessages = [], stateMessages = []) {
+  const rows = [];
+  const indices = new Map();
+  for (const rawMessage of [...threadMessages, ...stateMessages]) {
+    const message = rawMessage?.liveVoiceTranscript
+      ? { ...rawMessage, content: labelLiveVoiceTranscript(rawMessage.content) }
+      : rawMessage;
+    const entry = visibleConversationEntry(message);
+    if (!entry) continue;
+    const key = conversationKey(message);
+    const existingIndex = indices.get(key);
+    if (existingIndex === undefined) {
+      indices.set(key, rows.length);
+      rows.push(entry);
+    } else if (!rows[existingIndex].at && entry.at) {
+      rows[existingIndex] = entry;
+    }
+  }
+  rows.sort((left, right) => {
+    const leftTime = Date.parse(left.at);
+    const rightTime = Date.parse(right.at);
+    if (!Number.isNaN(leftTime) && !Number.isNaN(rightTime) && leftTime !== rightTime) {
+      return leftTime - rightTime;
+    }
+    return 0;
+  });
+  return rows.slice(-RECENT_CONVERSATION_LIMIT).map(({ at, ...entry }) => entry);
+}
+
 export class CodexRemoteThreadAdapter {
   constructor({
     readStateFn = readState,
@@ -47,6 +105,9 @@ export class CodexRemoteThreadAdapter {
     appServerFactory = createLocalAppServer,
     runningThreadsFn = runningThreads,
     broadcastFn = broadcast,
+    loadThreadPageFn = loadThreadPage,
+    appendLiveVoiceTranscriptFn = appendLiveVoiceTranscript,
+    readLiveVoiceTranscriptsFn = readLiveVoiceTranscripts,
     localDisabled = disableLocal
   } = {}) {
     this.readState = readStateFn;
@@ -55,6 +116,9 @@ export class CodexRemoteThreadAdapter {
     this.appServerFactory = appServerFactory;
     this.runningThreads = runningThreadsFn;
     this.broadcast = broadcastFn;
+    this.loadThreadPage = loadThreadPageFn;
+    this.appendLiveVoiceTranscript = appendLiveVoiceTranscriptFn;
+    this.readLiveVoiceTranscripts = readLiveVoiceTranscriptsFn;
     this.localDisabled = localDisabled;
     this.creating = null;
   }
@@ -92,6 +156,36 @@ export class CodexRemoteThreadAdapter {
       throw liveVoiceHttpError("该 Live Voice 会话不是网页当前选择的会话。", 404);
     }
     return sessionPayload(state);
+  }
+
+  /**
+   * Returns the persisted, visible bubbles for the thread currently selected
+   * in the Codex Remote web UI. This deliberately does not create a thread or
+   * allow Android to browse other local Codex history.
+   */
+  async currentSessionConversation(rawSessionId) {
+    const sessionId = safeLiveVoiceSessionId(rawSessionId);
+    const state = await this.localState();
+    if (!state.threadId || state.threadId !== sessionId) {
+      throw liveVoiceHttpError("该 Live Voice 会话不是网页当前选择的会话。", 404);
+    }
+
+    let threadMessages = [];
+    try {
+      const thread = await this.loadThreadPage(sessionId, "");
+      threadMessages = Array.isArray(thread?.messages) ? thread.messages : [];
+    } catch {
+      // A newly created thread may not have a JSONL file yet. In that case,
+      // state.messages can still contain recent Live Voice transcript bubbles.
+    }
+    let voiceMessages = [];
+    try {
+      voiceMessages = await this.readLiveVoiceTranscripts(sessionId);
+    } catch {
+      // Current thread history is still useful if an older deployment has not
+      // created the separate Live Voice transcript file yet.
+    }
+    return recentConversation(threadMessages, [...(state.messages || []), ...voiceMessages]);
   }
 
   async createSession() {
@@ -217,23 +311,31 @@ export class CodexRemoteThreadAdapter {
     const normalizedRole = String(role || "").toLowerCase() === "user"
       ? "user"
       : "assistant";
-    const state = await this.readState("");
-    if (state.threadId !== threadId) return;
-    const last = state.messages?.at?.(-1);
-    if (last?.role === normalizedRole && last?.content === content) return;
     const message = {
       role: normalizedRole,
-      content,
+      content: labelLiveVoiceTranscript(content),
       at: new Date().toISOString(),
       liveVoiceTranscript: true
     };
-    state.messages = [...(state.messages || []), message].slice(-80);
-    await this.writeState(syncLoadedCounts(state), "");
+    const persisted = await this.appendLiveVoiceTranscript(threadId, message);
+    if (!persisted?.added) return;
+    const visibleMessage = persisted.message || message;
+
+    // Keep the selected web page live without waiting for its next snapshot.
+    // Persistence above is deliberately independent of this state array, as
+    // it can be replaced while a web task refreshes or the user changes tabs.
+    const state = await this.readState("");
+    if (state.threadId !== threadId) return;
+    const last = state.messages?.at?.(-1);
+    if (last?.role !== visibleMessage.role || last?.content !== visibleMessage.content) {
+      state.messages = [...(state.messages || []), visibleMessage].slice(-80);
+      await this.writeState(syncLoadedCounts(state), "");
+    }
     this.broadcast({
       type: "message",
       connectorId: "",
       threadId,
-      ...message,
+      ...visibleMessage,
       final: true,
       messageId: `live-voice-${normalizedRole}-${Date.now()}`
     });

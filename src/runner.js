@@ -11,7 +11,7 @@ import {
   readThreadNames, threadName,
   readThreadCompletions, setThreadCompletion, syncLoadedCounts,
   modelSettingsForThread, saveThreadModelSettings, deleteThreadModelSettings,
-  updateStateModelSettings
+  updateStateModelSettings, deleteLiveVoiceTranscripts
 } from "./store.js";
 import { stateAbsoluteCwd, safeStateCwdValue, stateCwdValue, assertProjectDirectory } from "./paths.js";
 import {
@@ -38,7 +38,7 @@ import {
 import {
   externalRunningSnapshots, externalSessionSnapshot, externalSnapshotFromThread,
   isExternalTaskRunning, monitorExternalSession, refreshExternalSession,
-  stopExternalSessionMonitor
+  stopExternalSessionMonitor, onExternalSessionUpdate
 } from "./external-sessions.js";
 
 export const runners = new Map();
@@ -483,7 +483,7 @@ export function runningThreads() {
       title: threadTitle(runner.state.messages || [], runner.cwd ? `/${runner.cwd}` : "根目录会话"),
       messageCount: runner.state.messages?.length || 0,
       queueLength: runner.messageQueue.length,
-      externalRunning: false
+      externalRunning: Boolean(runner.externalTurn)
     }));
   const internalKeys = new Set(internal.map((item) => `${item.connectorId || ""}:${item.threadId || ""}`));
   const liveVoice = activeLiveVoiceThreadSnapshots()
@@ -574,7 +574,8 @@ export function statusPayload(runner = selectedRunner(), isRunning = Boolean(run
     followMode: runner?.followMode || followMode,
     contextUsage: runner?.contextUsage || contextUsage,
     reconnecting: Boolean(runner?.reconnecting),
-    externalRunning: false,
+    externalRunning: Boolean(runner?.externalTurn),
+    externalTaskStartedAt: runner?.externalTurn?.taskStartedAt || "",
     runningThreads: runningThreads()
   };
 }
@@ -636,6 +637,7 @@ export async function createRunner(state = {}) {
     steerMessages: [],
     contextUsage: contextUsage || null,
     reconnecting: false,
+    externalTurn: null,
     ownsAppServer: !state.connectorId || connectorSupportsConcurrentAppServers(state.connectorId),
     emit: null
   };
@@ -664,6 +666,91 @@ export async function runnerForState(state = {}, create = false) {
   if (runner) runner.followMode = await followModeForState(runner.state, runner.connectorId || "");
   return runner || null;
 }
+
+function externalMessageKey(message = {}) {
+  let content = String(message.content || "").trim();
+  if (message.role === "assistant") content = content.replace(/^[🤔✅]\s*/u, "");
+  return `${message.role || ""}\n${content}`;
+}
+
+function mergeExternalRunnerMessages(sessionMessages = [], stateMessages = []) {
+  const rows = [];
+  const indexes = new Map();
+  for (const message of [...sessionMessages, ...stateMessages]) {
+    if (!message?.role || !message?.content) continue;
+    const key = externalMessageKey(message);
+    if (!indexes.has(key)) {
+      indexes.set(key, rows.length);
+      rows.push(message);
+      continue;
+    }
+    const index = indexes.get(key);
+    if (message.taskDurationMs !== undefined && rows[index].taskDurationMs === undefined) {
+      rows[index] = { ...rows[index], taskDurationMs: message.taskDurationMs };
+    }
+  }
+  rows.sort((left, right) => {
+    const leftAt = Date.parse(left.at || "");
+    const rightAt = Date.parse(right.at || "");
+    if (Number.isFinite(leftAt) && Number.isFinite(rightAt) && leftAt !== rightAt) return leftAt - rightAt;
+    return 0;
+  });
+  return rows.slice(-80);
+}
+
+export function attachExternalTurn(runner, snapshot = {}) {
+  if (!runner || !snapshot.running) return runner;
+  runner.running = true;
+  runner.reconnecting = false;
+  runner.externalTurn = {
+    threadId: snapshot.threadId || runner.state.threadId || "",
+    turnId: snapshot.externalTurnId || "",
+    taskStartedAt: snapshot.externalTaskStartedAt || ""
+  };
+  runner.contextUsage = snapshot.contextUsage || runner.contextUsage;
+  monitorExternalSession(runner.externalTurn.threadId, runner.connectorId || "", snapshot);
+  return runner;
+}
+
+async function handleExternalRunnerUpdate(snapshot = {}) {
+  const key = runnerKeyForState({ threadId: snapshot.threadId, connectorId: snapshot.connectorId || "" });
+  const runner = runners.get(key);
+  if (!runner?.externalTurn) return;
+  runner.contextUsage = snapshot.contextUsage || runner.contextUsage;
+  if (snapshot.running) {
+    attachExternalTurn(runner, snapshot);
+    broadcastRunner(runner, statusPayload(runner, true));
+    return;
+  }
+
+  try {
+    const sessionMessages = await mergeLocalMessageMeta(
+      snapshot.threadId,
+      snapshot.messages || [],
+      runner.state.messages || []
+    );
+    runner.state.messages = mergeExternalRunnerMessages(sessionMessages, runner.state.messages || []);
+  } catch (error) {
+    console.warn(`failed to merge completed external session ${snapshot.threadId}: ${error.message || error}`);
+  }
+  runner.state = syncLoadedCounts(runner.state);
+  runner.externalTurn = null;
+  runner.steerMessages = [];
+  runner.reconnecting = false;
+  await writeRunnerStateIfSelected(runner)
+    .catch((error) => console.warn(`failed to save completed external session ${snapshot.threadId}: ${error.message || error}`));
+
+  const willContinue = runner.messageQueue.length > 0;
+  runner.running = willContinue;
+  broadcastRunner(runner, { type: "done", ok: true, threadId: runner.state.threadId, externalCompleted: true });
+  if (willContinue) processNextQueuedMessage(runner);
+  else {
+    broadcastRunner(runner, statusPayload(runner, false));
+    releaseRunnerAppServerIfIdle(runner);
+  }
+}
+
+onExternalSessionUpdate(handleExternalRunnerUpdate);
 
 export async function rememberRunnerThread(runner, state = runner.state) {
   if (!runner || !state.threadId) return;
@@ -718,15 +805,37 @@ function externalTaskLabel(connectorId = "") {
 export async function externalStatusForState(state = {}, refresh = false) {
   if (!state.threadId) return null;
   const connectorId = state.connectorId || "";
+  let snapshot = null;
   if (refresh) {
     try {
-      return await refreshExternalSession(state.threadId, connectorId);
+      snapshot = await refreshExternalSession(state.threadId, connectorId);
     } catch {
       // A cached running status is safer than allowing a second writer when a
       // connector or session read has a transient failure.
     }
   }
-  return externalSessionSnapshot(state.threadId, connectorId);
+  snapshot = snapshot || externalSessionSnapshot(state.threadId, connectorId);
+  return await reconcileExternalSessionStatus(state, snapshot);
+}
+
+export async function reconcileExternalSessionStatus(state = {}, snapshot = null) {
+  if (!snapshot?.running || state.connectorId || !state.threadId) return snapshot;
+  try {
+    const runtimeStatus = await appServerForState(state).loadedThreadRuntimeStatus(state.threadId);
+    if (runtimeStatus?.type === "idle") {
+      return {
+        ...snapshot,
+        running: false,
+        externalRunning: false,
+        staleExternalTurn: true,
+        runtimeStatus
+      };
+    }
+  } catch {
+    // Keep the JSONL running state when the live shared app-server cannot
+    // authoritatively confirm that this loaded thread is idle.
+  }
+  return snapshot;
 }
 
 export async function assertExternalSessionIdle(state = {}) {
@@ -953,6 +1062,18 @@ async function localCommandResponse(message, connectorId = "") {
     return ["已开始重启服务。", "", "- Caddy 端口：5566", "- Codex Remote 后端：5567", "", "网页会短暂断开，约 5-10 秒后恢复。"].join("\n");
   }
   if (command === "/stop") {
+    if (currentRunner?.externalTurn) {
+      const externalTurn = currentRunner.externalTurn;
+      try {
+        await commandServer.interruptTurn(externalTurn.threadId, externalTurn.turnId);
+        currentRunner.messageQueue.length = 0;
+        currentRunner.steerMessages = [];
+        broadcast(statusPayload(currentRunner, true));
+        return "已向当前外部 Codex 回合发送中断请求。";
+      } catch (error) {
+        return `中断外部 Codex 回合失败：${error.message || error}`;
+      }
+    }
     const interrupted = await commandServer.interruptCurrentTurn().catch(() => false);
     if (!interrupted && commandServer.transport?.alive) commandServer.transport.kill?.();
     if (currentRunner) {
@@ -986,7 +1107,15 @@ async function localCommandResponse(message, connectorId = "") {
     const steerMessage = raw.replace(/^\/steer\s*/i, "").trim();
     if (!steerMessage) return "Usage: `/steer <message>`";
     try {
-      await commandServer.steerCurrentTurn(steerMessage);
+      if (currentRunner?.externalTurn) {
+        await commandServer.steerTurn(
+          currentRunner.externalTurn.threadId,
+          currentRunner.externalTurn.turnId,
+          steerMessage
+        );
+      } else {
+        await commandServer.steerCurrentTurn(steerMessage);
+      }
       return "Steer delivered to the running task.";
     } catch (error) {
       return `Failed to steer running task: ${error.message || error}`;
@@ -1192,6 +1321,7 @@ export async function startRemoteTask(message, state, runner = null, options = {
   runner = runner || await runnerForState(state, true);
   stopExternalSessionMonitor(runner.connectorId || "");
   runner.running = true;
+  runner.externalTurn = null;
   runner.reconnecting = false;
   runner.steerMessages = [];
   runner.cwd = state.cwd || "";
@@ -1338,11 +1468,16 @@ export async function submitRemoteMessage(message, requestedFollowMode = "", con
   if (!connectorId && selectedState.threadId && isLiveVoiceThreadActive(selectedState.threadId)) {
     return submitLiveVoiceMessage(text, selectedState);
   }
-  const selectedRunner = await runnerForState(selectedState, false);
+  let selectedRunner = await runnerForState(selectedState, false);
   if (!selectedRunner?.running) {
-    const observed = await assertExternalSessionIdle(selectedState);
-    await ensureStateModelSettings(selectedState, observed);
-    await writeState(syncLoadedCounts(selectedState), connectorId);
+    const observed = await externalStatusForState(selectedState, true);
+    if (observed?.running) {
+      selectedRunner = selectedRunner || await runnerForState(selectedState, true);
+      attachExternalTurn(selectedRunner, observed);
+    } else {
+      await ensureStateModelSettings(selectedState, observed);
+      await writeState(syncLoadedCounts(selectedState), connectorId);
+    }
   }
   const localAnswer = await localCommandResponse(text, connectorId);
   if (localAnswer) {
@@ -1366,6 +1501,8 @@ export async function submitRemoteMessage(message, requestedFollowMode = "", con
       steerLength: runner?.steerMessages.length || 0, steerMessages: steerMessagesFor(runner),
       followMode: runner?.followMode || await followModeForState(state, connectorId),
       contextUsage: runner?.contextUsage || contextUsage, reconnecting: Boolean(runner?.reconnecting),
+      externalRunning: Boolean(runner?.externalTurn),
+      externalTaskStartedAt: runner?.externalTurn?.taskStartedAt || "",
       threadId: state.threadId, runningThreads: runningThreads()
     };
   }
@@ -1383,7 +1520,15 @@ export async function submitRemoteMessage(message, requestedFollowMode = "", con
       runner.steerMessages.push(steerItem);
       broadcastRunner(runner, statusPayload(runner, true));
       try {
-        await runner.appServer.steerCurrentTurn(text);
+        if (runner.externalTurn) {
+          await runner.appServer.steerTurn(
+            runner.externalTurn.threadId,
+            runner.externalTurn.turnId,
+            text
+          );
+        } else {
+          await runner.appServer.steerCurrentTurn(text);
+        }
         runner.steerMessages = runner.steerMessages.filter((item) => item !== steerItem);
         const userMessage = { role: "user", content: text, at: new Date().toISOString() };
         runner.state.messages.push(userMessage);
@@ -1391,7 +1536,7 @@ export async function submitRemoteMessage(message, requestedFollowMode = "", con
         if (isRunnerSelected(runner)) await writeState(syncLoadedCounts(runner.state), runner.connectorId || "");
         broadcastRunner(runner, { type: "message", ...userMessage });
         broadcastRunner(runner, statusPayload(runner, true));
-        return { ok: true, accepted: true, steered: true, queueLength: runner.messageQueue.length, queueMessages: queueMessagesFor(runner), steerLength: runner.steerMessages.length, steerMessages: steerMessagesFor(runner), followMode: runner.followMode, reconnecting: Boolean(runner.reconnecting), threadId: runner.state.threadId, runningThreads: runningThreads() };
+        return { ok: true, accepted: true, steered: true, queueLength: runner.messageQueue.length, queueMessages: queueMessagesFor(runner), steerLength: runner.steerMessages.length, steerMessages: steerMessagesFor(runner), followMode: runner.followMode, contextUsage: runner.contextUsage, reconnecting: Boolean(runner.reconnecting), externalRunning: Boolean(runner.externalTurn), externalTaskStartedAt: runner.externalTurn?.taskStartedAt || "", threadId: runner.state.threadId, runningThreads: runningThreads() };
       } catch (error) {
         console.error("steer failed, fallback to queue", error);
         runner.steerMessages = runner.steerMessages.filter((item) => item !== steerItem);
@@ -1404,7 +1549,7 @@ export async function submitRemoteMessage(message, requestedFollowMode = "", con
     if (isRunnerSelected(runner)) await writeState(syncLoadedCounts(runner.state), runner.connectorId || "");
     broadcastRunner(runner, { type: "message", ...userMessage });
     broadcastRunner(runner, statusPayload(runner, true));
-    return { ok: true, accepted: true, queued: true, queueLength: runner.messageQueue.length, queueMessages: queueMessagesFor(runner), followMode: runner.followMode, reconnecting: Boolean(runner.reconnecting), threadId: runner.state.threadId, runningThreads: runningThreads() };
+    return { ok: true, accepted: true, queued: true, queueLength: runner.messageQueue.length, queueMessages: queueMessagesFor(runner), steerLength: runner.steerMessages.length, steerMessages: steerMessagesFor(runner), followMode: runner.followMode, contextUsage: runner.contextUsage, reconnecting: Boolean(runner.reconnecting), externalRunning: Boolean(runner.externalTurn), externalTaskStartedAt: runner.externalTurn?.taskStartedAt || "", threadId: runner.state.threadId, runningThreads: runningThreads() };
   }
   await startRemoteTask(text, state, runner);
   return { ok: true, accepted: true, queued: false, threadId: runner.state.threadId, runningThreads: runningThreads() };
@@ -1583,7 +1728,7 @@ export async function selectRemoteThread(rawThreadId, connectorId = "") {
   }
   const existingRunner = runners.get(`${connectorId ? `${connectorId}:` : ""}thread:${threadId}`);
   if (existingRunner?.running) {
-    stopExternalSessionMonitor(connectorId);
+    if (!existingRunner.externalTurn) stopExternalSessionMonitor(connectorId);
     await clearThreadCompletedUnread(threadId);
     selectedRunnerKey = existingRunner.key;
     await writeState(existingRunner.state, existingRunner.connectorId || "");
@@ -1644,6 +1789,7 @@ export async function deleteThread(threadId, connectorId = "") {
   const provider = connectorId ? remoteSessionProvider(connectorId) : localSessionProvider;
   await deleteThreadFromProvider(threadId, provider);
   await deleteThreadModelSettings(threadId, connectorId);
+  if (!connectorId) await deleteLiveVoiceTranscripts(threadId);
 }
 
 export async function createRemoteSession(rawCwd = "", connectorId = "") {

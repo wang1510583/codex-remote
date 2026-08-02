@@ -177,6 +177,86 @@ test("thread adapter reuses the web-selected thread and creates only when empty"
   assert.equal((await adapter.runtimeContext("thread-created")).threadId, "thread-created");
 });
 
+test("thread adapter restores completed bubbles from the web-selected Codex thread", async () => {
+  const adapter = new CodexRemoteThreadAdapter({
+    readStateFn: async () => ({
+      threadId: "thread-web",
+      connectorId: "",
+      cwd: "/project",
+      messages: [
+        { role: "assistant", content: "✅ 已推送到主分支。", at: "2026-08-02T08:03:00.000Z" }
+      ],
+      inflight: null
+    }),
+    readViewStateFn: async () => ({ selectedConnectorId: "" }),
+    runningThreadsFn: () => [],
+    broadcastFn: () => {},
+    loadThreadPageFn: async (threadId, connectorId) => {
+      assert.equal(threadId, "thread-web");
+      assert.equal(connectorId, "");
+      return {
+        messages: [
+          { role: "user", content: "请修改安卓软件", at: "2026-08-02T08:00:00.000Z" },
+          { role: "assistant", content: "🤔 正在构建", at: "2026-08-02T08:01:00.000Z" },
+          { role: "assistant", content: "✅ 新的 APK 已生成。", at: "2026-08-02T08:02:00.000Z" },
+          { role: "user", content: "<environment_context>hidden", at: "2026-08-02T08:02:30.000Z" }
+        ]
+      };
+    },
+    localDisabled: false
+  });
+
+  assert.deepEqual(await adapter.currentSessionConversation("thread-web"), [
+    { role: "user", text: "请修改安卓软件", channel: "final" },
+    { role: "assistant", text: "✅ 新的 APK 已生成。", channel: "final" },
+    { role: "assistant", text: "✅ 已推送到主分支。", channel: "final" }
+  ]);
+});
+
+test("voice transcripts persist with their originating thread after the web switches away", async () => {
+  let state = {
+    threadId: "thread-other",
+    connectorId: "",
+    cwd: "/other-project",
+    messages: [],
+    inflight: null
+  };
+  const transcripts = new Map();
+  const broadcasts = [];
+  const adapter = new CodexRemoteThreadAdapter({
+    readStateFn: async () => ({ ...state, messages: [...state.messages] }),
+    writeStateFn: async (next) => { state = { ...next, messages: [...next.messages] }; },
+    readViewStateFn: async () => ({ selectedConnectorId: "" }),
+    runningThreadsFn: () => [],
+    broadcastFn: (event) => broadcasts.push(event),
+    loadThreadPageFn: async () => ({ messages: [] }),
+    appendLiveVoiceTranscriptFn: async (threadId, message) => {
+      const rows = transcripts.get(threadId) || [];
+      if (rows.at(-1)?.role === message.role && rows.at(-1)?.content === message.content) {
+        return { added: false, message: rows.at(-1) };
+      }
+      rows.push(message);
+      transcripts.set(threadId, rows);
+      return { added: true, message };
+    },
+    readLiveVoiceTranscriptsFn: async (threadId) => transcripts.get(threadId) || [],
+    localDisabled: false
+  });
+
+  await adapter.recordLiveVoiceTranscript("thread-voice", "assistant", "我已经完成修改。");
+  assert.deepEqual(state.messages, []);
+  assert.equal(broadcasts.length, 0);
+
+  state = { ...state, threadId: "thread-voice", cwd: "/voice-project" };
+  assert.deepEqual(await adapter.currentSessionConversation("thread-voice"), [
+    {
+      role: "assistant",
+      text: "语音对话：我已经完成修改。",
+      channel: "final"
+    }
+  ]);
+});
+
 test("an active Live Voice session can obtain a reconnect ticket after the web switches threads", async () => {
   const lease = acquireLiveVoiceThread("thread-speaking");
   lease.update({ cwd: "/speaking", connected: false, taskRunning: true });
@@ -410,6 +490,7 @@ test("Realtime runtime keeps one app-server while audio reconnects and a task co
 function gatewayLifecycleHarness() {
   const timers = [];
   const statuses = [];
+  const transcripts = [];
   const runtimeState = {
     realtimeActive: false,
     taskRunning: false,
@@ -454,6 +535,9 @@ function gatewayLifecycleHarness() {
       },
       publishLiveVoiceStatus(status) {
         statuses.push(status);
+      },
+      recordLiveVoiceTranscript(threadId, role, text) {
+        transcripts.push({ threadId, role, text });
       }
     },
     runtimeFactory: () => runtime,
@@ -473,7 +557,7 @@ function gatewayLifecycleHarness() {
       if (timer) timer.cleared = true;
     }
   });
-  return { gateway, runtime, runtimeState, runtimeCalls, statuses, timers };
+  return { gateway, runtime, runtimeState, runtimeCalls, statuses, transcripts, timers };
 }
 
 function fakeOpenSocket() {
@@ -485,6 +569,32 @@ function fakeOpenSocket() {
     }
   };
 }
+
+test("connected Live Voice records every completed user and assistant transcript on its bound thread", async () => {
+  const { gateway, transcripts } = gatewayLifecycleHarness();
+  const session = await gateway.createSession(
+    "thread-conversation",
+    fakeOpenSocket(),
+    "offer",
+    "cove"
+  );
+
+  gateway.handleRuntimeEvent(session, {
+    type: "transcript.done",
+    role: "user",
+    text: "你好，先聊两句"
+  });
+  gateway.handleRuntimeEvent(session, {
+    type: "transcript.done",
+    role: "assistant",
+    text: "可以，我们已经连通了。"
+  });
+
+  assert.deepEqual(transcripts, [
+    { threadId: "thread-conversation", role: "user", text: "你好，先聊两句" },
+    { threadId: "thread-conversation", role: "assistant", text: "可以，我们已经连通了。" }
+  ]);
+});
 
 test("an unexpected Android disconnect reuses one runtime during the reconnect grace window", async () => {
   const {
@@ -593,6 +703,66 @@ test("explicit voice stop closes audio but keeps a delegated Codex task alive", 
   assert.equal(isLiveVoiceThreadActive("thread-detached-task"), false);
 });
 
+test("an idle thread status completes a detached task when turn/completed is missed", () => {
+  const events = [];
+  const runtime = new CodexLiveVoiceRuntime({
+    threadId: "thread-idle-fallback",
+    cwd: "/workspace",
+    onEvent: (event) => events.push(event)
+  });
+  runtime.taskRunning = true;
+  runtime.activeTurnId = "turn-missed-completion";
+
+  runtime.handleNotification({
+    method: "thread/status/changed",
+    params: {
+      threadId: "thread-idle-fallback",
+      status: { type: "idle" }
+    }
+  });
+
+  assert.equal(runtime.status().taskRunning, false);
+  assert.deepEqual(events, [
+    { type: "manager.turn.completed", status: "completed" }
+  ]);
+});
+
+test("a detached task polls thread/read and releases the Live Voice lease", async () => {
+  const {
+    gateway,
+    runtime,
+    runtimeState,
+    runtimeCalls,
+    timers
+  } = gatewayLifecycleHarness();
+  const socket = fakeOpenSocket();
+  const session = await gateway.createSession(
+    "thread-polled-completion",
+    socket,
+    "offer",
+    "cove"
+  );
+  runtimeState.taskRunning = true;
+  runtimeState.turnId = "turn-polled";
+  gateway.handleRuntimeEvent(session, {
+    type: "manager.turn.started",
+    turn_id: "turn-polled"
+  });
+  runtime.reconcileTaskStatus = async () => {
+    runtimeState.taskRunning = false;
+    runtimeState.turnId = "";
+    return false;
+  };
+
+  await gateway.detachSession(session, socket, true);
+  const poll = timers.find((timer) => timer.ms === 2_000 && !timer.cleared);
+  assert.ok(poll);
+  await poll.fn();
+
+  assert.equal(runtimeCalls.stops, 1);
+  assert.equal(isLiveVoiceThreadActive("thread-polled-completion"), false);
+});
+
 test("Android-compatible HTTP and WebSocket flow reaches the pluggable runtime", async () => {
   const sessionId = "thread-current";
   let stopped = false;
@@ -605,6 +775,10 @@ test("Android-compatible HTTP and WebSocket flow reaches the pluggable runtime",
     async getSession(id) {
       assert.equal(id, sessionId);
       return { session_id: id };
+    },
+    async currentSessionConversation(id) {
+      assert.equal(id, sessionId);
+      return [{ role: "assistant", text: "✅ Codex 任务已完成。", channel: "final" }];
     },
     async createSession() {
       return { session_id: sessionId };
@@ -666,6 +840,16 @@ test("Android-compatible HTTP and WebSocket flow reaches the pluggable runtime",
     );
     assert.equal(current.status, 200);
     assert.equal(current.body.data.session_id, sessionId);
+
+    const conversation = await requestJson(
+      port,
+      "GET",
+      `/codexremote/api/voice-agent/sessions/${sessionId}/conversation`
+    );
+    assert.equal(conversation.status, 200);
+    assert.deepEqual(conversation.body.data.conversation, [
+      { role: "assistant", text: "✅ Codex 任务已完成。", channel: "final" }
+    ]);
 
     const issued = await requestJson(
       port,

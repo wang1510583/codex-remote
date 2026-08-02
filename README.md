@@ -211,6 +211,7 @@ Android 使用的兼容端点为：
 GET  /api/voice-agent/current-session
 POST /api/voice-agent/sessions
 GET  /api/voice-agent/sessions/:threadId
+GET  /api/voice-agent/sessions/:threadId/conversation
 PUT  /api/voice-agent/current-session
 POST /api/voice-agent/sessions/:threadId/live-ticket
 WS   /api/voice-agent/sessions/:threadId/live
