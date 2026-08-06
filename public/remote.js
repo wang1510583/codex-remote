@@ -17,6 +17,7 @@ const state = {
   newCwdConnectorId: "",
   loadedCount: 0,
   messageCount: 0,
+  loadingMore: false,
   activeAssistant: null,
   assistantBubbles: new Map(),
   replyDone: false,
@@ -68,7 +69,7 @@ let realtimeReconcileTimer = 0;
 const processedEventSeqs = new Set();
 const pendingRemoteEvents = [];
 const slashCommands = [
-  { command: "/help", title: "帮助", detail: "显示当前已接入的 Codex 命令" },
+  { group: "Codex 命令", command: "/help", title: "帮助", detail: "显示当前已接入的 Codex 命令" },
   { command: "/status", title: "状态", detail: "读取 app-server、线程、模型和目录状态" },
   { command: "/model", title: "查看模型", detail: "通过 Codex CLI model/list 查看可用模型" },
   { command: "/model ", title: "切换模型", detail: "输入 /model <模型ID>，只接受 CLI 返回的可用选项" },
@@ -86,7 +87,23 @@ const slashCommands = [
   { command: "/full", title: "显示Codex完整回复", detail: fullRepliesDetail, action: toggleFullReplies },
   { command: "/result", title: "只看结果", detail: () => state.hideThoughts ? "当前只显示用户气泡和 ✅ 气泡，点击后显示全部" : "隐藏思考过程气泡，只显示用户气泡和 ✅ 气泡", action: toggleResultOnly },
   { command: "/mine", title: "只看自己", detail: () => state.onlyMine ? "当前只显示自己发送的气泡，点击后显示全部" : "只显示自己发送的消息气泡", action: toggleOnlyMine },
-  { command: "/stop", title: "中断", detail: "通过 turn/interrupt 中断当前回合" }
+  { command: "/stop", title: "中断", detail: "通过 turn/interrupt 中断当前回合" },
+  { group: "Mem0 记忆技能", command: "$mem0:onboard", title: "初始化", detail: "新项目首次使用、更新 API Key 或重新配置时运行", execute: true },
+  { command: "$mem0:health", title: "健康检查", detail: "连接、搜索或写入异常时诊断；可附加 --deep 检查记忆质量", execute: true },
+  { command: "$mem0:remember", title: "记住内容", detail: "保存重要决定、偏好、规范或经验；输入框文字会作为记忆内容", execute: true },
+  { command: "$mem0:peek", title: "快速搜索", detail: "按关键词或记忆 ID 快速查找；输入框文字会作为查询", execute: true },
+  { command: "$mem0:tour", title: "浏览记忆", detail: "查看当前项目的全部记忆；可附加 --all-projects", execute: true },
+  { command: "$mem0:stats", title: "记忆统计", detail: "查看数量、分类、时间分布和延迟；可附加 --weekly", execute: true },
+  { command: "$mem0:list-projects", title: "项目列表", detail: "查看云端有哪些记忆项目、数量和最近活动", execute: true },
+  { command: "$mem0:switch-project", title: "切换项目", detail: "覆盖当前目录的项目范围；输入项目名，或使用 --global / --no-global", execute: true },
+  { command: "$mem0:pin", title: "固定记忆", detail: "保护关键记忆不被清理；输入关键词、记忆 ID 或 unpin 指令", execute: true },
+  { command: "$mem0:forget", title: "删除记忆", detail: "查找并删除错误、过期或敏感记忆，实际删除前仍会确认", execute: true },
+  { command: "$mem0:memory-reviewer", title: "质量审查", detail: "只读检查重复、矛盾和陈旧记忆，不会修改数据", execute: true },
+  { command: "$mem0:dream", title: "整理记忆", detail: "合并重复、处理矛盾并清理陈旧记忆，应用前会显示差异并确认", execute: true },
+  { command: "$mem0:export", title: "导出备份", detail: "把当前项目全部记忆导出为 Markdown 文件", execute: true },
+  { command: "$mem0:import", title: "导入记忆", detail: "从 Mem0 导出文件或 MEMORY.md 恢复；输入框可填写文件路径", execute: true },
+  { command: "$mem0:context-loader", title: "加载上下文", detail: "开始复杂任务或切换模块时，预先加载相关历史决定和规范", execute: true },
+  { command: "$mem0:mem0", title: "SDK 帮助", detail: "编写 Python/TypeScript Mem0 API 集成代码时查看 SDK 用法", execute: true }
 ];
 
 function reasoningEffortLabel(value = "") {
@@ -576,6 +593,7 @@ function setRunning(running, queueLength = state.queueLength, queueMessages = st
   renderQueuePanel();
   updateStatusIcon();
   updateRealtimeReconcile();
+  updateLoadMore();
   if (
     wasRunning !== state.running
     || wasExternalRunning !== state.externalRunning
@@ -1571,9 +1589,30 @@ function insertCommand(command) {
   scheduleAndroidImeProbe();
 }
 
+function executeSkillCommand(command) {
+  const text = composerText().trim();
+  if (text.startsWith("$mem0:")) {
+    els.input.value = text.replace(/^\$mem0:\S+/, command);
+  } else {
+    els.input.value = text ? `${command} ${text}` : command;
+  }
+  saveDraft();
+  closeCommandMenu();
+  autosizeInput();
+  sendMessage("steer");
+}
+
 function renderCommandList() {
   els.commandList.innerHTML = "";
+  let currentGroup = "";
   for (const item of slashCommands) {
+    if (item.group && item.group !== currentGroup) {
+      currentGroup = item.group;
+      const heading = document.createElement("div");
+      heading.className = "commandGroup";
+      heading.textContent = currentGroup;
+      els.commandList.appendChild(heading);
+    }
     const button = document.createElement("button");
     button.className = "commandItem";
     button.type = "button";
@@ -1581,7 +1620,11 @@ function renderCommandList() {
     button.querySelector("strong").textContent = item.command;
     button.querySelector("span").textContent = item.title;
     button.querySelector("small").textContent = typeof item.detail === "function" ? item.detail() : item.detail;
-    button.addEventListener("click", () => item.action ? item.action() : insertCommand(item.command));
+    button.addEventListener("click", () => {
+      if (item.action) item.action();
+      else if (item.execute) executeSkillCommand(item.command);
+      else insertCommand(item.command);
+    });
     els.commandList.appendChild(button);
   }
 }
@@ -1967,18 +2010,37 @@ function updateLoadMore() {
   }
   const hasMore = state.threadId && state.messageCount > state.loadedCount;
   els.loadMore.hidden = !hasMore;
-  els.loadMore.textContent = hasMore ? `加载更多（${state.loadedCount}/${state.messageCount}）` : "加载更多";
+  els.loadMore.disabled = Boolean(state.loadingMore || state.running);
+  els.loadMore.textContent = !hasMore
+    ? "加载更多"
+    : state.loadingMore
+      ? `正在加载（${state.loadedCount}/${state.messageCount}）...`
+      : state.running
+        ? `任务完成后可加载（${state.loadedCount}/${state.messageCount}）`
+        : `加载更多（${state.loadedCount}/${state.messageCount}）`;
 }
 
 async function loadMoreMessages() {
-  if (!state.threadId || state.running) return;
+  if (!state.threadId || state.running || state.loadingMore) return;
   const connectorId = currentConnectorId();
+  const threadId = state.threadId;
   const previousHeight = els.logWrap.scrollHeight;
-  const data = await request("/api/remote/more", { method: "POST", connectorId });
-  if (connectorId !== currentConnectorId()) return;
-  renderState(data);
-  els.logWrap.scrollTop = Math.max(0, els.logWrap.scrollHeight - previousHeight);
-  updateScrollJumps();
+  state.loadingMore = true;
+  updateLoadMore();
+  try {
+    const data = await request("/api/remote/more", {
+      method: "POST",
+      connectorId,
+      body: JSON.stringify({ threadId })
+    });
+    if (connectorId !== currentConnectorId() || threadId !== state.threadId) return;
+    renderState(data);
+    els.logWrap.scrollTop = Math.max(0, els.logWrap.scrollHeight - previousHeight);
+    updateScrollJumps();
+  } finally {
+    state.loadingMore = false;
+    updateLoadMore();
+  }
 }
 
 function threadSubtitle(thread, isActive = false) {

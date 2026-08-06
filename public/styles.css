@@ -1768,9 +1768,22 @@ textarea:focus {
   gap: 8px;
 }
 
+.commandGroup {
+  position: sticky;
+  top: -10px;
+  z-index: 1;
+  margin: 2px -2px 0;
+  padding: 8px 4px 5px;
+  color: #d7b866;
+  background: #111;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
 .commandItem {
   display: grid;
-  grid-template-columns: 96px 68px minmax(0, 1fr);
+  grid-template-columns: 164px 80px minmax(0, 1fr);
   gap: 8px;
   width: 100%;
   align-items: center;
@@ -2017,7 +2030,7 @@ textarea:focus {
   }
 
   .commandItem {
-    grid-template-columns: 88px minmax(0, 1fr);
+    grid-template-columns: 156px minmax(0, 1fr);
   }
 
   .commandItem small {

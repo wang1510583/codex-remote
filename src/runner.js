@@ -1855,9 +1855,9 @@ export async function selectRemoteThread(rawThreadId, connectorId = "") {
   return payload;
 }
 
-export async function loadThreadPage(threadId, connectorId = "") {
+export async function loadThreadPage(threadId, connectorId = "", limit = 1000) {
   const provider = connectorId ? remoteSessionProvider(connectorId) : localSessionProvider;
-  return loadThreadFromProvider(threadId, provider, 1000);
+  return loadThreadFromProvider(threadId, provider, limit);
 }
 
 export async function deleteThread(threadId, connectorId = "") {

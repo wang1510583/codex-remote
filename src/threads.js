@@ -669,8 +669,9 @@ export async function loadThreadFromProvider(threadId, provider = localSessionPr
   const files = await provider.listFiles();
   const hit = files.find((item) => threadIdFromFile(item.file) === threadId);
   if (!hit) throw new Error("没有找到这个 Codex 会话。");
+  const requestedLimit = Math.max(defaultMessageLimit, Math.floor(Number(limit) || defaultMessageLimit));
   return {
-    ...parseSessionFile(await provider.readFile(hit.file), hit.file, Math.max(defaultMessageLimit, Math.min(Number(limit) || defaultMessageLimit, 1000))),
+    ...parseSessionFile(await provider.readFile(hit.file), hit.file, requestedLimit),
     file: hit.file,
     mtimeMs: Number(hit.mtimeMs) || 0
   };

@@ -2,10 +2,11 @@ import { createReadStream, existsSync } from "node:fs";
 import { rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { ZipArchive } from "archiver";
-import { publicDir } from "./config.js";
+import {
+  publicDir, messagePageSize, remotePassword, authToken, codexWorkDir, disableLocal
+} from "./config.js";
 import { json, readBody, mimeType, safeCompare, cleanText } from "./utils.js";
 import { isAuthenticated, routePath, routeBase, isPublicPath, redirectToLogin, authCookie } from "./auth.js";
-import { remotePassword, authToken, codexWorkDir, disableLocal } from "./config.js";
 import { clients, broadcast, sendSnapshot, changesSince, currentEventSeq } from "./sse.js";
 import {
   readState, writeState, saveDraftForState, draftForState, syncLoadedCounts,
@@ -748,7 +749,11 @@ export async function handle(req, res) {
       const connectorId = cleanConnectorIdValue(body.connectorId || "");
       const state = await readState(connectorId);
       if (!state.threadId) return json(res, 400, { error: "当前没有会话。" });
-      const thread = await loadThreadPage(state.threadId, connectorId);
+      if (body.threadId && body.threadId !== state.threadId) {
+        return json(res, 409, { error: "会话已经切换，请重新点击加载更多。" });
+      }
+      const nextLimit = Math.max(Number(state.loadedCount) || 0, messagePageSize) + messagePageSize;
+      const thread = await loadThreadPage(state.threadId, connectorId, nextLimit);
       const sessionMessages = await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages);
       const persistentVoiceMessages = !connectorId
         ? await readLiveVoiceTranscripts(state.threadId).catch(() => [])
