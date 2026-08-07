@@ -58,7 +58,10 @@ const state = {
   modelOptions: [],
   localConnectorRemark: "",
   disableLocal: false,
-  localNotices: []
+  localNotices: [],
+  pendingApproval: null,
+  pendingApprovalQueue: [],
+  pendingApprovalSubmitting: false
 };
 const basePath = ["/codexremote", "/codex-remote"].find((path) => location.pathname === path || location.pathname.startsWith(`${path}/`)) || "";
 const draftPrefix = "codex-remote-draft:";
@@ -197,7 +200,14 @@ const els = {
   uploadList: document.querySelector("#uploadList"),
   statusIcon: document.querySelector("#remoteStatusIcon"),
   meta: document.querySelector("#remoteMeta"),
-  mode: document.querySelector("#remoteMode")
+  mode: document.querySelector("#remoteMode"),
+  approvalModal: document.querySelector("#approvalModal"),
+  approvalKind: document.querySelector("#approvalKind"),
+  approvalTitle: document.querySelector("#approvalTitle"),
+  approvalMeta: document.querySelector("#approvalMeta"),
+  approvalBody: document.querySelector("#approvalBody"),
+  approvalActions: document.querySelector("#approvalActions"),
+  approvalStatus: document.querySelector("#approvalStatus")
 };
 
 function notificationPermission() {
@@ -1698,6 +1708,9 @@ function renderState(data) {
   // supersedes older /state requests that may still be in flight.
   stateLoadGeneration += 1;
   saveDraft();
+  if (Array.isArray(data.pendingApprovals)) {
+    for (const approval of data.pendingApprovals) queueApprovalRequest(approval);
+  }
   const previousConnectorId = state.selectedConnectorId || "";
   if (data.connectorId !== undefined) state.selectedConnectorId = data.connectorId || "";
   if (Array.isArray(data.connectors)) state.connectors = data.connectors;
@@ -3002,8 +3015,298 @@ function processRemoteEvents(events = [], floorSequence = 0) {
   }
 }
 
+function approvalKindLabel(kind = "") {
+  return ({
+    command: "命令",
+    file: "文件",
+    permission: "权限",
+    input: "输入",
+    elicitation: "表单",
+    tool: "工具",
+    guardian: "安全",
+    approval: "确认"
+  })[kind] || "确认";
+}
+
+function queueApprovalRequest(request = {}) {
+  if (!request?.requestId) return;
+  const key = String(request.requestId);
+  const alreadyQueued = state.pendingApprovalQueue.some((item) => String(item.requestId || "") === key)
+    || (state.pendingApproval && String(state.pendingApproval.requestId || "") === key);
+  if (alreadyQueued) return;
+  state.pendingApprovalQueue.push(request);
+  showNextApproval();
+}
+
+function showNextApproval() {
+  if (state.pendingApproval || state.pendingApprovalSubmitting || !els.approvalModal) return;
+  const next = state.pendingApprovalQueue.shift();
+  if (!next) return;
+  state.pendingApproval = next;
+  renderApprovalModal(next);
+  els.approvalModal.hidden = false;
+  requestAnimationFrame(() => {
+    const primary = els.approvalActions.querySelector(".approvalPrimary");
+    primary?.focus();
+  });
+}
+
+function clearApprovalModal() {
+  state.pendingApproval = null;
+  state.pendingApprovalSubmitting = false;
+  if (els.approvalModal) els.approvalModal.hidden = true;
+}
+
+function resolveApprovalRequest(requestId = "") {
+  const key = String(requestId || "");
+  state.pendingApprovalQueue = state.pendingApprovalQueue.filter((item) => String(item.requestId || "") !== key);
+  if (state.pendingApproval && String(state.pendingApproval.requestId || "") === key) {
+    clearApprovalModal();
+  }
+  showNextApproval();
+}
+
+function approvalBodyHtml(request = {}) {
+  const sections = [];
+  const addSection = (label, html) => {
+    sections.push(`<section class="approvalSection"><div class="approvalLabel">${escapeHtml(label)}</div>${html}</section>`);
+  };
+  if (request.summary) addSection("请求内容", `<div class="approvalSummary">${escapeHtml(request.summary)}</div>`);
+  if (request.reason) addSection("原因", `<div class="approvalSummary">${escapeHtml(request.reason)}</div>`);
+  if (request.cwd) addSection("目录", `<div class="approvalSummary">${escapeHtml(request.cwd)}</div>`);
+  if (request.command) addSection("命令", `<pre class="approvalCode">${escapeHtml(request.command)}</pre>`);
+  if (Array.isArray(request.files) && request.files.length) {
+    addSection("文件", request.files.map((file) => `
+      <div class="approvalFile">
+        <strong title="${escapeHtml(file.path || "")}">${escapeHtml(file.path || "")}</strong>
+        <small>${escapeHtml(file.type || "")}</small>
+        ${file.detail ? `<pre class="approvalDiff">${escapeHtml(file.detail)}</pre>` : ""}
+      </div>
+    `).join(""));
+  }
+  if (request.permissions) addSection("权限", permissionSummaryHtml(request.permissions));
+  if (Array.isArray(request.questions) && request.questions.length) {
+    addSection("问题", request.questions.map((question, index) => approvalQuestionHtml(question, index)).join(""));
+  }
+  if (request.message) addSection("消息", `<div class="approvalSummary">${escapeHtml(request.message)}</div>`);
+  if (request.schema && typeof request.schema === "object") {
+    addSection("表单", elicitationFieldsHtml(request.schema));
+  }
+  if (request.tool) addSection("工具", `<div class="approvalSummary">${escapeHtml(request.tool)}</div>`);
+  if (request.arguments !== null && request.arguments !== undefined) {
+    addSection("参数", `<pre class="approvalJson">${escapeHtml(JSON.stringify(request.arguments, null, 2))}</pre>`);
+  }
+  if (request.event) addSection("拦截详情", `<pre class="approvalJson">${escapeHtml(JSON.stringify(request.event, null, 2))}</pre>`);
+  return sections.join("");
+}
+
+function permissionSummaryHtml(permissions = {}) {
+  const rows = [];
+  const fileSystem = permissions.fileSystem;
+  if (fileSystem) {
+    const entries = Array.isArray(fileSystem.entries) ? fileSystem.entries : [];
+    const read = Array.isArray(fileSystem.read) ? fileSystem.read : [];
+    const write = Array.isArray(fileSystem.write) ? fileSystem.write : [];
+    const parts = [];
+    for (const entry of entries) parts.push(`${entry.access || ""} ${pathPermissionLabel(entry.path || "")}`);
+    for (const item of read) parts.push(`读 ${item}`);
+    for (const item of write) parts.push(`写 ${item}`);
+    rows.push(`<div>文件系统：${escapeHtml(parts.join("，") || "请求文件系统权限")}</div>`);
+  }
+  if (permissions.network) {
+    rows.push(`<div>网络：${escapeHtml(permissions.network.enabled ? "启用网络" : "受限网络")}</div>`);
+  }
+  return rows.join("") || "<div>未请求额外权限</div>";
+}
+
+function pathPermissionLabel(value = "") {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") return value.path || value.pattern || value.value || "";
+  return "";
+}
+
+function approvalQuestionHtml(question = {}, index = 0) {
+  const questionId = question.id || `question-${index}`;
+  const options = Array.isArray(question.options) ? question.options : [];
+  const optionName = `approval-question-${questionId}`;
+  const optionsHtml = options.map((option, optionIndex) => `
+    <label class="approvalOption">
+      <input type="${question.isOther ? "checkbox" : "radio"}" name="${escapeHtml(optionName)}" value="${escapeHtml(option.label || option.description || String(optionIndex))}" ${optionIndex === 0 && !question.isOther ? "checked" : ""}>
+      <span>${escapeHtml(option.label || "")}${option.description ? ` <small>${escapeHtml(option.description)}</small>` : ""}</span>
+    </label>
+  `).join("");
+  const inputHtml = question.isSecret
+    ? `<input class="approvalInput" data-approval-question="${escapeHtml(questionId)}" type="password" placeholder="输入回答">`
+    : `<textarea class="approvalTextarea" data-approval-question="${escapeHtml(questionId)}" placeholder="输入回答"></textarea>`;
+  return `
+    <div class="approvalQuestion" data-question-id="${escapeHtml(questionId)}">
+      <strong>${escapeHtml(question.header || question.question || `问题 ${index + 1}`)}</strong>
+      ${question.question ? `<p>${escapeHtml(question.question)}</p>` : ""}
+      ${optionsHtml || inputHtml}
+    </div>
+  `;
+}
+
+function elicitationFieldsHtml(schema = {}) {
+  const properties = schema.properties || {};
+  return Object.entries(properties).map(([name, prop]) => {
+    const label = prop?.title || name;
+    const description = prop?.description || "";
+    let control = "";
+    if (prop?.type === "boolean") {
+      control = `<label class="approvalOption"><input class="approvalInput" data-elicitation-field="${escapeHtml(name)}" type="checkbox" ${prop.default ? "checked" : ""}><span>${escapeHtml(prop.default ? "默认开启" : "默认关闭")}</span></label>`;
+    } else if (Array.isArray(prop?.enum)) {
+      control = `<select class="approvalSelect" data-elicitation-field="${escapeHtml(name)}">${prop.enum.map((option) => `<option value="${escapeHtml(option)}" ${prop.default === option ? "selected" : ""}>${escapeHtml(option)}</option>`).join("")}</select>`;
+    } else {
+      control = `<input class="approvalInput" data-elicitation-field="${escapeHtml(name)}" value="${escapeHtml(prop?.default ?? "")}" placeholder="${escapeHtml(prop?.format || "")}">`;
+    }
+    return `<div class="approvalQuestion"><strong>${escapeHtml(label)}</strong>${description ? `<p>${escapeHtml(description)}</p>` : ""}${control}</div>`;
+  }).join("");
+}
+
+function renderApprovalModal(request = {}) {
+  if (!els.approvalKind || !els.approvalTitle) return;
+  const kindLabel = approvalKindLabel(request.kind);
+  els.approvalKind.textContent = kindLabel;
+  els.approvalTitle.textContent = request.title || `${kindLabel}确认`;
+  els.approvalMeta.textContent = [request.threadId, request.turnId, request.method].filter(Boolean).join(" · ");
+  els.approvalBody.innerHTML = approvalBodyHtml(request);
+  renderApprovalActions(request);
+  els.approvalStatus.textContent = "";
+}
+
+function approvalButton(label = "", decision = "", options = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  if (options.primary) button.classList.add("approvalPrimary", "primary");
+  if (options.danger) button.classList.add("danger");
+  if (options.wide) button.classList.add("approvalActionWide");
+  button.addEventListener("click", () => {
+    if (decision === "submit") submitApprovalFromModal();
+    else submitApproval(decision);
+  });
+  return button;
+}
+
+function renderApprovalActions(request = {}) {
+  if (!els.approvalActions) return;
+  els.approvalActions.innerHTML = "";
+  const actions = [];
+  if (request.kind === "command" || request.kind === "file") {
+    actions.push(approvalButton("允许", "accept", { primary: true }));
+    if (request.canAcceptForSession !== false) actions.push(approvalButton("本次会话允许", "acceptForSession"));
+    actions.push(approvalButton("拒绝继续", "decline", { danger: true }));
+    actions.push(approvalButton("拒绝并中断", "cancel", { danger: true, wide: true }));
+  } else if (request.kind === "permission") {
+    actions.push(approvalButton("允许本次", "accept", { primary: true }));
+    actions.push(approvalButton("本次会话允许", "acceptForSession"));
+    actions.push(approvalButton("拒绝", "decline", { danger: true }));
+  } else if (request.kind === "input") {
+    actions.push(approvalButton("提交回答", "submit", { primary: true }));
+    actions.push(approvalButton("取消", "cancel", { danger: true }));
+  } else if (request.kind === "elicitation") {
+    actions.push(approvalButton("接受", "submit", { primary: true }));
+    actions.push(approvalButton("拒绝", "decline", { danger: true }));
+    actions.push(approvalButton("取消", "cancel", { danger: true }));
+  } else if (request.kind === "tool") {
+    actions.push(approvalButton("允许调用", "allow", { primary: true }));
+    actions.push(approvalButton("拒绝", "decline", { danger: true }));
+    actions.push(approvalButton("取消", "cancel", { danger: true, wide: true }));
+  } else if (request.kind === "guardian") {
+    actions.push(approvalButton("批准操作", "accept", { primary: true }));
+    actions.push(approvalButton("拒绝", "decline", { danger: true }));
+  } else {
+    actions.push(approvalButton("允许", "accept", { primary: true }));
+    actions.push(approvalButton("拒绝", "decline", { danger: true }));
+  }
+  for (const action of actions) els.approvalActions.appendChild(action);
+}
+
+function setApprovalStatus(message = "") {
+  if (els.approvalStatus) els.approvalStatus.textContent = message;
+}
+
+function setApprovalButtonsDisabled(disabled = false) {
+  for (const button of els.approvalActions?.querySelectorAll("button") || []) {
+    button.disabled = disabled;
+  }
+}
+
+async function submitApproval(decision = "", payload = {}) {
+  if (!state.pendingApproval || state.pendingApprovalSubmitting) return;
+  state.pendingApprovalSubmitting = true;
+  setApprovalStatus("正在提交确认...");
+  setApprovalButtonsDisabled(true);
+  try {
+    await request("/api/remote/approval/respond", {
+      method: "POST",
+      body: JSON.stringify({
+        requestId: state.pendingApproval.requestId,
+        decision,
+        ...payload
+      })
+    });
+    const requestId = state.pendingApproval.requestId;
+    state.pendingApprovalQueue = state.pendingApprovalQueue.filter((item) => String(item.requestId || "") !== String(requestId));
+    clearApprovalModal();
+    showNextApproval();
+  } catch (error) {
+    state.pendingApprovalSubmitting = false;
+    setApprovalStatus(error.message || "提交失败。");
+    setApprovalButtonsDisabled(false);
+  }
+}
+
+function submitApprovalFromModal() {
+  const request = state.pendingApproval;
+  if (!request) return;
+  const payload = {};
+  if (request.kind === "input") {
+    const answers = {};
+    for (const root of els.approvalBody.querySelectorAll("[data-question-id]")) {
+      const questionId = root.dataset.questionId;
+      const selected = [...root.querySelectorAll(`input[name="${CSS.escape(`approval-question-${questionId}`)}"]:checked`)].map((input) => input.value);
+      if (selected.length) {
+        answers[questionId] = { answers: selected };
+        continue;
+      }
+      const field = root.querySelector("[data-approval-question]");
+      if (field && String(field.value || "").trim()) {
+        answers[questionId] = { answers: [field.value.trim()] };
+      }
+    }
+    payload.answers = answers;
+    if (!Object.keys(answers).length) {
+      setApprovalStatus("请至少填写一个回答。");
+      return;
+    }
+  }
+  if (request.kind === "elicitation") {
+    const content = {};
+    for (const field of els.approvalBody.querySelectorAll("[data-elicitation-field]")) {
+      const name = field.dataset.elicitationField;
+      if (field.type === "checkbox") content[name] = field.checked;
+      else content[name] = field.value;
+    }
+    payload.content = content;
+    const required = Array.isArray(request.schema?.required) ? request.schema.required : [];
+    const missing = required.filter((name) => {
+      const value = content[name];
+      return value === undefined || value === null || String(value).trim() === "";
+    });
+    if (missing.length) {
+      setApprovalStatus(`请填写必填项：${missing.join("、")}`);
+      return;
+    }
+  }
+  submitApproval("accept", payload);
+}
+
 function handleRemoteEvent(data) {
   if (!rememberRemoteEvent(data)) return;
+  if (data.type === "approval_request") { queueApprovalRequest(data); return; }
+  if (data.type === "approval_resolved") { resolveApprovalRequest(data.requestId); return; }
   if (data.type === "connectors_changed") { loadConnectors().catch(() => {}); return; }
   if (data.type === "connector_selected") {
     const nextId = data.selectedConnectorId || "";

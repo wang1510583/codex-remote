@@ -8,7 +8,7 @@
     <link rel="manifest" href="site.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="icon.svg" />
     <link rel="apple-touch-icon" href="icon.svg" />
-    <link rel="stylesheet" href="styles.css?v=20260730-live-voice-coordinator" />
+    <link rel="stylesheet" href="styles.css?v=20260807-approval-modal" />
   </head>
   <body class="remotePage">
     <main class="remoteApp">
@@ -220,7 +220,21 @@
         <div id="uploadList" class="uploadList" hidden></div>
       </form>
     </main>
+    <div id="approvalModal" class="approvalModal" role="dialog" aria-modal="true" aria-labelledby="approvalTitle" hidden>
+      <div class="approvalDialog">
+        <header class="approvalTop">
+          <div>
+            <span id="approvalKind" class="approvalKind">确认</span>
+            <h2 id="approvalTitle" class="approvalTitle">Codex 请求确认</h2>
+          </div>
+          <span id="approvalMeta" class="approvalMeta"></span>
+        </header>
+        <div id="approvalBody" class="approvalBody"></div>
+        <div id="approvalActions" class="approvalActions"></div>
+        <div id="approvalStatus" class="approvalStatus" aria-live="polite"></div>
+      </div>
+    </div>
     <script src="pwa.js"></script>
-    <script src="remote.js?v=20260730-live-voice-coordinator"></script>
+    <script src="remote.js?v=20260807-approval-modal"></script>
   </body>
 </html>

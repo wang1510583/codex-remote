@@ -11,7 +11,7 @@ function jsonl(rows) {
   return rows.map((row) => JSON.stringify(row)).join("\n");
 }
 
-test("Gemini 3.6 Flash High and mimo-v2.5-pro are added to the selectable model list", () => {
+test("supplemental models are added to the selectable model list with High effort", () => {
   const options = withSupplementalModelOptions([{
     id: "gpt-5.6-sol",
     model: "gpt-5.6-sol",
@@ -31,6 +31,13 @@ test("Gemini 3.6 Flash High and mimo-v2.5-pro are added to the selectable model 
   assert.equal(mimo.displayName, "mimo-v2.5-pro");
   assert.equal(mimo.defaultReasoningEffort, "high");
   assert.deepEqual(mimo.supportedReasoningEfforts, [{ reasoningEffort: "high" }]);
+
+  const deepseek = options.find((item) => item.model === "deepseek-v4-flash");
+  assert.ok(deepseek);
+  assert.equal(deepseek.id, "deepseek-v4-flash");
+  assert.equal(deepseek.displayName, "deepseek-v4-flash");
+  assert.equal(deepseek.defaultReasoningEffort, "high");
+  assert.deepEqual(deepseek.supportedReasoningEfforts, [{ reasoningEffort: "high" }]);
 });
 
 test("a model already reported by Codex is not duplicated by the supplemental list", () => {
@@ -44,11 +51,17 @@ test("a model already reported by Codex is not duplicated by the supplemental li
     model: "mimo-v2.5-pro",
     displayName: "Provider Mimo"
   };
-  const options = withSupplementalModelOptions([reportedGemini, reportedMimo]);
+  const reportedDeepseek = {
+    id: "deepseek-v4-flash",
+    model: "deepseek-v4-flash",
+    displayName: "Provider DeepSeek"
+  };
+  const options = withSupplementalModelOptions([reportedGemini, reportedMimo, reportedDeepseek]);
 
-  assert.equal(options.length, 2);
+  assert.equal(options.length, 3);
   assert.equal(options[0], reportedGemini);
   assert.equal(options[1], reportedMimo);
+  assert.equal(options[2], reportedDeepseek);
 });
 
 test("Gemini 3.6 Flash High can be selected and applies High effort", async () => {
@@ -75,6 +88,33 @@ test("Gemini 3.6 Flash High can be selected and applies High effort", async () =
     cwd: "/workspace"
   });
   assert.equal(result.model, "gemini-3.6-flash-high");
+  assert.equal(result.effort, "high");
+});
+
+test("deepseek-v4-flash can be selected and applies High effort", async () => {
+  const server = new CodexAppServer({}, { isRemote: true });
+  server.listModels = async () => ({ data: [{ id: "gpt-5.6-sol", model: "gpt-5.6-sol" }] });
+  server.readThreadSettings = async () => ({ model: "gpt-5.6-sol", reasoningEffort: "medium" });
+  let applied = null;
+  server.updateThreadModelSettings = async (update) => {
+    applied = update;
+    return { model: update.model, effort: update.effort };
+  };
+
+  const result = await server.selectModel(
+    "deepseek-v4-flash",
+    "medium",
+    "thread-1",
+    "/workspace"
+  );
+
+  assert.deepEqual(applied, {
+    model: "deepseek-v4-flash",
+    effort: "high",
+    threadId: "thread-1",
+    cwd: "/workspace"
+  });
+  assert.equal(result.model, "deepseek-v4-flash");
   assert.equal(result.effort, "high");
 });
 

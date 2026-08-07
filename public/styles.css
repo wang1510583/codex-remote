@@ -2069,3 +2069,229 @@ textarea:focus {
     font-size: 12px;
   }
 }
+
+.approvalModal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 14px;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.approvalModal[hidden] {
+  display: none;
+}
+
+.approvalDialog {
+  width: min(680px, 100%);
+  max-height: min(760px, 92vh);
+  overflow: auto;
+  border: 1px solid #5d5790;
+  border-radius: 8px;
+  background: #131313;
+  color: #f3f0e8;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+}
+
+.approvalTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.approvalKind {
+  display: inline-block;
+  margin-bottom: 6px;
+  padding: 2px 8px;
+  border: 1px solid #5d5790;
+  border-radius: 6px;
+  background: #36345f;
+  color: #d7d4ff;
+  font-size: 11px;
+}
+
+.approvalTitle {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.approvalMeta {
+  max-width: 46%;
+  overflow: hidden;
+  color: #9a9a9a;
+  font-size: 11px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approvalBody {
+  display: grid;
+  gap: 12px;
+  padding: 16px 18px;
+}
+
+.approvalSection {
+  display: grid;
+  gap: 6px;
+}
+
+.approvalLabel {
+  color: #b9b3a8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.approvalSummary {
+  color: #e7e2d8;
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.approvalCode,
+.approvalDiff,
+.approvalJson {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #050505;
+  color: #c8c8c8;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.approvalFile {
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  background: #171717;
+}
+
+.approvalFile strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approvalFile small {
+  color: #9a9a9a;
+  font-size: 11px;
+}
+
+.approvalQuestion {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  background: #171717;
+}
+
+.approvalQuestion strong {
+  color: #e7e2d8;
+  font-size: 14px;
+}
+
+.approvalQuestion p {
+  margin: 0;
+  color: #b9b3a8;
+  font-size: 12px;
+}
+
+.approvalOption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #d1d5db;
+  font-size: 13px;
+}
+
+.approvalInput,
+.approvalSelect,
+.approvalTextarea {
+  width: 100%;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #050505;
+  color: #f3f0e8;
+  padding: 9px 10px;
+  font: inherit;
+  outline: none;
+}
+
+.approvalTextarea {
+  min-height: 76px;
+  resize: vertical;
+}
+
+.approvalInput:focus,
+.approvalSelect:focus,
+.approvalTextarea:focus {
+  border-color: #a78bfa;
+}
+
+.approvalActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 4px 18px 14px;
+}
+
+.approvalActions button {
+  min-height: 38px;
+}
+
+.approvalStatus {
+  min-height: 20px;
+  padding: 0 18px 14px;
+  color: #ffbeb3;
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .approvalModal {
+    align-items: end;
+    padding: 8px;
+  }
+
+  .approvalDialog {
+    width: 100%;
+    max-height: 88vh;
+    border-radius: 8px;
+  }
+
+  .approvalTop {
+    display: grid;
+  }
+
+  .approvalMeta {
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .approvalActions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .approvalActions .approvalActionWide {
+    grid-column: 1 / -1;
+  }
+}

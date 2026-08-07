@@ -20,7 +20,8 @@ import {
   selectedRunner, setSelectedRunnerKey, clearThreadCompletedUnread, markInterruptedInflight,
   runningThreads, runnerKeyForState, ensureStateModelSettings,
   runnerStatePayload, sessionModelSettingsPayload, updateSessionModelSettings, usagePayload, resetUsageLimit,
-  syncSharedThreadSettings, liveFullMessagesFor, reconcileExternalSessionStatus
+  syncSharedThreadSettings, liveFullMessagesFor, reconcileExternalSessionStatus,
+  pendingApprovalsPayload, respondToRemoteApproval
 } from "./runner.js";
 import {
   isInternalMessage, mergeLocalMessageMeta, limitFullReplyMessages
@@ -365,6 +366,7 @@ export async function handle(req, res) {
         )
         : undefined;
       const connectorsPayload = await remoteConnectorsPayload();
+      const pendingApprovals = pendingApprovalsPayload(connectorId);
       return json(res, 200, {
         ...payload,
         fullMessages,
@@ -391,6 +393,7 @@ export async function handle(req, res) {
         localRemark: connectorsPayload.localRemark || "",
         selectedConnectorId: connectorId,
         disableLocal,
+        pendingApprovals,
         eventSeq: snapshotEventSeq
       });
     }
@@ -450,6 +453,11 @@ export async function handle(req, res) {
       const connectorId = cleanConnectorIdValue(body.connectorId || "");
       await saveDraftForState({ threadId: body.threadId || "", cwd: body.cwd || "" }, body.text || "", connectorId);
       return json(res, 200, { ok: true });
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/remote/approval/respond") {
+      const body = await readBody(req, 1024 * 1024);
+      return json(res, 200, { ok: true, ...await respondToRemoteApproval(body) });
     }
 
     if (req.method === "GET" && url.pathname === "/api/remote/ssh/status") {

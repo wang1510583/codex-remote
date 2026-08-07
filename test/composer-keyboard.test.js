@@ -207,5 +207,5 @@ test("composer send actions default to steer while retaining an explicit queue b
   assert.doesNotMatch(html, /id="remoteInput"[^>]*placeholder=/);
   assert.match(html, /id="sendQueueRemote" class="iconButton" type="button"/);
   assert.match(html, /id="sendSteerRemote" class="iconButton primary" type="submit"/);
-  assert.match(html, /remote\.js\?v=20260730-live-voice-coordinator/);
+  assert.match(html, /remote\.js\?v=20260807-approval-modal/);
 });
