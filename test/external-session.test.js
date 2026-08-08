@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { CodexAppServer } from "../src/codex-server.js";
-import { externalSnapshotFromThread, isExternalTaskRunning } from "../src/external-sessions.js";
+import {
+  applyExternalRuntimeStatus, externalSnapshotFromThread, isExternalTaskRunning
+} from "../src/external-sessions.js";
 import { parseSessionFile } from "../src/threads.js";
 
 function jsonl(rows) {
@@ -102,6 +104,39 @@ test("turn_aborted ends an externally observed task", () => {
 test("an abandoned task_started becomes idle after the stale window", () => {
   assert.equal(isExternalTaskRunning({ taskRunning: true }, Date.now() - (3 * 60 * 60 * 1000)), false);
   assert.equal(isExternalTaskRunning({ taskRunning: false }, Date.now()), false);
+});
+
+test("an authoritative idle runtime clears a recent stale JSONL running state", async () => {
+  const snapshot = externalSnapshotFromThread({
+    threadId: "99999999-9999-4999-8999-999999999999",
+    taskRunning: true,
+    activeTurnId: "aaaaaaaa-9999-4999-8999-999999999999",
+    mtimeMs: Date.now()
+  });
+  const reconciled = await applyExternalRuntimeStatus(snapshot, async (current) => ({
+    ...current,
+    running: false,
+    externalRunning: false,
+    runtimeStatus: { type: "idle" }
+  }));
+
+  assert.equal(reconciled.running, false);
+  assert.equal(reconciled.externalRunning, false);
+  assert.equal(isExternalTaskRunning(reconciled, reconciled.mtimeMs), false);
+});
+
+test("runtime reconciliation failures keep a recent external task running", async () => {
+  const snapshot = externalSnapshotFromThread({
+    threadId: "bbbbbbbb-9999-4999-8999-999999999999",
+    taskRunning: true,
+    mtimeMs: Date.now()
+  });
+  const reconciled = await applyExternalRuntimeStatus(snapshot, async () => {
+    throw new Error("shared app-server unavailable");
+  });
+
+  assert.equal(reconciled.running, true);
+  assert.equal(reconciled.externalRunning, true);
 });
 
 test("external session monitor supports local and connector session providers", async () => {

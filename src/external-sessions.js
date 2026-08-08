@@ -9,6 +9,23 @@ import {
 const monitors = new Map();
 const snapshots = new Map();
 const updateListeners = new Set();
+let runtimeStatusResolver = null;
+
+export function setExternalSessionRuntimeStatusResolver(resolver = null) {
+  runtimeStatusResolver = typeof resolver === "function" ? resolver : null;
+}
+
+export async function applyExternalRuntimeStatus(snapshot = {}, resolver = runtimeStatusResolver) {
+  if (!snapshot?.running || typeof resolver !== "function") return snapshot;
+  try {
+    return await resolver(snapshot) || snapshot;
+  } catch {
+    // A transient app-server failure must not allow a second writer into a
+    // turn that may still be running. Keep the persisted JSONL status until an
+    // authoritative runtime response or the stale-file fallback says idle.
+    return snapshot;
+  }
+}
 
 export function onExternalSessionUpdate(listener) {
   if (typeof listener !== "function") return () => {};
@@ -46,6 +63,7 @@ function normalizedMtime(value) {
 
 export function isExternalTaskRunning(thread = {}, mtimeMs = thread.mtimeMs) {
   if (!thread?.taskRunning) return false;
+  if (thread.runtimeStatus?.type === "idle") return false;
   const modifiedAt = normalizedMtime(mtimeMs);
   if (!modifiedAt || !Number.isFinite(externalSessionStaleMs) || externalSessionStaleMs <= 0) return true;
   return Date.now() - modifiedAt <= externalSessionStaleMs;
@@ -107,10 +125,12 @@ async function readSnapshot(threadId, connectorId = "", previous = null) {
   const mtimeMs = normalizedMtime(hit.mtimeMs);
   if (previous?.file === hit.file && previous.mtimeMs === mtimeMs) {
     const running = isExternalTaskRunning(previous, mtimeMs);
-    return { ...previous, running, externalRunning: running };
+    return await applyExternalRuntimeStatus({ ...previous, running, externalRunning: running });
   }
   const parsed = parseSessionFile(await provider.readFile(hit.file), hit.file, 1000);
-  return externalSnapshotFromThread({ ...parsed, file: hit.file, mtimeMs }, connectorId);
+  return await applyExternalRuntimeStatus(
+    externalSnapshotFromThread({ ...parsed, file: hit.file, mtimeMs }, connectorId)
+  );
 }
 
 export function externalSessionSnapshot(threadId = "", connectorId = "") {

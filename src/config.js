@@ -68,6 +68,11 @@ export const wechatSource = process.env.WECHAT_SOURCE || "codex-remote-web";
 // Dedicated credential embedded into WebToApp-generated APKs. Keep it separate
 // from both the web login password and the remote connector pairing token.
 export const nativeNotificationToken = process.env.CODEX_REMOTE_NOTIFICATION_TOKEN || "";
+// Local Codex CLI PermissionRequest hooks authenticate with a dedicated token.
+// Reusing the APK notification token keeps existing single-user deployments
+// working without exposing the web login password to hook processes.
+export const cliApprovalHookToken = process.env.CODEX_REMOTE_CLI_HOOK_TOKEN || nativeNotificationToken;
+export const cliApprovalTimeoutMs = Number(process.env.CODEX_REMOTE_CLI_APPROVAL_TIMEOUT_MS || 9 * 60 * 1000);
 
 export const remotePassword = process.env.CODEX_REMOTE_PASSWORD || process.env.REMOTE_PASSWORD || (process.env.CODEX_REMOTE_PASSWORD_B64 ? Buffer.from(process.env.CODEX_REMOTE_PASSWORD_B64, "base64").toString("utf8") : "") || (process.env.REMOTE_LOGIN_B64 ? Buffer.from(process.env.REMOTE_LOGIN_B64, "base64").toString("utf8") : "");
 export const connectorPairToken = process.env.CODEX_REMOTE_CONNECTOR_TOKEN || remotePassword;

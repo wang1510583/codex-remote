@@ -225,6 +225,44 @@ textarea:focus {
   padding-left: 2px;
 }
 
+.taskExecutionStatus {
+  align-self: flex-start;
+  max-width: 100%;
+  margin: 2px 0 4px 2px;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: #b9b3a8;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  animation: taskExecutionPulse 1.8s ease-in-out infinite;
+}
+
+.taskExecutionStatus:hover:not(:disabled),
+.taskExecutionStatus:focus-visible {
+  color: #e7e2d7;
+}
+
+.taskExecutionStatus:focus-visible {
+  outline: 1px solid #8b83ca;
+  outline-offset: 3px;
+}
+
+.taskExecutionStatus:disabled {
+  color: #8f8a82;
+  cursor: default;
+}
+
+@keyframes taskExecutionPulse {
+  0%, 100% { opacity: 0.72; }
+  50% { opacity: 1; }
+}
+
 .remoteLog.hideThoughts > .messageBlock.assistantBlock:not(.completionBlock),
 .remoteLog.hideThoughts > .message.assistant:not(.completion),
 .remoteLog.onlyMine > .messageBlock:not(.userBlock),
@@ -1599,6 +1637,7 @@ textarea:focus {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .taskExecutionStatus { animation: none; }
   .message.user { transition: none; }
   .speechFeedback { animation: none; }
 }
@@ -1790,6 +1829,16 @@ textarea:focus {
   text-align: left;
   min-width: 0;
   overflow: hidden;
+}
+
+.commandItemActive {
+  border-color: rgba(71, 190, 118, 0.72);
+  background: rgba(40, 112, 68, 0.22);
+}
+
+.commandItemActive span,
+.commandItemActive small {
+  color: #b9e8c9;
 }
 
 .commandItem > * {

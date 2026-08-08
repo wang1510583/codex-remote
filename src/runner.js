@@ -40,8 +40,10 @@ import {
 import {
   externalRunningSnapshots, externalSessionSnapshot, externalSnapshotFromThread,
   isExternalTaskRunning, monitorExternalSession, refreshExternalSession,
-  stopExternalSessionMonitor, onExternalSessionUpdate
+  stopExternalSessionMonitor, onExternalSessionUpdate,
+  setExternalSessionRuntimeStatusResolver
 } from "./external-sessions.js";
+import { pendingCliApprovalsPayload, respondToCliApproval } from "./cli-approvals.js";
 
 export const runners = new Map();
 const runnerCreations = new Map();
@@ -611,19 +613,54 @@ export function selectedRunner() {
   return runners.get(selectedRunnerKey) || null;
 }
 
-export function pendingApprovalsPayload(connectorId = "") {
-  const scoped = uniqueRunners().filter((runner) => (runner.connectorId || "") === (connectorId || ""));
-  const rows = scoped.flatMap((runner) => runner.appServer?.pendingApprovalRequests?.() || []);
-  return rows.sort((left, right) => Number(left.startedAtMs || 0) - Number(right.startedAtMs || 0)).slice(0, 5);
+export function pendingApprovalsPayload(connectorId = null) {
+  const scoped = connectorId === null
+    ? uniqueRunners()
+    : uniqueRunners().filter((runner) => (runner.connectorId || "") === (connectorId || ""));
+  const rows = [
+    ...scoped.flatMap((runner) => runner.appServer?.pendingApprovalRequests?.() || []),
+    ...(connectorId === null ? pendingCliApprovalsPayload() : [])
+  ];
+  const seen = new Set();
+  return rows
+    .sort((left, right) => Number(left.startedAtMs || 0) - Number(right.startedAtMs || 0))
+    .filter((row) => {
+      const key = `${row.approvalScope || ""}:${row.requestId || ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 20);
 }
 
 export async function respondToRemoteApproval(body = {}) {
   const requestId = String(body.requestId || "");
+  const approvalScope = String(body.approvalScope || "");
   if (!requestId) throw Object.assign(new Error("缺少审批请求 ID。"), { statusCode: 400 });
+  if (approvalScope.startsWith("cli:")) {
+    const cliResult = respondToCliApproval({ ...body, requestId, approvalScope });
+    if (cliResult) return cliResult;
+  }
   for (const runner of uniqueRunners()) {
-    if (runner.appServer?.hasPendingServerRequest?.(requestId)) {
+    if ((!approvalScope || runner.appServer?.approvalScope === approvalScope)
+      && runner.appServer?.hasPendingServerRequest?.(requestId)) {
       return await runner.appServer.respondToApprovalRequest(body);
     }
+  }
+  // A shared app-server reconnect can replace the in-memory client and its
+  // approval scope while the browser still shows the same live Codex request.
+  // Recover only when thread/turn/method identify exactly one pending request;
+  // never guess from the small numeric JSON-RPC id alone.
+  if (approvalScope && body.threadId) {
+    const candidates = uniqueRunners().filter((runner) =>
+      (runner.appServer?.pendingApprovalRequests?.() || []).some((pending) =>
+        String(pending.requestId || "") === requestId
+        && String(pending.threadId || "") === String(body.threadId || "")
+        && (!body.turnId || String(pending.turnId || "") === String(body.turnId || ""))
+        && (!body.method || String(pending.method || "") === String(body.method || ""))
+      )
+    );
+    if (candidates.length === 1) return await candidates[0].appServer.respondToApprovalRequest(body);
   }
   throw Object.assign(new Error("审批请求不存在或已处理。"), { statusCode: 404 });
 }
@@ -911,6 +948,14 @@ export async function reconcileExternalSessionStatus(state = {}, snapshot = null
   return snapshot;
 }
 
+setExternalSessionRuntimeStatusResolver(async (snapshot = {}) => (
+  await reconcileExternalSessionStatus({
+    threadId: snapshot.threadId || "",
+    connectorId: snapshot.connectorId || "",
+    cwd: snapshot.cwd || ""
+  }, snapshot)
+));
+
 export async function assertExternalSessionIdle(state = {}) {
   const snapshot = await externalStatusForState(state, true);
   if (!snapshot?.running) return snapshot;
@@ -1195,14 +1240,18 @@ async function localCommandResponse(message, connectorId = "") {
     }
   }
   if (command === "/new") {
-    if (currentRunner?.running) return "Codex 正在处理，当前不能新建线程。";
-    commandServer.activeThreadId = "";
-    commandServer.activeCwd = "";
+    if (!currentRunner?.running) {
+      commandServer.activeThreadId = "";
+      commandServer.activeCwd = "";
+    }
     contextUsage = freshContextUsage();
-    const defaults = await commandServer.configuredModelSettings(currentCwd);
+    const defaults = currentRunner?.running
+      ? { model: state.model || "", reasoningEffort: state.reasoningEffort || "" }
+      : await commandServer.configuredModelSettings(currentCwd);
     const nextState = { threadId: "", runtimeId: randomUUID(), connectorId: state.connectorId || "", cwd: state.cwd || "", model: defaults.model || "", reasoningEffort: defaults.reasoningEffort || "", messages: [] };
+    selectedRunnerKey = runnerKeyForState(nextState);
     await writeState(nextState, state.connectorId || "");
-    broadcast({ type: "state", ...nextState, absoluteCwd: stateAbsoluteCwd(state.cwd), contextUsage });
+    broadcast({ type: "state", ...nextState, absoluteCwd: resolveAbsoluteCwd(nextState), contextUsage, runningThreads: runningThreads() });
     return "已新建线程。";
   }
   if (command === "/resume") {
@@ -1662,22 +1711,51 @@ export async function mapWithConcurrency(items, limit, mapper) {
   return output;
 }
 
+export async function listedThreadRuntime(
+  runner,
+  liveVoice,
+  parsed = {},
+  mtimeMs = 0,
+  connectorId = "",
+  reconcile = reconcileExternalSessionStatus
+) {
+  let externalRunning = !runner?.running
+    && !liveVoice
+    && isExternalTaskRunning(parsed, mtimeMs);
+  if (externalRunning) {
+    // JSONL may retain task_started when the terminal task_complete record was
+    // not flushed. A loaded shared app-server thread is authoritative and can
+    // distinguish that stale record from a real Desktop/CLI task.
+    const snapshot = externalSnapshotFromThread({ ...parsed, mtimeMs }, connectorId);
+    const reconciled = await reconcile({
+      threadId: parsed.threadId || runner?.state?.threadId || "",
+      connectorId,
+      cwd: runner?.cwd || parsed.cwd || ""
+    }, snapshot);
+    externalRunning = Boolean(reconciled?.running);
+  }
+  return {
+    externalRunning,
+    running: Boolean(runner?.running || liveVoice || externalRunning)
+  };
+}
+
 export async function listThreads(connectorId = "") {
   const provider = connectorId ? remoteSessionProvider(connectorId) : localSessionProvider;
   const names = await readThreadNames();
   const completions = await readThreadCompletions();
   const rows = [];
   const includedThreadIds = new Set();
-  const runningByThread = new Map();
+  const runnerByThread = new Map();
   const runningRows = [];
   const liveVoiceByThread = new Map(
     connectorId
       ? []
       : activeLiveVoiceThreadSnapshots().map((snapshot) => [snapshot.threadId, snapshot])
   );
-  for (const runner of uniqueRunners().filter((item) => item.running && (item.connectorId || "") === connectorId)) {
-    if (runner.state.threadId) runningByThread.set(runner.state.threadId, runner);
-    else runningRows.push({
+  for (const runner of uniqueRunners().filter((item) => (item.connectorId || "") === connectorId)) {
+    if (runner.state.threadId) runnerByThread.set(runner.state.threadId, runner);
+    else if (runner.running) runningRows.push({
       threadId: `runtime:${runner.key}`,
       runtimeKey: runner.key,
       title: `运行中：${resolveAbsoluteCwd(runner.state)}`,
@@ -1692,7 +1770,7 @@ export async function listThreads(connectorId = "") {
       for (const thread of summaries || []) {
         if (!thread?.id || thread.parentThreadId || includedThreadIds.has(thread.id)) continue;
         const name = typeof names[thread.id] === "string" ? names[thread.id] : "";
-        const runner = runningByThread.get(thread.id);
+        const runner = runnerByThread.get(thread.id);
         const running = Boolean(runner?.running);
         includedThreadIds.add(thread.id);
         rows.push({
@@ -1750,12 +1828,15 @@ export async function listThreads(connectorId = "") {
     const { item, parsed } = entry;
     if (!parsed.threadId || parsed.threadSource === "subagent" || includedThreadIds.has(parsed.threadId)) continue;
     const name = typeof names[parsed.threadId] === "string" ? names[parsed.threadId] : "";
-    const runner = runningByThread.get(parsed.threadId);
+    const runner = runnerByThread.get(parsed.threadId);
     const liveVoice = liveVoiceByThread.get(parsed.threadId) || null;
-    const externalRunning = !runner?.running
-      && !liveVoice
-      && isExternalTaskRunning(parsed, item.mtimeMs);
-    const running = Boolean(runner?.running || liveVoice || externalRunning);
+    const { running, externalRunning } = await listedThreadRuntime(
+      runner,
+      liveVoice,
+      parsed,
+      item.mtimeMs,
+      connectorId
+    );
     includedThreadIds.add(parsed.threadId);
     rows.push({
       threadId: parsed.threadId,
@@ -1895,24 +1976,23 @@ export async function deleteThread(threadId, connectorId = "") {
 }
 
 export async function createRemoteSession(rawCwd = "", connectorId = "") {
-  await persistExistingFailureNotices(await readState(connectorId), connectorId);
+  const previousState = await readState(connectorId);
+  await persistExistingFailureNotices(previousState, connectorId);
   const cwd = connectorId ? String(rawCwd || "") : stateCwdValue(rawCwd || "");
   if (!connectorId) await assertProjectDirectory(cwd);
   const busy = executionConflictForState({ cwd, connectorId });
-  if (busy) {
-    selectedRunnerKey = busy.key;
-    await writeState(busy.state, busy.connectorId || "");
-    const payload = runnerStatePayload(busy, { draft: await draftForState(busy.state, busy.connectorId || "") });
-    broadcast({ type: "state", connectorId, ...payload });
-    return payload;
-  }
+  const previousRunner = await runnerForState({ ...previousState, connectorId }, false);
   const appServer = appServerForState({ connectorId });
-  stopExternalSessionMonitor(connectorId);
-  appServer.activeThreadId = "";
-  appServer.activeCwd = "";
+  if (!previousRunner?.externalTurn) stopExternalSessionMonitor(connectorId);
+  if (!busy) {
+    appServer.activeThreadId = "";
+    appServer.activeCwd = "";
+  }
   contextUsage = freshContextUsage();
   const absoluteCwd = connectorId ? cwd : stateAbsoluteCwd(cwd);
-  const defaults = await appServer.configuredModelSettings(absoluteCwd);
+  const defaults = busy
+    ? { model: busy.state.model || "", reasoningEffort: busy.state.reasoningEffort || "" }
+    : await appServer.configuredModelSettings(absoluteCwd);
   const state = { threadId: "", runtimeId: randomUUID(), connectorId, cwd, model: defaults.model || "", reasoningEffort: defaults.reasoningEffort || "", messages: [], inflight: null };
   selectedRunnerKey = runnerKeyForState(state);
   await writeState(state, connectorId);

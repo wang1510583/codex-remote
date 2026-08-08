@@ -8,6 +8,7 @@ import {
   fullReplyItemTextLimit, fullReplyMessageFromThreadItem
 } from "./threads.js";
 import { createLocalAppServerTransport } from "./transport/local.js";
+import { sendNativeApprovalRequired } from "./native-notifications.js";
 
 export const supplementalModelOptions = Object.freeze([
   Object.freeze({
@@ -125,6 +126,7 @@ function serverRequestDisplay(record = {}) {
   const params = record.params || {};
   const display = {
     requestId: String(record.id),
+    approvalScope: String(record.approvalScope || ""),
     method,
     kind: "approval",
     threadId: params.threadId || params.conversationId || record.threadId || "",
@@ -255,6 +257,10 @@ export class CodexAppServer {
     this.starting = null;
     this.settingsUpdatePromise = null;
     this.turnStarting = false;
+    this.approvalScope = String(options.approvalScope || randomUUID());
+    this.notifyApprovalRequired = typeof options.notifyApprovalRequired === "function"
+      ? options.notifyApprovalRequired
+      : sendNativeApprovalRequired;
     this.optOutNotificationMethods = Array.isArray(options.optOutNotificationMethods)
       ? options.optOutNotificationMethods.filter(Boolean)
       : [];
@@ -337,6 +343,7 @@ export class CodexAppServer {
       broadcast({
         type: "approval_resolved",
         requestId: String(record.id),
+        approvalScope: this.approvalScope,
         method: record.method,
         connectorId: this.runner?.connectorId || ""
       });
@@ -407,8 +414,11 @@ export class CodexAppServer {
       this.sendServerResponse(message.id, null, new Error(`不支持的服务端请求：${method}`));
       return;
     }
+    const requestId = String(message.id);
+    if (this.serverRequests.has(requestId)) return;
     const record = {
       id: message.id,
+      approvalScope: this.approvalScope,
       method,
       params,
       threadId: params.threadId || params.conversationId || this.turn?.threadId || "",
@@ -416,12 +426,18 @@ export class CodexAppServer {
       startedAtMs: params.startedAtMs || Date.now(),
       createdAt: Date.now()
     };
-    this.serverRequests.set(String(message.id), record);
+    const display = serverRequestDisplay(record);
+    this.serverRequests.set(requestId, record);
     broadcast({
       type: "approval_request",
       connectorId: this.runner?.connectorId || "",
-      ...serverRequestDisplay(record)
+      ...display
     });
+    try {
+      this.notifyApprovalRequired(display);
+    } catch (error) {
+      console.error("native approval notification failed", error?.message || error);
+    }
   }
 
   pendingApprovalRequests() {
@@ -443,6 +459,7 @@ export class CodexAppServer {
     broadcast({
       type: "approval_resolved",
       requestId: key,
+      approvalScope: this.approvalScope,
       method: record.method,
       connectorId: this.runner?.connectorId || ""
     });
@@ -457,6 +474,7 @@ export class CodexAppServer {
     broadcast({
       type: "approval_resolved",
       requestId: key,
+      approvalScope: this.approvalScope,
       method: record.method,
       connectorId: this.runner?.connectorId || ""
     });

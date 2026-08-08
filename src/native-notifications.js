@@ -95,6 +95,7 @@ export function createNativeNotificationHub(options = {}) {
   const queuePath = options.queuePath ?? nativeNotificationQueuePath;
   const clients = new Set();
   let deliveryStore = readDeliveryStore(queuePath, logger);
+  let approvalNotificationsSuppressed = Boolean(options.approvalNotificationsSuppressed);
   let wss = null;
   let attachedServer = null;
 
@@ -283,11 +284,44 @@ export function createNativeNotificationHub(options = {}) {
     return sendNotification({ title: taskNotificationTitle(text), body: text });
   }
 
-  return { attach, sendNotification, sendTaskDone, status };
+  function sendApprovalRequired(request = {}) {
+    if (approvalNotificationsSuppressed) {
+      return { configured: Boolean(token), sent: 0, total: clients.size, suppressed: true };
+    }
+    const requestTitle = cleanText(String(request.title || "Codex 请求确认"), 120) || "Codex 请求确认";
+    const summary = cleanText(String(request.summary || request.reason || ""), 240).trim();
+    const detail = summary && summary !== requestTitle ? `：${summary}` : "";
+    return sendNotification({
+      title: "Codex等待审核",
+      body: `⚠️ ${requestTitle}${detail}。请打开 Codex 网页手动确认。`
+    });
+  }
+
+  function setApprovalNotificationsSuppressed(suppressed = false) {
+    approvalNotificationsSuppressed = Boolean(suppressed);
+    return { approvalNotificationsSuppressed };
+  }
+
+  function approvalNotificationPreference() {
+    return { approvalNotificationsSuppressed };
+  }
+
+  return {
+    attach,
+    sendNotification,
+    sendTaskDone,
+    sendApprovalRequired,
+    setApprovalNotificationsSuppressed,
+    approvalNotificationPreference,
+    status
+  };
 }
 
 const nativeNotificationHub = createNativeNotificationHub();
 
 export const attachNativeNotificationWebSocket = (server) => nativeNotificationHub.attach(server);
 export const sendNativeTaskDone = (text) => nativeNotificationHub.sendTaskDone(text);
+export const sendNativeApprovalRequired = (request) => nativeNotificationHub.sendApprovalRequired(request);
+export const setApprovalNotificationsSuppressed = (suppressed) => nativeNotificationHub.setApprovalNotificationsSuppressed(suppressed);
+export const approvalNotificationPreference = () => nativeNotificationHub.approvalNotificationPreference();
 export const nativeNotificationStatus = () => nativeNotificationHub.status();

@@ -3,7 +3,8 @@ import { rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { ZipArchive } from "archiver";
 import {
-  publicDir, messagePageSize, remotePassword, authToken, codexWorkDir, disableLocal
+  publicDir, messagePageSize, remotePassword, authToken, codexWorkDir, disableLocal,
+  cliApprovalHookToken
 } from "./config.js";
 import { json, readBody, mimeType, safeCompare, cleanText } from "./utils.js";
 import { isAuthenticated, routePath, routeBase, isPublicPath, redirectToLogin, authCookie } from "./auth.js";
@@ -34,7 +35,9 @@ import {
 import { projectPath, relativeProjectPath, isAllowedDownload, allowedDownloadRoots } from "./paths.js";
 import * as ssh from "./ssh.js";
 import { webPushPublicKey, savePushSubscription, sendWebPushTaskDone } from "./webpush.js";
-import { nativeNotificationStatus, sendNativeTaskDone } from "./native-notifications.js";
+import {
+  nativeNotificationStatus, sendNativeTaskDone, setApprovalNotificationsSuppressed
+} from "./native-notifications.js";
 import { registerConnector, remoteConnectorsPayload, connectorFileOp, setConnectorRemark } from "./connectors.js";
 import { followModeForState } from "./store.js";
 import { threadName } from "./store.js";
@@ -43,6 +46,7 @@ import {
   monitorExternalSession, stopExternalSessionMonitor
 } from "./external-sessions.js";
 import { handleLiveVoiceHttp } from "./live-voice/index.js";
+import { requestCliApproval } from "./cli-approvals.js";
 import {
   isLiveVoiceThreadActive,
   liveVoiceThreadSnapshot
@@ -229,6 +233,18 @@ export async function handle(req, res) {
 
     if (await handleLiveVoiceHttp(req, res, url)) return;
 
+    if (req.method === "POST" && url.pathname === "/api/remote/cli/approval") {
+      const header = Array.isArray(req.headers.authorization)
+        ? req.headers.authorization[0]
+        : req.headers.authorization || "";
+      const suppliedToken = /^Bearer\s+(.+)$/i.exec(header)?.[1]?.trim() || "";
+      if (!cliApprovalHookToken || !safeCompare(suppliedToken, cliApprovalHookToken)) {
+        return json(res, 401, { error: "Codex CLI 审核钩子鉴权失败。" });
+      }
+      const body = await readBody(req, 1024 * 1024);
+      return json(res, 200, await requestCliApproval(body));
+    }
+
     if (req.method === "POST" && url.pathname === "/api/remote/login") {
       if (!remotePassword) return json(res, 500, { error: "服务端没有配置登录密码。" });
       const password = (await readBody(req)).password;
@@ -278,6 +294,14 @@ export async function handle(req, res) {
 
     if (req.method === "POST" && url.pathname === "/api/remote/notifications/test") {
       return json(res, 200, { ok: true, ...sendNativeTaskDone("✅ WebToApp 后台测试通知") });
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/remote/notifications/approval-preference") {
+      const body = await readBody(req, 8 * 1024);
+      return json(res, 200, {
+        ok: true,
+        ...setApprovalNotificationsSuppressed(Boolean(body.autoApprove))
+      });
     }
 
     if (req.method === "GET" && url.pathname === "/api/remote/state") {
@@ -366,7 +390,7 @@ export async function handle(req, res) {
         )
         : undefined;
       const connectorsPayload = await remoteConnectorsPayload();
-      const pendingApprovals = pendingApprovalsPayload(connectorId);
+      const pendingApprovals = pendingApprovalsPayload();
       return json(res, 200, {
         ...payload,
         fullMessages,

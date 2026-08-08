@@ -4,8 +4,11 @@ import {
   createRunner,
   executionConflictForState,
   isRunnerSelected,
+  listedThreadRuntime,
   liveMessagesFor,
+  pendingApprovalsPayload,
   rememberRunnerThread,
+  respondToRemoteApproval,
   runnerForIncomingState,
   runnerForState,
   runners,
@@ -31,6 +34,98 @@ function resetRunners() {
   runners.clear();
   setSelectedRunnerKey("");
 }
+
+test("a loaded idle runtime overrides a missing JSONL completion record", async () => {
+  const idleRunner = { running: false, state: { threadId: "thread-finished", inflight: null } };
+  const parsed = {
+    threadId: "thread-finished",
+    taskRunning: true,
+    taskStartedAt: new Date().toISOString()
+  };
+  const reconciled = [];
+
+  assert.deepEqual(await listedThreadRuntime(
+    idleRunner,
+    null,
+    parsed,
+    Date.now(),
+    "",
+    async (state, snapshot) => {
+      reconciled.push({ state, snapshot });
+      return { ...snapshot, running: false, externalRunning: false };
+    }
+  ), {
+    externalRunning: false,
+    running: false
+  });
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].state.threadId, "thread-finished");
+  assert.equal(reconciled[0].snapshot.running, true);
+});
+
+test("an unowned recent JSONL task remains externally running when no live idle state exists", async () => {
+  const parsed = {
+    threadId: "thread-external",
+    taskRunning: true,
+    taskStartedAt: new Date().toISOString()
+  };
+
+  assert.deepEqual(await listedThreadRuntime(
+    null,
+    null,
+    parsed,
+    Date.now(),
+    "",
+    async (_state, snapshot) => snapshot
+  ), {
+    externalRunning: true,
+    running: true
+  });
+});
+
+test("global pending approvals include every conversation and keep colliding request ids separate", async (t) => {
+  resetRunners();
+  t.after(resetRunners);
+  const decisions = [];
+  const appServer = (approvalScope, connectorId, threadId) => ({
+    approvalScope,
+    pendingApprovalRequests() {
+      return [{ requestId: "1", approvalScope, connectorId, threadId, turnId: `turn-${threadId}`, method: "item/commandExecution/requestApproval", startedAtMs: approvalScope === "scope-a" ? 1 : 2 }];
+    },
+    hasPendingServerRequest(requestId) { return String(requestId) === "1"; },
+    respondToApprovalRequest(body) {
+      decisions.push({ approvalScope, body });
+      return { ok: true, approvalScope };
+    }
+  });
+  runners.set("first", { key: "first", connectorId: "", appServer: appServer("scope-a", "", "thread-a") });
+  runners.set("second", { key: "second", connectorId: "remote-a", appServer: appServer("scope-b", "remote-a", "thread-b") });
+
+  assert.deepEqual(pendingApprovalsPayload().map((row) => `${row.approvalScope}:${row.requestId}`), [
+    "scope-a:1",
+    "scope-b:1"
+  ]);
+  assert.deepEqual(pendingApprovalsPayload("").map((row) => row.approvalScope), ["scope-a"]);
+
+  assert.deepEqual(await respondToRemoteApproval({
+    requestId: "1",
+    approvalScope: "scope-b",
+    decision: "accept"
+  }), { ok: true, approvalScope: "scope-b" });
+  assert.equal(decisions.length, 1);
+  assert.equal(decisions[0].approvalScope, "scope-b");
+
+  assert.deepEqual(await respondToRemoteApproval({
+    requestId: "1",
+    approvalScope: "scope-before-reconnect",
+    threadId: "thread-a",
+    turnId: "turn-thread-a",
+    method: "item/commandExecution/requestApproval",
+    decision: "accept"
+  }), { ok: true, approvalScope: "scope-a" });
+  assert.equal(decisions.length, 2);
+  assert.equal(decisions[1].approvalScope, "scope-a");
+});
 
 test("live state snapshots preserve completed app-server message ids", () => {
   const runner = {

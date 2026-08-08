@@ -39,8 +39,12 @@ const state = {
   resyncingEvents: false,
   notifiedMessages: new Set(),
   currentTaskStartedAtMs: null,
+  currentTaskDetail: "",
+  currentTaskDetailKind: "",
+  currentTaskDetailAtMs: null,
   pushSubscribed: false,
   nativeNotificationConnected: false,
+  autoApprove: localStorage.getItem("codex-remote-auto-approve") === "1",
   autoSpeech: localStorage.getItem("codex-remote-auto-speech") === "1",
   spokenMessageIds: new Set(),
   speechUtterances: new Set(),
@@ -69,6 +73,8 @@ let draftTimer = 0;
 let modelSettingsChanging = false;
 let stateLoadGeneration = 0;
 let realtimeReconcileTimer = 0;
+let taskExecutionStatusTimer = 0;
+let taskInterruptPending = false;
 const processedEventSeqs = new Set();
 const pendingRemoteEvents = [];
 const slashCommands = [
@@ -86,6 +92,7 @@ const slashCommands = [
   { command: "/follow steer", title: "引导模式", detail: "运行中发送的新消息引导当前任务" },
   { command: "/steer ", title: "立即引导", detail: "把后续文字发送给当前正在运行的任务" },
   { command: "/notify", title: "通知", detail: notificationDetail, action: requestNotifications },
+  { command: "/autoapprove", title: "自动确认审核", detail: autoApprovalDetail, action: toggleAutoApproval, active: () => state.autoApprove },
   { command: "/tts", title: "自动语音朗读", detail: speechDetail, action: toggleAutoSpeech },
   { command: "/full", title: "显示Codex完整回复", detail: fullRepliesDetail, action: toggleFullReplies },
   { command: "/result", title: "只看结果", detail: () => state.hideThoughts ? "当前只显示用户气泡和 ✅ 气泡，点击后显示全部" : "隐藏思考过程气泡，只显示用户气泡和 ✅ 气泡", action: toggleResultOnly },
@@ -592,16 +599,29 @@ function setRunning(running, queueLength = state.queueLength, queueMessages = st
   state.steerMessages = Array.isArray(steerMessages) ? steerMessages : [];
   state.followMode = followMode === "steer" ? "steer" : "queue";
   setContextUsage(contextUsage);
-  if (state.running) state.replyDone = false;
+  if (state.running) {
+    state.replyDone = false;
+    if (!Number.isFinite(state.currentTaskStartedAtMs)) {
+      const externalStartedAtMs = state.externalTaskStartedAt ? Date.parse(state.externalTaskStartedAt) : NaN;
+      state.currentTaskStartedAtMs = Number.isFinite(externalStartedAtMs) ? externalStartedAtMs : Date.now();
+    }
+    if (!wasRunning && !state.currentTaskDetail) {
+      updateTaskExecutionDetail("正在连接 Codex，等待第一个执行事件", "connecting");
+    }
+  } else {
+    state.currentTaskStartedAtMs = null;
+    clearTaskExecutionDetail();
+  }
   els.sendQueue.disabled = false;
   els.sendSteer.disabled = false;
   els.sendQueue.title = state.externalRunning ? "等当前 Codex 回合结束后继续执行" : "队列模式发送（备用）";
   els.sendSteer.title = state.externalRunning ? "引导当前 Codex 回合（默认，Ctrl+Enter）" : "引导模式发送（默认，Ctrl+Enter）";
-  if (els.newChat) els.newChat.disabled = state.running && !state.liveVoiceRunning;
+  if (els.newChat) els.newChat.disabled = false;
   els.threadButton.disabled = false;
   updateMeta();
   renderQueuePanel();
   updateStatusIcon();
+  syncTaskExecutionStatus();
   updateRealtimeReconcile();
   updateLoadMore();
   if (
@@ -1393,6 +1413,143 @@ function formatDuration(ms) {
   return `本次任务工作了 ${seconds}秒`;
 }
 
+function formatWorkingElapsed(ms) {
+  const totalSeconds = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function approvalBelongsToCurrentThread(request = state.pendingApproval) {
+  if (!request) return false;
+  return !request.threadId || !state.threadId || request.threadId === state.threadId;
+}
+
+function taskExecutionLabel() {
+  if (taskInterruptPending) return "Interrupting";
+  if (approvalBelongsToCurrentThread()) return "Waiting for approval";
+  if (state.reconnecting) return "Reconnecting";
+  if (state.liveVoiceRunning && !state.liveVoiceTaskRunning) return "Live Voice connected";
+  if (state.liveVoiceTaskRunning) return "Working via Live Voice";
+  return "Working";
+}
+
+function compactTaskDetail(value = "", limit = 180) {
+  const text = String(value || "")
+    .replace(/^\s*#{1,6}\s*/gm, "")
+    .replace(/^\s*```[^\n]*\n?/gm, "")
+    .replace(/^\s*```\s*$/gm, "")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/^[✅🤔❌⏳🧠📋🔧⌨️📝🔌🌐🖼️🎨⏱️🔍🤝↳•]\s*/u, "")
+    .replace(/[|*_~]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(1, limit - 1)).trimEnd()}…`;
+}
+
+function updateTaskExecutionDetail(detail = "", kind = "activity") {
+  const next = compactTaskDetail(detail);
+  if (!next) return false;
+  state.currentTaskDetail = next;
+  state.currentTaskDetailKind = kind;
+  state.currentTaskDetailAtMs = Date.now();
+  renderTaskExecutionStatus();
+  return true;
+}
+
+function clearTaskExecutionDetail() {
+  state.currentTaskDetail = "";
+  state.currentTaskDetailKind = "";
+  state.currentTaskDetailAtMs = null;
+}
+
+function cliTaskDetail(data = {}) {
+  const content = compactTaskDetail(data.content || "", 150);
+  const kind = String(data.fullKind || "");
+  if (kind === "reasoning") return { kind, detail: `正在分析：${content || "等待推理摘要"}` };
+  if (kind === "plan") return { kind, detail: `正在规划：${content || "制定执行步骤"}` };
+  if (kind === "patch") return { kind, detail: `正在修改代码：${content || "等待补丁内容"}` };
+  if (kind === "mcp") return { kind, detail: `正在调用 MCP：${content || "等待工具进展"}` };
+  if (kind === "tool-call") return { kind, detail: `正在调用工具：${content || "等待工具响应"}` };
+  if (kind === "tool-output") return { kind, detail: `正在检查工具结果：${content || "处理命令输出"}` };
+  if (kind === "collaboration") return { kind, detail: `正在处理协作事件：${content}` };
+  if (kind === "system") return { kind, detail: `正在处理：${content}` };
+  return { kind: kind || "activity", detail: content };
+}
+
+function approvalTaskDetail(request = state.pendingApproval) {
+  if (!request) return "";
+  const file = Array.isArray(request.files) ? request.files[0]?.path : "";
+  const subject = request.command || file || request.summary || request.title || request.method || "需要用户确认";
+  return `等待批准：${compactTaskDetail(subject, 140)}`;
+}
+
+function taskExecutionDetailText() {
+  const detail = approvalBelongsToCurrentThread()
+    ? approvalTaskDetail()
+    : state.currentTaskDetail;
+  if (!detail) return "等待 Codex 返回新进展";
+  const updatedAtMs = Number(state.currentTaskDetailAtMs);
+  const ageSeconds = Number.isFinite(updatedAtMs)
+    ? Math.max(0, Math.floor((Date.now() - updatedAtMs) / 1000))
+    : 0;
+  return ageSeconds >= 15 ? `${detail}（最后更新 ${ageSeconds}s 前）` : detail;
+}
+
+function taskExecutionCanInterrupt() {
+  return state.running
+    && !approvalBelongsToCurrentThread()
+    && (!state.liveVoiceRunning || state.liveVoiceTaskRunning);
+}
+
+function renderTaskExecutionStatus() {
+  let status = els.log.querySelector(".taskExecutionStatus");
+  if (!state.running) {
+    status?.remove();
+    return;
+  }
+  if (!status) {
+    status = document.createElement("button");
+    status.type = "button";
+    status.className = "taskExecutionStatus";
+    status.addEventListener("click", () => {
+      if (taskExecutionCanInterrupt()) interruptCurrentTask();
+    });
+  }
+  const startedAtMs = Number.isFinite(state.currentTaskStartedAtMs)
+    ? state.currentTaskStartedAtMs
+    : Date.now();
+  const elapsed = formatWorkingElapsed(Date.now() - startedAtMs);
+  const canInterrupt = taskExecutionCanInterrupt();
+  const suffix = canInterrupt ? " • Esc to interrupt" : "";
+  status.textContent = `• ${taskExecutionLabel()} (${elapsed}${suffix}) — ${taskExecutionDetailText()}`;
+  status.disabled = !canInterrupt;
+  status.setAttribute("aria-live", "polite");
+  status.title = canInterrupt ? "点击或按 Esc 中断当前任务" : taskExecutionLabel();
+  // Appending an existing node moves it after the newest bubble. This keeps
+  // the status attached to the live end of the transcript as replies stream.
+  els.log.appendChild(status);
+}
+
+function syncTaskExecutionStatus() {
+  renderTaskExecutionStatus();
+  if (!state.running) {
+    if (taskExecutionStatusTimer) clearInterval(taskExecutionStatusTimer);
+    taskExecutionStatusTimer = 0;
+    return;
+  }
+  if (!taskExecutionStatusTimer) {
+    taskExecutionStatusTimer = setInterval(renderTaskExecutionStatus, 1000);
+  }
+}
+
 function appendMessage(role, text, meta = {}) {
   if (!text) return;
   const shouldFollow = isNearBottom();
@@ -1432,6 +1589,7 @@ function appendMessage(role, text, meta = {}) {
     wrapper.appendChild(time);
   }
   els.log.appendChild(wrapper);
+  renderTaskExecutionStatus();
   if (shouldFollow) scrollToLatest(true);
   else requestAnimationFrame(updateScrollJumps);
   return item;
@@ -1626,6 +1784,9 @@ function renderCommandList() {
     const button = document.createElement("button");
     button.className = "commandItem";
     button.type = "button";
+    const active = typeof item.active === "function" && item.active();
+    button.classList.toggle("commandItemActive", active);
+    if (item.active) button.setAttribute("aria-pressed", active ? "true" : "false");
     button.innerHTML = "<strong></strong><span></span><small></small>";
     button.querySelector("strong").textContent = item.command;
     button.querySelector("span").textContent = item.title;
@@ -1709,7 +1870,7 @@ function renderState(data) {
   stateLoadGeneration += 1;
   saveDraft();
   if (Array.isArray(data.pendingApprovals)) {
-    for (const approval of data.pendingApprovals) queueApprovalRequest(approval);
+    syncApprovalRequests(data.pendingApprovals);
   }
   const previousConnectorId = state.selectedConnectorId || "";
   if (data.connectorId !== undefined) state.selectedConnectorId = data.connectorId || "";
@@ -1720,7 +1881,10 @@ function renderState(data) {
   const previousTop = els.logWrap.scrollTop;
   const previousThreadId = state.threadId;
   const nextThreadId = data.threadId || "";
-  if (nextThreadId !== previousThreadId || (state.selectedConnectorId || "") !== previousConnectorId) stopSpeech();
+  if (nextThreadId !== previousThreadId || (state.selectedConnectorId || "") !== previousConnectorId) {
+    stopSpeech();
+    clearTaskExecutionDetail();
+  }
   const applySettings = nextThreadId !== previousThreadId
     || settingsResponseIsCurrent(data.modelSettingsUpdatedAt || "");
   if (Number(data.eventSeq) > state.lastEventSeq) state.lastEventSeq = Number(data.eventSeq);
@@ -1777,6 +1941,23 @@ function renderState(data) {
   if (shouldFollow) scrollToLatest(true);
   else els.logWrap.scrollTop = previousTop;
   updateLoadMore();
+  const taskStartedAt = data.externalRunning ? state.externalTaskStartedAt : data.inflight?.startedAt;
+  if (data.running && taskStartedAt) {
+    const startedAtMs = Date.parse(taskStartedAt);
+    if (Number.isFinite(startedAtMs)) state.currentTaskStartedAtMs = startedAtMs;
+  }
+  if (data.running && !state.currentTaskDetail) {
+    const liveDetail = [...(data.liveMessages || [])].reverse()
+      .find((message) => message?.role === "assistant" && message.content);
+    const externalDetail = data.externalRunning
+      ? [...(data.messages || [])].reverse()
+          .find((message) => message?.role === "assistant" && /^🤔\s/u.test(message.content || ""))
+      : null;
+    const detailMessage = liveDetail || externalDetail;
+    if (detailMessage) {
+      updateTaskExecutionDetail(`正在分析：${compactTaskDetail(detailMessage.content, 150)}`, "reasoning");
+    }
+  }
   setRunning(
     data.running,
     data.queueLength,
@@ -1792,13 +1973,6 @@ function renderState(data) {
     Boolean(data.liveVoiceConnected),
     Boolean(data.liveVoiceTaskRunning)
   );
-  const taskStartedAt = state.externalRunning ? state.externalTaskStartedAt : data.inflight?.startedAt;
-  if (state.running && taskStartedAt) {
-    const startedAtMs = Date.parse(taskStartedAt);
-    if (Number.isFinite(startedAtMs)) state.currentTaskStartedAtMs = startedAtMs;
-  } else if (!state.running) {
-    state.currentTaskStartedAtMs = null;
-  }
   if (!els.modelSettingsPanel.hidden && state.threadId !== previousThreadId) {
     queueMicrotask(() => openModelSettings().catch((error) => {
       els.modelSettingsStatus.textContent = `读取失败：${error.message}`;
@@ -2391,7 +2565,6 @@ async function openNewSessionPicker(dir = undefined) {
 }
 
 async function createSessionInSelectedFolder() {
-  if (state.running) return;
   const connectorId = currentConnectorId();
   const data = await request("/api/remote/new", {
     method: "POST",
@@ -3028,14 +3201,103 @@ function approvalKindLabel(kind = "") {
   })[kind] || "确认";
 }
 
+function approvalRequestKey(request = {}) {
+  return `${request.approvalScope || ""}:${request.requestId || ""}`;
+}
+
+function syncApprovalRequests(requests = []) {
+  const snapshot = new Map(
+    requests
+      .filter((request) => request?.requestId)
+      .map((request) => [approvalRequestKey(request), request])
+  );
+  // A state request can briefly see no app-server approvals while Android is
+  // restoring the page or the shared app-server transport is reconnecting.
+  // Treat snapshots as recovery/update data, not as resolution tombstones.
+  // Only an explicit approval_resolved event, a successful submission, or a
+  // server 404 is allowed to dismiss a popup the user has not acted on.
+  state.pendingApprovalQueue = state.pendingApprovalQueue
+    .map((request) => snapshot.get(approvalRequestKey(request)) || request);
+  if (state.pendingApproval) {
+    const currentKey = approvalRequestKey(state.pendingApproval);
+    if (snapshot.has(currentKey)) {
+      state.pendingApproval = snapshot.get(currentKey);
+      renderApprovalModal(state.pendingApproval);
+    }
+  }
+  for (const request of snapshot.values()) queueApprovalRequest(request);
+  showNextApproval();
+}
+
 function queueApprovalRequest(request = {}) {
   if (!request?.requestId) return;
-  const key = String(request.requestId);
-  const alreadyQueued = state.pendingApprovalQueue.some((item) => String(item.requestId || "") === key)
-    || (state.pendingApproval && String(state.pendingApproval.requestId || "") === key);
+  const key = approvalRequestKey(request);
+  const alreadyQueued = state.pendingApprovalQueue.some((item) => approvalRequestKey(item) === key)
+    || (state.pendingApproval && approvalRequestKey(state.pendingApproval) === key);
   if (alreadyQueued) return;
   state.pendingApprovalQueue.push(request);
   showNextApproval();
+}
+
+function automaticElicitationContent(request = {}) {
+  const schema = request.schema && typeof request.schema === "object" ? request.schema : {};
+  const properties = schema.properties && typeof schema.properties === "object" ? schema.properties : {};
+  const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+  const content = {};
+  for (const [name, propValue] of Object.entries(properties)) {
+    const prop = propValue && typeof propValue === "object" ? propValue : {};
+    if (Object.prototype.hasOwnProperty.call(prop, "default")) {
+      content[name] = prop.default;
+    } else if (prop.type === "boolean") {
+      content[name] = false;
+    } else if (Array.isArray(prop.enum) && prop.enum.length) {
+      content[name] = prop.enum[0];
+    } else if (required.has(name)) {
+      return null;
+    }
+  }
+  return content;
+}
+
+function automaticApprovalSubmission(request = {}) {
+  if (request.kind === "input") return null;
+  if (request.kind === "elicitation") {
+    const content = automaticElicitationContent(request);
+    return content === null ? null : { decision: "accept", payload: { content } };
+  }
+  return {
+    decision: request.kind === "tool" ? "allow" : "accept",
+    payload: {}
+  };
+}
+
+function autoApprovalDetail() {
+  return state.autoApprove
+    ? "已开启：自动允许审核及可使用默认值的 MCP 表单，并暂停发送审核通知；缺少必填内容时仍会弹窗"
+    : "已关闭。点击开启后将自动允许审核请求和可安全补全的 MCP 表单（高风险）";
+}
+
+async function syncAutoApprovalNotificationPreference() {
+  return await request("/api/remote/notifications/approval-preference", {
+    method: "POST",
+    body: JSON.stringify({ autoApprove: state.autoApprove })
+  });
+}
+
+function toggleAutoApproval() {
+  state.autoApprove = !state.autoApprove;
+  localStorage.setItem("codex-remote-auto-approve", state.autoApprove ? "1" : "0");
+  closeCommandMenu();
+  appendEvent(state.autoApprove ? "自动确认审核已开启" : "自动确认审核已关闭");
+  renderCommandList();
+  syncAutoApprovalNotificationPreference().catch((error) => {
+    appendEvent(`同步审核通知设置失败：${error.message}`);
+  });
+  if (!state.autoApprove || !state.pendingApproval || state.pendingApprovalSubmitting) return;
+  const submission = automaticApprovalSubmission(state.pendingApproval);
+  if (!submission) return;
+  if (els.approvalModal) els.approvalModal.hidden = true;
+  submitApproval(submission.decision, submission.payload, { automatic: true });
 }
 
 function showNextApproval() {
@@ -3043,6 +3305,14 @@ function showNextApproval() {
   const next = state.pendingApprovalQueue.shift();
   if (!next) return;
   state.pendingApproval = next;
+  updateTaskExecutionDetail(approvalTaskDetail(next), "approval");
+  renderTaskExecutionStatus();
+  const automaticSubmission = state.autoApprove ? automaticApprovalSubmission(next) : null;
+  if (automaticSubmission) {
+    if (els.approvalModal) els.approvalModal.hidden = true;
+    submitApproval(automaticSubmission.decision, automaticSubmission.payload, { automatic: true });
+    return;
+  }
   renderApprovalModal(next);
   els.approvalModal.hidden = false;
   requestAnimationFrame(() => {
@@ -3055,12 +3325,13 @@ function clearApprovalModal() {
   state.pendingApproval = null;
   state.pendingApprovalSubmitting = false;
   if (els.approvalModal) els.approvalModal.hidden = true;
+  renderTaskExecutionStatus();
 }
 
-function resolveApprovalRequest(requestId = "") {
-  const key = String(requestId || "");
-  state.pendingApprovalQueue = state.pendingApprovalQueue.filter((item) => String(item.requestId || "") !== key);
-  if (state.pendingApproval && String(state.pendingApproval.requestId || "") === key) {
+function resolveApprovalRequest(requestId = "", approvalScope = "") {
+  const key = approvalRequestKey({ requestId, approvalScope });
+  state.pendingApprovalQueue = state.pendingApprovalQueue.filter((item) => approvalRequestKey(item) !== key);
+  if (state.pendingApproval && approvalRequestKey(state.pendingApproval) === key) {
     clearApprovalModal();
   }
   showNextApproval();
@@ -3233,27 +3504,41 @@ function setApprovalButtonsDisabled(disabled = false) {
   }
 }
 
-async function submitApproval(decision = "", payload = {}) {
+async function submitApproval(decision = "", payload = {}, options = {}) {
   if (!state.pendingApproval || state.pendingApprovalSubmitting) return;
   state.pendingApprovalSubmitting = true;
-  setApprovalStatus("正在提交确认...");
+  setApprovalStatus(options.automatic ? "正在自动确认..." : "正在提交确认...");
   setApprovalButtonsDisabled(true);
   try {
     await request("/api/remote/approval/respond", {
       method: "POST",
       body: JSON.stringify({
         requestId: state.pendingApproval.requestId,
+        approvalScope: state.pendingApproval.approvalScope || "",
+        threadId: state.pendingApproval.threadId || "",
+        turnId: state.pendingApproval.turnId || "",
+        method: state.pendingApproval.method || "",
         decision,
         ...payload
       })
     });
-    const requestId = state.pendingApproval.requestId;
-    state.pendingApprovalQueue = state.pendingApprovalQueue.filter((item) => String(item.requestId || "") !== String(requestId));
+    const completedApproval = state.pendingApproval;
+    state.pendingApprovalQueue = state.pendingApprovalQueue.filter((item) => approvalRequestKey(item) !== approvalRequestKey(completedApproval));
     clearApprovalModal();
     showNextApproval();
   } catch (error) {
+    if (/审批请求不存在或已处理/.test(String(error?.message || ""))) {
+      const expiredApproval = state.pendingApproval;
+      resolveApprovalRequest(expiredApproval?.requestId, expiredApproval?.approvalScope);
+      loadState(currentConnectorId()).catch(() => {});
+      return;
+    }
     state.pendingApprovalSubmitting = false;
-    setApprovalStatus(error.message || "提交失败。");
+    if (options.automatic && els.approvalModal) {
+      renderApprovalModal(state.pendingApproval);
+      els.approvalModal.hidden = false;
+    }
+    setApprovalStatus(options.automatic ? `自动确认失败：${error.message || "请手动处理。"}` : (error.message || "提交失败。"));
     setApprovalButtonsDisabled(false);
   }
 }
@@ -3306,7 +3591,7 @@ function submitApprovalFromModal() {
 function handleRemoteEvent(data) {
   if (!rememberRemoteEvent(data)) return;
   if (data.type === "approval_request") { queueApprovalRequest(data); return; }
-  if (data.type === "approval_resolved") { resolveApprovalRequest(data.requestId); return; }
+  if (data.type === "approval_resolved") { resolveApprovalRequest(data.requestId, data.approvalScope); return; }
   if (data.type === "connectors_changed") { loadConnectors().catch(() => {}); return; }
   if (data.type === "connector_selected") {
     const nextId = data.selectedConnectorId || "";
@@ -3368,8 +3653,12 @@ function handleRemoteEvent(data) {
   }
   if (data.type === "reconnecting") {
     state.reconnecting = Boolean(data.reconnecting);
+    if (data.reconnecting) {
+      updateTaskExecutionDetail(`连接异常：${compactTaskDetail(data.message || "等待 Codex 重新连接", 140)}`, "reconnecting");
+    }
     updateMeta();
     updateStatusIcon();
+    renderTaskExecutionStatus();
   }
   if (data.type === "runner_status") {
     const previousSignature = runningThreadsSignature(state.runningThreads);
@@ -3378,6 +3667,9 @@ function handleRemoteEvent(data) {
   }
   if (data.type === "message") {
     if (data.role === "assistant" && (data.transient || data.final)) {
+      if (state.running && (data.transient || !/^✅\s/u.test(data.content || ""))) {
+        updateTaskExecutionDetail(`正在分析：${compactTaskDetail(data.content || "", 150)}`, "reasoning");
+      }
       if (data.final && /^✅\s/.test(data.content || "") && data.taskDurationMs === undefined && state.currentTaskStartedAtMs) {
         data.taskDurationMs = Math.max(0, Date.now() - state.currentTaskStartedAtMs);
       }
@@ -3396,6 +3688,10 @@ function handleRemoteEvent(data) {
     }
   }
   if (data.type === "cli_message") {
+    if (state.running && data.role === "assistant") {
+      const activity = cliTaskDetail(data);
+      if (activity.detail) updateTaskExecutionDetail(activity.detail, activity.kind);
+    }
     if (state.showFullReplies && data.role === "assistant") {
       upsertAssistantMessage(data.content, data.final, data.messageId || "cli-message", data);
     }
@@ -3550,6 +3846,8 @@ async function sendMessage(mode = "steer") {
   scheduleAndroidImeProbe();
   state.replyDone = false;
   state.currentTaskStartedAtMs = Date.now();
+  clearTaskExecutionDetail();
+  updateTaskExecutionDetail("正在将任务发送给 Codex", "connecting");
   const followMatch = outgoingMessage.trim().toLowerCase().match(/^\/follow\s+(queue|steer)$/);
   setRunning(true, state.queueLength, state.queueMessages, followMatch ? followMatch[1] : state.followMode, state.steerLength, state.steerMessages, state.contextUsage, state.runningThreads, false, state.externalRunning);
   try {
@@ -3598,6 +3896,43 @@ async function sendMessage(mode = "steer") {
       stateBeforeSend.liveVoiceConnected,
       stateBeforeSend.liveVoiceTaskRunning
     );
+  }
+}
+
+async function interruptCurrentTask() {
+  if (!taskExecutionCanInterrupt() || taskInterruptPending) return false;
+  const connectorId = currentConnectorId();
+  taskInterruptPending = true;
+  renderTaskExecutionStatus();
+  try {
+    const result = await request("/api/remote/send", {
+      method: "POST",
+      connectorId,
+      body: JSON.stringify({ message: "/stop", followMode: "steer" })
+    });
+    if (connectorId !== currentConnectorId()) return false;
+    setRunning(
+      result.running,
+      result.queueLength,
+      result.queueMessages,
+      result.followMode,
+      result.steerLength,
+      result.steerMessages,
+      result.contextUsage,
+      result.runningThreads,
+      result.reconnecting,
+      result.externalRunning,
+      Boolean(result.liveVoiceRunning),
+      Boolean(result.liveVoiceConnected),
+      Boolean(result.liveVoiceTaskRunning)
+    );
+    return true;
+  } catch (error) {
+    upsertAssistantMessage(`中断失败：${error.message}`, true, `interrupt-error-${Date.now()}`);
+    return false;
+  } finally {
+    taskInterruptPending = false;
+    renderTaskExecutionStatus();
   }
 }
 
@@ -3829,6 +4164,13 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    const dismissedOverlay = !els.threadPanel.hidden
+      || !els.filePanel.hidden
+      || !els.sshConnectPanel.hidden
+      || !els.connectorPanel.hidden
+      || !els.modelSettingsPanel.hidden
+      || !els.queuePanel.hidden
+      || !els.commandMenu.hidden;
     closeCommandMenu();
     closeProjectUploadMenu();
     els.threadPanel.hidden = true;
@@ -3837,6 +4179,10 @@ document.addEventListener("keydown", (event) => {
     els.connectorPanel.hidden = true;
     els.modelSettingsPanel.hidden = true;
     els.queuePanel.hidden = true;
+    if (!dismissedOverlay && taskExecutionCanInterrupt()) {
+      event.preventDefault();
+      interruptCurrentTask();
+    }
   }
 });
 
@@ -4025,15 +4371,18 @@ window.addEventListener("focus", resyncWhenActive);
 window.addEventListener("online", resyncWhenActive);
 
 els.newChat?.addEventListener("click", () => {
-  if (state.running) return;
   openNewSessionPicker();
 });
 
 renderCommandList();
 loadSshStatus().catch(() => updateSshStatus({ connected: false }));
-loadState().then(connectEvents).catch((error) => {
-  els.meta.textContent = error.message;
-});
+syncAutoApprovalNotificationPreference()
+  .catch(() => null)
+  .then(loadState)
+  .then(connectEvents)
+  .catch((error) => {
+    els.meta.textContent = error.message;
+  });
 restorePushSubscription();
 refreshNativeNotificationStatus().catch(() => {});
 autosizeInput();
