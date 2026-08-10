@@ -1,9 +1,8 @@
 import { createReadStream, existsSync } from "node:fs";
-import { rm, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import path from "node:path";
-import { ZipArchive } from "archiver";
 import {
-  publicDir, messagePageSize, remotePassword, authToken, codexWorkDir, disableLocal,
+  publicDir, messagePageSize, remotePassword, authToken, codexWorkDir,
   cliApprovalHookToken
 } from "./config.js";
 import { json, readBody, mimeType, safeCompare, cleanText } from "./utils.js";
@@ -11,7 +10,7 @@ import { isAuthenticated, routePath, routeBase, isPublicPath, redirectToLogin, a
 import { clients, broadcast, sendSnapshot, changesSince, currentEventSeq } from "./sse.js";
 import {
   readState, writeState, saveDraftForState, draftForState, syncLoadedCounts,
-  readConnectorViewState, writeConnectorViewState, setThreadName, writeStateIfIdle,
+  setThreadName, writeStateIfIdle,
   labelLiveVoiceTranscript, readLiveVoiceTranscripts,
   appendThreadNotice, readThreadNotices
 } from "./store.js";
@@ -30,15 +29,13 @@ import {
 import {
   listProjectFiles, createProjectFolder, deleteProjectFolder, createProjectFile,
   deleteProjectFile, writeProjectFile, renameProjectPath, saveUploadedFiles,
-  projectDownloadTarget, createProjectFolderZip, saveProjectUploads, stageProjectUploads
+  projectDownloadTarget, createProjectFolderZip, saveProjectUploads
 } from "./files.js";
 import { projectPath, relativeProjectPath, isAllowedDownload, allowedDownloadRoots } from "./paths.js";
-import * as ssh from "./ssh.js";
 import { webPushPublicKey, savePushSubscription, sendWebPushTaskDone } from "./webpush.js";
 import {
   nativeNotificationStatus, sendNativeTaskDone, setApprovalNotificationsSuppressed
 } from "./native-notifications.js";
-import { registerConnector, remoteConnectorsPayload, connectorFileOp, setConnectorRemark } from "./connectors.js";
 import { followModeForState } from "./store.js";
 import { threadName } from "./store.js";
 import {
@@ -67,11 +64,6 @@ function serveStatic(req, res) {
   res.writeHead(200, headers);
   if (req.method === "HEAD") { res.end(); return; }
   createReadStream(file).pipe(res);
-}
-
-function connectorIdFrom(req, body = {}) {
-  const url = new URL(req.url, "http://localhost");
-  return cleanConnectorIdValue(body.connectorId || url.searchParams.get("connector") || url.searchParams.get("connectorId") || "");
 }
 
 function cleanConnectorIdValue(value) {
@@ -176,10 +168,9 @@ function mergeFullReplyMessages(sessionMessages = [], stateMessages = [], liveMe
   return limitFullReplyMessages(rows);
 }
 
-async function dispatchFileList(req, res, connectorId) {
+async function dispatchFileList(req, res) {
   const url = new URL(req.url, "http://localhost");
   const dir = url.searchParams.get("dir") || "";
-  if (connectorId) return json(res, 200, await connectorFileOp(connectorId, "list", { dir }));
   return json(res, 200, await listProjectFiles(dir));
 }
 
@@ -258,11 +249,6 @@ export async function handle(req, res) {
       return json(res, 200, { authenticated: isAuthenticated(req) });
     }
 
-    if (req.method === "POST" && url.pathname === "/api/connectors/register") {
-      const body = await readBody(req, 80 * 1024);
-      return json(res, 200, { ok: true, ...await registerConnector(body) });
-    }
-
     if (!isAuthenticated(req) && !isPublicPath(url.pathname)) {
       if (url.pathname.startsWith("/api/remote/")) return json(res, 401, { error: "请先登录。" });
       if (req.method === "GET" || req.method === "HEAD") return redirectToLogin(res, basePath);
@@ -307,9 +293,7 @@ export async function handle(req, res) {
     if (req.method === "GET" && url.pathname === "/api/remote/state") {
       const snapshotEventSeq = currentEventSeq();
       const wantsFullReplies = url.searchParams.get("full") === "1";
-      const viewState = await readConnectorViewState();
-      const requestedConnectorId = connectorIdFrom(req);
-      const connectorId = requestedConnectorId || viewState.selectedConnectorId || "";
+      const connectorId = "";
       let state = await readState(connectorId);
       state.connectorId = state.connectorId || connectorId;
       const persistentVoiceMessages = !connectorId && state.threadId
@@ -389,7 +373,6 @@ export async function handle(req, res) {
           fullMessages.length
         )
         : undefined;
-      const connectorsPayload = await remoteConnectorsPayload();
       const pendingApprovals = pendingApprovalsPayload();
       return json(res, 200, {
         ...payload,
@@ -397,7 +380,7 @@ export async function handle(req, res) {
         fullMessageCount,
         connectorId,
         absoluteCwd: state.connectorId ? (state.cwd || "") : absoluteCwdLocal(state.cwd || ""),
-        fileLinkRoots: ssh.isSshConnectorId(connectorId) ? ["/"] : allowedDownloadRoots(),
+        fileLinkRoots: allowedDownloadRoots(),
         threadName: state.threadId ? await threadName(state.threadId) : "",
         draft: await draftForState(state, connectorId),
         running: Boolean(runner?.running || liveVoice || external?.running),
@@ -413,10 +396,6 @@ export async function handle(req, res) {
         followMode: runner?.followMode || await followModeForState(state, connectorId),
         contextUsage: runner?.contextUsage || external?.contextUsage || loadedThread?.contextUsage || null,
         runningThreads: runningThreads(),
-        connectors: connectorsPayload.devices,
-        localRemark: connectorsPayload.localRemark || "",
-        selectedConnectorId: connectorId,
-        disableLocal,
         pendingApprovals,
         eventSeq: snapshotEventSeq
       });
@@ -428,53 +407,35 @@ export async function handle(req, res) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/remote/model-settings") {
-      const connectorId = connectorIdFrom(req);
+      const connectorId = "";
       return json(res, 200, await sessionModelSettingsPayload(connectorId));
     }
 
     if (req.method === "POST" && url.pathname === "/api/remote/model-settings") {
       const body = await readBody(req);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
+      const connectorId = "";
       return json(res, 200, { ok: true, ...await updateSessionModelSettings(body, connectorId) });
     }
 
     if (req.method === "GET" && url.pathname === "/api/remote/usage") {
-      const connectorId = connectorIdFrom(req);
+      const connectorId = "";
       return json(res, 200, await usagePayload(connectorId));
     }
 
     if (req.method === "POST" && url.pathname === "/api/remote/usage/reset") {
       const body = await readBody(req);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
+      const connectorId = "";
       return json(res, 200, { ok: true, ...await resetUsageLimit(body.creditId || "", connectorId) });
     }
 
-    if (req.method === "GET" && url.pathname === "/api/remote/connectors") {
-      const viewState = await readConnectorViewState();
-      return json(res, 200, { ...await remoteConnectorsPayload(), selectedConnectorId: viewState.selectedConnectorId || "" });
-    }
-
-    if (req.method === "POST" && url.pathname === "/api/remote/connectors/select") {
-      const body = await readBody(req);
-      const selectedConnectorId = cleanConnectorIdValue(body.connectorId || "");
-      const viewState = await writeConnectorViewState(selectedConnectorId);
-      broadcast({ type: "connector_selected", selectedConnectorId: viewState.selectedConnectorId, updatedAt: viewState.updatedAt });
-      return json(res, 200, { ok: true, ...viewState });
-    }
-
-    if (req.method === "POST" && url.pathname === "/api/remote/connectors/remark") {
-      const body = await readBody(req);
-      return json(res, 200, await setConnectorRemark(body.connectorId || "", body.remark || ""));
-    }
-
     if (req.method === "GET" && url.pathname === "/api/remote/threads") {
-      const connectorId = connectorIdFrom(req);
+      const connectorId = "";
       return json(res, 200, { threads: await listThreads(connectorId) });
     }
 
     if (req.method === "POST" && url.pathname === "/api/remote/draft") {
       const body = await readBody(req);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
+      const connectorId = "";
       await saveDraftForState({ threadId: body.threadId || "", cwd: body.cwd || "" }, body.text || "", connectorId);
       return json(res, 200, { ok: true });
     }
@@ -484,102 +445,35 @@ export async function handle(req, res) {
       return json(res, 200, { ok: true, ...await respondToRemoteApproval(body) });
     }
 
-    if (req.method === "GET" && url.pathname === "/api/remote/ssh/status") {
-      return json(res, 200, ssh.sshStatusPayload());
-    }
-    if (req.method === "POST" && url.pathname === "/api/remote/ssh/connect") {
-      const body = await readBody(req);
-      const result = await ssh.sshConnect({ target: body.target || "", password: body.password || "" });
-      const viewState = await writeConnectorViewState(result.connectorId || "");
-      broadcast({ type: "connectors_changed" });
-      broadcast({ type: "connector_selected", selectedConnectorId: viewState.selectedConnectorId, updatedAt: viewState.updatedAt });
-      return json(res, 200, { ok: true, ...result, selectedConnectorId: viewState.selectedConnectorId });
-    }
-    if (req.method === "POST" && url.pathname === "/api/remote/ssh/disconnect") {
-      const disconnectedId = ssh.sshStatusPayload().connectorId || "";
-      ssh.closeSshConnection();
-      const currentView = await readConnectorViewState();
-      if (disconnectedId && currentView.selectedConnectorId === disconnectedId) {
-        const viewState = await writeConnectorViewState("");
-        broadcast({ type: "connector_selected", selectedConnectorId: "", updatedAt: viewState.updatedAt });
-      }
-      broadcast({ type: "connectors_changed" });
-      return json(res, 200, { ok: true, connected: false });
-    }
-    if (req.method === "GET" && url.pathname === "/api/remote/ssh/files") {
-      return json(res, 200, await ssh.listSshFiles(url.searchParams.get("dir") || ""));
-    }
-    if (req.method === "GET" && url.pathname === "/api/remote/ssh/file") {
-      return json(res, 200, await ssh.readSshFile(url.searchParams.get("path") || ""));
-    }
-    if (req.method === "POST" && url.pathname === "/api/remote/ssh/folders") {
-      const body = await readBody(req);
-      return json(res, 200, { ok: true, ...await ssh.createSshFolder(body.dir || "", body.name || "") });
-    }
-    if (req.method === "POST" && url.pathname === "/api/remote/ssh/files") {
-      const body = await readBody(req, 1200 * 1024);
-      return json(res, 200, { ok: true, ...await ssh.createSshFile(body.dir || "", body.name || "", body.content || "") });
-    }
-    if (req.method === "POST" && url.pathname === "/api/remote/ssh/file/write") {
-      const body = await readBody(req, 1200 * 1024);
-      return json(res, 200, await ssh.writeSshFile(body.path || "", body.content || ""));
-    }
-    if (req.method === "POST" && url.pathname === "/api/remote/ssh/delete") {
-      const body = await readBody(req);
-      return json(res, 200, { ok: true, ...await ssh.deleteSshPath(body.path || "") });
-    }
-    if (req.method === "POST" && url.pathname === "/api/remote/ssh/rename") {
-      const body = await readBody(req);
-      return json(res, 200, { ok: true, ...await ssh.renameSshPath(body.path || "", body.name || "") });
-    }
-
     if (req.method === "GET" && url.pathname === "/api/remote/files") {
-      const connectorId = connectorIdFrom(req);
-      return await dispatchFileList(req, res, connectorId);
+      return await dispatchFileList(req, res);
     }
     if (req.method === "POST" && url.pathname === "/api/remote/folders") {
       const body = await readBody(req);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
-      if (connectorId) return json(res, 200, { ok: true, ...await connectorFileOp(connectorId, "mkdir", { dir: body.dir || "", name: body.name || "" }) });
       return json(res, 200, { ok: true, ...await createProjectFolder(body.dir || "", body.name || "") });
     }
     if (req.method === "POST" && url.pathname === "/api/remote/folders/delete") {
       const body = await readBody(req);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
-      if (connectorId) return json(res, 200, { ok: true, ...await connectorFileOp(connectorId, "delete", { path: body.path || "" }) });
       return json(res, 200, { ok: true, ...await deleteProjectFolder(body.path || "") });
     }
     if (req.method === "POST" && url.pathname === "/api/remote/files") {
       const body = await readBody(req);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
-      if (connectorId) return json(res, 200, { ok: true, ...await connectorFileOp(connectorId, "createFile", { dir: body.dir || "", name: body.name || "", content: body.content || "" }) });
       return json(res, 200, { ok: true, ...await createProjectFile(body.dir || "", body.name || "", body.content || "") });
     }
     if (req.method === "POST" && url.pathname === "/api/remote/files/delete") {
       const body = await readBody(req);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
-      if (connectorId) return json(res, 200, { ok: true, ...await connectorFileOp(connectorId, "delete", { path: body.path || "" }) });
       return json(res, 200, { ok: true, ...await deleteProjectFile(body.path || "") });
     }
     if (req.method === "POST" && url.pathname === "/api/remote/file/write") {
       const body = await readBody(req, 1200 * 1024);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
-      if (connectorId) return json(res, 200, await connectorFileOp(connectorId, "write", { path: body.path || "", content: body.content || "" }));
       return json(res, 200, await writeProjectFile(body.path || "", body.content || ""));
     }
     if (req.method === "POST" && url.pathname === "/api/remote/path/rename") {
       const body = await readBody(req);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
-      if (connectorId) return json(res, 200, { ok: true, ...await connectorFileOp(connectorId, "rename", { path: body.path || "", name: body.name || "" }) });
       return json(res, 200, { ok: true, ...await renameProjectPath(body.path || "", body.name || "") });
     }
     if (req.method === "GET" && url.pathname === "/api/remote/file") {
-      const connectorId = connectorIdFrom(req);
       const filePath = url.searchParams.get("path") || "";
-      if (connectorId) {
-        const result = await connectorFileOp(connectorId, "read", { path: filePath });
-        return json(res, 200, result);
-      }
       const file = projectPath(filePath);
       const info = await stat(file);
       if (!info.isFile()) return json(res, 400, { error: "只能预览文件。" });
@@ -594,39 +488,6 @@ export async function handle(req, res) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/remote/project-download") {
-      const connectorId = connectorIdFrom(req);
-      if (connectorId) {
-        if (!ssh.isSshConnectorId(connectorId)) {
-          return json(res, 501, { error: "Connector 被控电脑文件下载暂不支持。" });
-        }
-        const target = await ssh.sshDownloadTarget(
-          connectorId,
-          url.searchParams.get("path") || "",
-          url.searchParams.get("type") || ""
-        );
-        if (target.type === "file") {
-          res.writeHead(200, {
-            "Content-Type": mimeType(target.path),
-            "Content-Length": target.size,
-            "Content-Disposition": attachmentDisposition(target.name),
-            "Cache-Control": "private, no-store"
-          });
-          target.stream().pipe(res);
-          return;
-        }
-        const archive = new ZipArchive({ zlib: { level: 6 } });
-        res.writeHead(200, {
-          "Content-Type": "application/zip",
-          "Content-Disposition": attachmentDisposition(`${target.name}.zip`),
-          "Cache-Control": "private, no-store"
-        });
-        archive.on("error", (error) => { if (!res.destroyed) res.destroy(error); });
-        req.on("close", () => { try { archive.abort(); } catch {} });
-        archive.pipe(res);
-        await ssh.appendSshFolderToArchive(connectorId, archive, target.path, target.name);
-        await archive.finalize();
-        return;
-      }
       const target = await projectDownloadTarget(url.searchParams.get("path") || "");
       const expectedType = url.searchParams.get("type") || "";
       if (expectedType && expectedType !== target.type) {
@@ -664,8 +525,7 @@ export async function handle(req, res) {
       }, 15000);
       const initialStatus = statusPayload(selectedRunner());
       if (!initialStatus.running) {
-        const viewState = await readConnectorViewState();
-        const connectorId = viewState.selectedConnectorId || "";
+        const connectorId = "";
         const state = await readState(connectorId);
         const liveVoice = !connectorId && state.threadId
           ? liveVoiceThreadSnapshot(state.threadId)
@@ -696,48 +556,16 @@ export async function handle(req, res) {
 
     if (req.method === "POST" && url.pathname === "/api/remote/upload") {
       const files = await saveUploadedFiles(req);
-      const connectorId = connectorIdFrom(req);
-      if (ssh.isSshConnectorId(connectorId)) {
-        try {
-          const remoteFiles = await ssh.uploadSshAttachments(connectorId, files);
-          return json(res, 200, { ok: true, files: remoteFiles });
-        } finally {
-          if (files[0]?.path) await rm(path.dirname(files[0].path), { recursive: true, force: true }).catch(() => {});
-        }
-      }
       return json(res, 200, { ok: true, files });
     }
 
     if (req.method === "POST" && url.pathname === "/api/remote/project-upload") {
-      const connectorId = connectorIdFrom(req);
-      if (connectorId) {
-        if (!ssh.isSshConnectorId(connectorId)) {
-          return json(res, 501, { error: "Connector 被控电脑文件上传暂不支持。" });
-        }
-        const staged = await stageProjectUploads(req);
-        try {
-          return json(res, 200, await ssh.uploadSshProject(connectorId, url.searchParams.get("dir") || "", staged));
-        } finally {
-          await staged.cleanup().catch(() => {});
-        }
-      }
       const result = await saveProjectUploads(req, url.searchParams.get("dir") || "");
       return json(res, 200, result);
     }
 
     if (req.method === "GET" && url.pathname === "/api/remote/download") {
-      const connectorId = connectorIdFrom(req);
       const requested = url.searchParams.get("p") || "";
-      if (ssh.isSshConnectorId(connectorId)) {
-        const target = await ssh.sshDownloadTarget(connectorId, requested, "file");
-        res.writeHead(200, {
-          "Content-Type": mimeType(target.path),
-          "Content-Length": target.size,
-          "Content-Disposition": `${url.searchParams.get("inline") === "1" ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(target.name)}`
-        });
-        target.stream().pipe(res);
-        return;
-      }
       const file = path.resolve(path.isAbsolute(requested) ? requested : path.join(codexWorkDir, requested));
       if (!isAllowedDownload(file) || !existsSync(file)) return json(res, 404, { error: "文件不存在或不允许下载。" });
       const info = await stat(file);
@@ -749,14 +577,14 @@ export async function handle(req, res) {
 
     if (req.method === "POST" && url.pathname === "/api/remote/send") {
       const body = await readBody(req);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
+      const connectorId = "";
       const result = await submitRemoteMessage(body.message, body.followMode, connectorId);
       return json(res, result.local ? 200 : 202, result);
     }
 
     if (req.method === "POST" && url.pathname === "/api/remote/notice") {
       const body = await readBody(req);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
+      const connectorId = "";
       const content = cleanText(body.message || body.content || "", 20000).trim();
       if (!content) return json(res, 400, { error: "提示内容不能为空。" });
       const state = await readState(connectorId);
@@ -771,14 +599,14 @@ export async function handle(req, res) {
 
     if (req.method === "POST" && url.pathname === "/api/remote/select") {
       const body = await readBody(req);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
+      const connectorId = "";
       const payload = await selectRemoteThread(body.threadId || "", connectorId);
       return json(res, 200, { ok: true, ...payload });
     }
 
     if (req.method === "POST" && url.pathname === "/api/remote/more") {
       const body = await readBody(req);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
+      const connectorId = "";
       const state = await readState(connectorId);
       if (!state.threadId) return json(res, 400, { error: "当前没有会话。" });
       if (body.threadId && body.threadId !== state.threadId) {
@@ -807,7 +635,7 @@ export async function handle(req, res) {
 
     if (req.method === "POST" && url.pathname === "/api/remote/new") {
       const body = await readBody(req);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
+      const connectorId = "";
       const payload = await createRemoteSession(body.cwd || "", connectorId);
       return json(res, 200, { ok: true, ...payload });
     }
@@ -817,14 +645,14 @@ export async function handle(req, res) {
       const threadId = cleanConnectorIdValue(body.threadId) || String(body.threadId || "");
       const name = String(body.name || "").trim();
       await setThreadName(threadId, name);
-      const state = await readState(cleanConnectorIdValue(body.connectorId || ""));
+      const state = await readState("");
       if (state.threadId === threadId) broadcast({ type: "thread_name", threadId, name });
       return json(res, 200, { ok: true, threadId, name });
     }
 
     if (req.method === "POST" && url.pathname === "/api/remote/delete") {
       const body = await readBody(req);
-      const connectorId = cleanConnectorIdValue(body.connectorId || "");
+      const connectorId = "";
       const threadId = String(body.threadId || "");
       const { runners } = await import("./runner.js");
       const runningRunner = runners.get(`${connectorId ? `${connectorId}:` : ""}thread:${threadId}`);

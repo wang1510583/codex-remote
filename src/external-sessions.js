@@ -1,5 +1,4 @@
 import { externalSessionPollMs, externalSessionStaleMs } from "./config.js";
-import { remoteSessionProvider } from "./connectors.js";
 import { isLiveVoiceThreadActive } from "./live-voice/leases.js";
 import { broadcast } from "./sse.js";
 import {
@@ -53,7 +52,7 @@ function snapshotKey(threadId = "", connectorId = "") {
 }
 
 function providerFor(connectorId = "") {
-  return connectorId ? remoteSessionProvider(connectorId) : localSessionProvider;
+  return localSessionProvider;
 }
 
 function normalizedMtime(value) {

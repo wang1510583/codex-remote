@@ -1,4 +1,3 @@
-import { disableLocal } from "../config.js";
 import { createLocalAppServer } from "../codex-server.js";
 import { liveVoiceThreadSnapshot } from "./leases.js";
 import { absoluteStateCwd } from "../paths.js";
@@ -8,7 +7,6 @@ import { isInternalMessage } from "../threads.js";
 import {
   appendLiveVoiceTranscript,
   labelLiveVoiceTranscript,
-  readConnectorViewState,
   readLiveVoiceTranscripts,
   readState,
   syncLoadedCounts,
@@ -101,39 +99,25 @@ export class CodexRemoteThreadAdapter {
   constructor({
     readStateFn = readState,
     writeStateFn = writeState,
-    readViewStateFn = readConnectorViewState,
     appServerFactory = createLocalAppServer,
     runningThreadsFn = runningThreads,
     broadcastFn = broadcast,
     loadThreadPageFn = loadThreadPage,
     appendLiveVoiceTranscriptFn = appendLiveVoiceTranscript,
-    readLiveVoiceTranscriptsFn = readLiveVoiceTranscripts,
-    localDisabled = disableLocal
+    readLiveVoiceTranscriptsFn = readLiveVoiceTranscripts
   } = {}) {
     this.readState = readStateFn;
     this.writeState = writeStateFn;
-    this.readViewState = readViewStateFn;
     this.appServerFactory = appServerFactory;
     this.runningThreads = runningThreadsFn;
     this.broadcast = broadcastFn;
     this.loadThreadPage = loadThreadPageFn;
     this.appendLiveVoiceTranscript = appendLiveVoiceTranscriptFn;
     this.readLiveVoiceTranscripts = readLiveVoiceTranscriptsFn;
-    this.localDisabled = localDisabled;
     this.creating = null;
   }
 
   async localState() {
-    if (this.localDisabled) {
-      throw liveVoiceHttpError("该服务已禁用本机 Codex，无法使用本机 Live Voice。", 503);
-    }
-    const view = await this.readViewState();
-    if (view.selectedConnectorId) {
-      throw liveVoiceHttpError(
-        "当前网页选择的是被控端。Live Voice 暂只支持总控服务器上的本机会话。",
-        409
-      );
-    }
     return this.readState("");
   }
 

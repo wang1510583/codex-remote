@@ -1,8 +1,6 @@
-# Codex Remote Web（总控端）
+# Codex Remote Web
 
-自托管的 Codex 远程网页控制台。通过浏览器远程操控服务器上的 Codex CLI（`codex app-server`），支持多会话、实时流式输出、Codex Desktop/CLI 外部会话同步、文件管理、被控端远程控制、任务完成通知。
-
-被控端 agent 是另一个独立仓库：[codex-remote-connector](./)。
+自托管的 Codex 远程网页控制台。通过浏览器远程操控服务器上的 Codex CLI（`codex app-server`），支持多会话、实时流式输出、Codex Desktop/CLI 外部会话同步、文件管理和任务完成通知。
 
 ## 架构
 
@@ -13,15 +11,13 @@
 Android 语音 App <--HTTP+WS--> Live Voice 兼容层 <--WebRTC信令--> 专用 realtime app-server
                               |                                  └─恢复并持有网页当前 thread
                               |
-                              +--<WebSocket 隧道>-->  被控端 connector  -->  被控端 codex app-server
-                              |
                               +-- Web Push / 微信 -->  任务完成通知
 ```
 
-- 后端：纯 Node.js（ESM），原生 `http` + `ws`，依赖 `ssh2` + `web-push` + `ws`
+- 后端：纯 Node.js（ESM），原生 `http` + `ws`，依赖 `web-push` + `ws`
 - 前端：原生 HTML/CSS/JS（PWA），无构建步骤
-- 模块化：`server.js` 入口 + `src/` 下按职责拆分的模块（router/runner/codex-server/connectors/store/live-voice/transport 等）
-- 本机会话可并行执行：不同会话各用独立 app-server 客户端；同一会话的新消息仍按 `queue` / `steer` 设置处理。被控端 connector 当前只有一个执行通道，因此仍按设备串行。
+- 模块化：`server.js` 入口 + `src/` 下按职责拆分的模块（router/runner/codex-server/store/live-voice/transport 等）
+- 本机会话可并行执行：不同会话各用独立 app-server 客户端；同一会话的新消息仍按 `queue` / `steer` 设置处理。
 
 ## 要求
 
@@ -64,10 +60,9 @@ cp .env.example .env
 | `CODEX_REMOTE_SHARED_APP_SERVER` | `1` | 优先连接本机 Codex Desktop 共享 app-server；设为 `0` 可禁用 |
 | `CODEX_APP_SERVER_SOCKET` | `$CODEX_HOME/app-server-control/app-server-control.sock` | 可选的共享 Unix Socket 路径 |
 | `CODEX_WORK_DIR` | 项目父目录 | 工作目录根（网页端文件管理限制在此目录下） |
-| `CODEX_EXTERNAL_SESSION_POLL_MS` | `1000` | 本机/被控端 Codex Desktop/CLI 外部会话同步间隔 |
+| `CODEX_EXTERNAL_SESSION_POLL_MS` | `1000` | 本机 Codex Desktop/CLI 外部会话同步间隔 |
 | `CODEX_EXTERNAL_SESSION_STALE_MS` | `7200000` | 无 `task_complete` 且长时间无文件活动时的故障兜底 |
 | `CODEX_REMOTE_PASSWORD` | — | **必填**，网页登录密码 |
-| `CODEX_REMOTE_CONNECTOR_TOKEN` | =登录密码 | 被控端配对令牌（建议单独设置，与登录密码不同） |
 | `CODEX_REMOTE_VOICE_TOKEN` | =登录密码 | Android Live Voice Basic Auth 密码（建议按需单独设置） |
 | `CODEX_REMOTE_LIVE_VOICE_ENABLED` | `1` | 是否启用 Android Live Voice 兼容接口 |
 | `CODEX_REMOTE_LIVE_VOICE_VOICE` | `cove` | Live Voice v3 声音 |
@@ -187,7 +182,6 @@ codex features enable realtime_conversation
 
 当前限制：
 
-- 只支持总控服务器的“本机”会话；网页若切换到 connector/SSH 被控端，接口会明确返回 `409`，不会误连到别的目录。
 - 同一 thread 同时只允许一个 Live Voice 连接；第二台安卓设备不会抢占已有连接。
 - Codex 的 `thread/realtime/*` 仍属于实验能力。兼容代码被隔离在 `src/live-voice/runtime.js`，以后 CLI 协议变化时只需替换这一层。
 - 当前安卓端保存一个连接目标。切换 HomeRail 与 Codex Remote 时可直接修改 App 内的服务器地址；若需要一键切换多个目标，可在安卓端后续增加配置列表，不必改动语音核心。
@@ -268,37 +262,11 @@ wss://你的域名/<CODEX_REMOTE_ROUTE_PREFIX>/api/notifications/ws
 
 不要选择只在页面存活时有效的 `Web API` 通知类型。使用 WebSocket 模式时也不需要依赖网页的 Service Worker Push；现有 Web Push 会继续服务普通 Chrome/桌面浏览器。
 
-## 接入被控端
-
-控制总控端所在的本机不需要安装被控端：服务会直接连接本机 Codex Desktop/CLI。只有控制其他电脑时才需要安装被控端 agent。
-
-1. 在 `.env` 设置 `CODEX_REMOTE_CONNECTOR_TOKEN`（与登录密码不同更安全）
-2. 在被控电脑上安装被控端 agent（见被控端仓库 README），安装时填总控端 URL + 配对令牌
-3. 被控端注册成功后会出现在网页的「PC 被控电脑」面板，点击切换即可像控制本机一样控制它
-
-## 纯控制中心模式（服务器不跑 codex）
-
-如果服务器只作为控制中心、不在服务器上跑 Codex（例如迁移到一台没装 codex CLI 的服务器），在 `.env` 设置：
-
-```
-CODEX_REMOTE_DISABLE_LOCAL=1
-```
-
-效果：
-
-- 网页「PC 被控电脑」面板**不显示"本机"选项**
-- 必须先添加被控端并切换过去才能使用，避免误用本机报错
-- 没有被控端时面板提示"请安装被控端"
-
-适合：一台服务器管理多台被控电脑，服务器本身不参与 Codex 执行。
-
 ## 数据目录
 
 运行时数据存在 `data/` 目录（已 gitignore）：
 
 - `remote-state.json` — 本机会话状态
-- `remote-state-<connectorId>.json` — 各被控端会话状态
-- `connectors.json` — 被控端设备注册信息
 - `drafts.json` / `follow-modes.json` / `thread-model-settings.json` / `thread-names.json` / `message-meta.json`
 - `push-vapid.json` / `push-subscriptions.json`
 - `generated-images/` / `uploads/`
@@ -314,12 +282,10 @@ CODEX_REMOTE_DISABLE_LOCAL=1
 │   ├── runner.js      # 会话/任务/命令管理
 │   ├── codex-server.js# Codex app-server 封装（transport 抽象）
 │   ├── live-voice/    # Android Live Voice 模块化兼容层
-│   ├── transport/     # local(spawn) / remote(ws 隧道)
-│   ├── connectors.js  # 被控端设备 + WebSocket 隧道
-│   ├── store.js       # 持久化（按 connectorId 隔离）
+│   ├── transport/     # 本机进程与共享 app-server 传输
+│   ├── store.js       # 本机状态持久化
 │   ├── sse.js         # SSE 广播
 │   ├── files.js       # 本机文件管理
-│   ├── ssh.js         # SSH/SFTP 远程文件
 │   ├── threads.js     # 会话历史解析
 │   ├── webpush.js     # Web Push + 微信通知
 │   ├── auth.js / paths.js / utils.js
@@ -330,13 +296,8 @@ CODEX_REMOTE_DISABLE_LOCAL=1
 └── .env
 ```
 
-## 与被控端的关系
-
-本仓库只包含总控端。被控端 agent（装在被控制电脑上）是另一个独立仓库，代码零相互依赖。迁移服务器拉本仓库，新增被控端拉被控端仓库。
-
 ## 常见问题
 
 - **网页打不开 / 静态资源 404**：检查路由前缀 `CODEX_REMOTE_ROUTE_PREFIX` 和反向代理的 `X-Forwarded-Prefix` 是否一致。
 - **登录提示"没有配置登录密码"**：`.env` 没设 `CODEX_REMOTE_PASSWORD`。
-- **被控端连不上**：确认被控端 `config.json` 的 `serverUrl` 含完整前缀（如 `https://host:5566/codex-remote`），且 `CODEX_REMOTE_CONNECTOR_TOKEN` 与总控端一致。
 - **codex 命令找不到**：设 `CODEX_BIN` 指向 codex 完整路径。

@@ -19,5 +19,5 @@ test("task completion preserves the final live reply instead of rebuilding messa
     remoteSource.indexOf('if (data.type === "thread_completion"')
   );
   assert.doesNotMatch(doneHandler, /loadState|renderState|innerHTML/);
-  assert.match(doneHandler, /scheduleThreadListRefresh\(250\)/);
+  assert.doesNotMatch(doneHandler, /openThreads|scheduleThreadListRefresh/);
 });

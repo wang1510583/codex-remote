@@ -12,9 +12,9 @@ const state = {
   absoluteCwd: "",
   fileLinkRoots: [],
   fileCwd: "",
-  fileCwdConnectorId: "",
   newCwd: "",
-  newCwdConnectorId: "",
+  hideProjectDotFolders: false,
+  hideNewSessionDotFolders: false,
   loadedCount: 0,
   messageCount: 0,
   loadingMore: false,
@@ -31,9 +31,6 @@ const state = {
   uploads: [],
   connected: false,
   draftKey: "",
-  sshConnected: false,
-  sshLabel: "",
-  sshCwd: "",
   eventDisconnected: false,
   lastEventSeq: 0,
   resyncingEvents: false,
@@ -53,15 +50,18 @@ const state = {
   showFullReplies: localStorage.getItem("codex-remote-show-full-replies") === "1",
   fullMessageCount: 0,
   completedUnreadThreads: new Set(),
-  connectors: [],
-  connectorJobs: [],
-  selectedConnectorId: "",
+  threadListCache: (() => {
+    try {
+      const cached = JSON.parse(localStorage.getItem("codex-remote-thread-list-cache") || "null");
+      return Array.isArray(cached?.threads) ? cached : null;
+    } catch {
+      return null;
+    }
+  })(),
   model: "",
   reasoningEffort: "",
   modelSettingsUpdatedAt: "",
   modelOptions: [],
-  localConnectorRemark: "",
-  disableLocal: false,
   localNotices: [],
   pendingApproval: null,
   pendingApprovalQueue: [],
@@ -127,47 +127,20 @@ const els = {
   input: document.querySelector("#remoteInput"),
   sendQueue: document.querySelector("#sendQueueRemote"),
   sendSteer: document.querySelector("#sendSteerRemote"),
-  connectorsButton: document.querySelector("#connectorsRemote"),
-  connectorPanel: document.querySelector("#connectorPanel"),
-  connectorList: document.querySelector("#connectorList"),
-  connectorJobs: document.querySelector("#connectorJobs"),
-  connectorJobForm: document.querySelector("#connectorJobForm"),
-  connectorPrompt: document.querySelector("#connectorPrompt"),
-  connectorCwd: document.querySelector("#connectorCwd"),
-  runConnectorJob: document.querySelector("#runConnectorJob"),
-  refreshConnectors: document.querySelector("#refreshConnectors"),
-  closeConnectors: document.querySelector("#closeConnectors"),
-  sshConnectButton: document.querySelector("#sshConnectRemote"),
-  usageButton: document.querySelector("#usageRemote"),
-  usagePanel: document.querySelector("#usagePanel"),
-  closeUsage: document.querySelector("#closeUsage"),
   usageContent: document.querySelector("#usageContent"),
   usageStatus: document.querySelector("#usageStatus"),
   modelSettingsButton: document.querySelector("#modelSettingsRemote"),
   modelSettingsPanel: document.querySelector("#modelSettingsPanel"),
+  modelSettingsTitle: document.querySelector("#modelSettingsTitle"),
+  modelUsageToggle: document.querySelector("#modelUsageToggle"),
+  modelSettingsView: document.querySelector("#modelSettingsView"),
+  modelUsageView: document.querySelector("#modelUsageView"),
   closeModelSettings: document.querySelector("#closeModelSettings"),
   modelSettingsCurrent: document.querySelector("#modelSettingsCurrent"),
   modelSettingsModels: document.querySelector("#modelSettingsModels"),
   modelSettingsEfforts: document.querySelector("#modelSettingsEfforts"),
   modelSettingsStatus: document.querySelector("#modelSettingsStatus"),
   onlyMineButton: document.querySelector("#onlyMineRemote"),
-  sshConnectPanel: document.querySelector("#sshConnectPanel"),
-  sshPanelTitle: document.querySelector("#sshPanelTitle"),
-  toggleSshView: document.querySelector("#toggleSshView"),
-  sshConnectForm: document.querySelector("#sshConnectForm"),
-  sshFilesView: document.querySelector("#sshFilesView"),
-  sshTarget: document.querySelector("#sshTarget"),
-  sshPassword: document.querySelector("#sshPassword"),
-  sshStatus: document.querySelector("#sshStatus"),
-  sshDisconnect: document.querySelector("#sshDisconnect"),
-  sshPath: document.querySelector("#sshPath"),
-  sshList: document.querySelector("#sshList"),
-  sshPreview: document.querySelector("#sshPreview"),
-  createSshFolder: document.querySelector("#createSshFolder"),
-  createSshFile: document.querySelector("#createSshFile"),
-  closeSshConnect: document.querySelector("#closeSshConnect"),
-  filesButton: document.querySelector("#filesRemote"),
-  filePanel: document.querySelector("#filePanel"),
   fileList: document.querySelector("#fileList"),
   filePath: document.querySelector("#filePath"),
   filePreview: document.querySelector("#filePreview"),
@@ -180,17 +153,21 @@ const els = {
   projectUploadStatus: document.querySelector("#projectUploadStatus"),
   createFolder: document.querySelector("#createFolderRemote"),
   createFile: document.querySelector("#createFileRemote"),
-  closeFiles: document.querySelector("#closeFiles"),
+  projectDotFolderFilter: document.querySelector("#projectDotFolderFilter"),
   newChat: document.querySelector("#newRemote"),
   newPath: document.querySelector("#newPath"),
   newList: document.querySelector("#newList"),
+  newDotFolderFilter: document.querySelector("#newDotFolderFilter"),
   createSession: document.querySelector("#createSessionRemote"),
   threadButton: document.querySelector("#threadRemote"),
   threadPanel: document.querySelector("#threadPanel"),
   threadPanelTitle: document.querySelector("#threadPanelTitle"),
+  refreshThreads: document.querySelector("#refreshThreads"),
   toggleThreadView: document.querySelector("#toggleThreadView"),
+  threadFilesToggle: document.querySelector("#threadFilesToggle"),
   threadExistingView: document.querySelector("#threadExistingView"),
   threadNewView: document.querySelector("#threadNewView"),
+  threadFilesView: document.querySelector("#threadFilesView"),
   threadList: document.querySelector("#threadList"),
   closeThreads: document.querySelector("#closeThreads"),
   loadMore: document.querySelector("#loadMoreMessages"),
@@ -335,7 +312,7 @@ function speechMessageKey(data = {}) {
   const messagePart = rawId && rawId !== "assistant"
     ? rawId
     : `content:${String(data.content || "")}`;
-  return `${currentConnectorId()}\n${state.threadId || state.cwd || "new"}\n${messagePart}`;
+  return `${state.threadId || state.cwd || "new"}\n${messagePart}`;
 }
 
 function speakCompletedAssistantMessage(data = {}) {
@@ -583,9 +560,6 @@ function updateStatusIcon() {
 
 function setRunning(running, queueLength = state.queueLength, queueMessages = state.queueMessages, followMode = state.followMode, steerLength = state.steerLength, steerMessages = state.steerMessages, contextUsage = state.contextUsage, runningThreads = state.runningThreads, reconnecting = false, externalRunning = false, liveVoiceRunning = state.liveVoiceRunning, liveVoiceConnected = state.liveVoiceConnected, liveVoiceTaskRunning = state.liveVoiceTaskRunning) {
   const wasRunning = state.running;
-  const wasExternalRunning = state.externalRunning;
-  const wasLiveVoiceRunning = state.liveVoiceRunning;
-  const previousRunningThreads = runningThreadsSignature(state.runningThreads);
   state.running = Boolean(running);
   state.liveVoiceRunning = state.running && Boolean(liveVoiceRunning);
   state.liveVoiceConnected = state.liveVoiceRunning && Boolean(liveVoiceConnected);
@@ -624,16 +598,9 @@ function setRunning(running, queueLength = state.queueLength, queueMessages = st
   syncTaskExecutionStatus();
   updateRealtimeReconcile();
   updateLoadMore();
-  if (
-    wasRunning !== state.running
-    || wasExternalRunning !== state.externalRunning
-    || wasLiveVoiceRunning !== state.liveVoiceRunning
-    || previousRunningThreads !== runningThreadsSignature(state.runningThreads)
-  ) scheduleThreadListRefresh();
 }
 
 function updateMeta() {
-  const connectorTag = state.selectedConnectorId ? `[${currentConnectorLabel()}] ` : "";
   const title = state.threadId ? (state.threadName || `会话 ${state.threadId.slice(0, 8)}`) : "新会话";
   const mode = state.followMode === "steer" ? "引导模式" : "队列模式";
   const percent = state.contextUsage ? Math.max(0, Math.min(100, Math.round(Number(state.contextUsage.remainingPercent)))) : null;
@@ -650,8 +617,8 @@ function updateMeta() {
               ? "Live Voice 已断线 · 后台任务继续执行 · 等待重连"
               : "Live Voice 已断线 · 等待安卓自动重连"))
       : (state.reconnecting ? "Codex 正在重新连接 · 任务继续等待" : normalModeText);
-  els.meta.textContent = `${connectorTag}${title}`;
-  els.meta.title = `${connectorTag}${title}`;
+  els.meta.textContent = title;
+  els.meta.title = title;
   els.mode.textContent = modeText;
   els.mode.title = modeText;
 }
@@ -949,8 +916,7 @@ function escapeHtml(text) {
 }
 
 function downloadUrl(file) {
-  const connector = typeof currentConnectorId === "function" ? currentConnectorId() : "";
-  return `${basePath}/api/remote/download?p=${encodeURIComponent(file)}${connector ? `&connector=${encodeURIComponent(connector)}` : ""}`;
+  return `${basePath}/api/remote/download?p=${encodeURIComponent(file)}`;
 }
 
 function inlineUrl(file) {
@@ -1118,9 +1084,7 @@ async function uploadFiles(files) {
   }
   els.uploadButton.disabled = true;
   try {
-    const connector = currentConnectorId();
-    const suffix = connector ? `?connector=${encodeURIComponent(connector)}` : "";
-    const response = await fetch(`${basePath}/api/remote/upload${suffix}`, { method: "POST", body: form });
+    const response = await fetch(`${basePath}/api/remote/upload`, { method: "POST", body: form });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     state.uploads.push(...(data.files || []));
@@ -1652,15 +1616,13 @@ function assistantBubbleByMessageId(messageId, includeFinal = false) {
 
 function localNoticeContext() {
   return {
-    connectorId: currentConnectorId(),
     threadId: state.threadId || "",
     cwd: state.cwd || ""
   };
 }
 
 function sameNoticeContext(left = {}, right = localNoticeContext()) {
-  return (left.connectorId || "") === (right.connectorId || "") &&
-    (left.threadId || "") === (right.threadId || "") &&
+  return (left.threadId || "") === (right.threadId || "") &&
     (left.cwd || "") === (right.cwd || "");
 }
 
@@ -1800,34 +1762,9 @@ function renderCommandList() {
   }
 }
 
-function currentConnectorId() {
-  return state.selectedConnectorId || "";
-}
-
-function connectorMatchesCurrent(data = {}) {
-  return data.connectorId === undefined || data.connectorId === currentConnectorId();
-}
-
 async function request(url, options = {}) {
-  const method = (options.method || (options.body ? "POST" : "GET")).toUpperCase();
-  let finalUrl = url;
-  const requestConnectorId = options.connectorId !== undefined ? options.connectorId || "" : currentConnectorId();
-  const connectorParam = `connector=${encodeURIComponent(requestConnectorId)}`;
-  if (!options.body) {
-    finalUrl += (url.includes("?") ? "&" : "?") + connectorParam;
-  }
-  let finalOptions = { ...options };
-  delete finalOptions.connectorId;
-  if (options.body && method !== "GET") {
-    try {
-      const parsed = JSON.parse(options.body);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.connectorId === undefined) {
-        parsed.connectorId = requestConnectorId;
-        finalOptions.body = JSON.stringify(parsed);
-      }
-    } catch {}
-  }
-  const response = await fetch(`${basePath}${finalUrl}`, {
+  const finalOptions = { ...options };
+  const response = await fetch(`${basePath}${url}`, {
     headers: { "Content-Type": "application/json" },
     ...finalOptions
   });
@@ -1846,11 +1783,10 @@ function isCurrentStateSnapshot(generation, snapshotEventSeq) {
   return !Number.isFinite(sequence) || sequence >= state.lastEventSeq;
 }
 
-async function loadState(connectorId = currentConnectorId()) {
+async function loadState() {
   const generation = ++stateLoadGeneration;
   const stateUrl = state.showFullReplies ? "/api/remote/state?full=1" : "/api/remote/state";
-  const data = await request(stateUrl, { connectorId });
-  if (connectorId !== currentConnectorId()) return;
+  const data = await request(stateUrl);
   if (!isCurrentStateSnapshot(generation, data.eventSeq)) return false;
   renderState(data);
   return true;
@@ -1864,7 +1800,6 @@ function settingsResponseIsCurrent(updatedAt = "") {
 }
 
 function renderState(data) {
-  if (!connectorMatchesCurrent(data)) return;
   // Any direct state render (thread selection, SSE state event, pagination)
   // supersedes older /state requests that may still be in flight.
   stateLoadGeneration += 1;
@@ -1872,16 +1807,11 @@ function renderState(data) {
   if (Array.isArray(data.pendingApprovals)) {
     syncApprovalRequests(data.pendingApprovals);
   }
-  const previousConnectorId = state.selectedConnectorId || "";
-  if (data.connectorId !== undefined) state.selectedConnectorId = data.connectorId || "";
-  if (Array.isArray(data.connectors)) state.connectors = data.connectors;
-  if (data.localRemark !== undefined) state.localConnectorRemark = data.localRemark || "";
-  if (data.disableLocal !== undefined) state.disableLocal = data.disableLocal;
   const shouldFollow = isNearBottom();
   const previousTop = els.logWrap.scrollTop;
   const previousThreadId = state.threadId;
   const nextThreadId = data.threadId || "";
-  if (nextThreadId !== previousThreadId || (state.selectedConnectorId || "") !== previousConnectorId) {
+  if (nextThreadId !== previousThreadId) {
     stopSpeech();
     clearTaskExecutionDetail();
   }
@@ -1973,7 +1903,7 @@ function renderState(data) {
     Boolean(data.liveVoiceConnected),
     Boolean(data.liveVoiceTaskRunning)
   );
-  if (!els.modelSettingsPanel.hidden && state.threadId !== previousThreadId) {
+  if (!els.modelSettingsPanel.hidden && !els.modelSettingsView.hidden && state.threadId !== previousThreadId) {
     queueMicrotask(() => openModelSettings().catch((error) => {
       els.modelSettingsStatus.textContent = `读取失败：${error.message}`;
     }));
@@ -2024,38 +1954,41 @@ function renderModelSettings(data = {}) {
   return true;
 }
 
+function setModelSettingsView(view = "model") {
+  const showUsage = view === "usage";
+  els.modelSettingsView.hidden = showUsage;
+  els.modelUsageView.hidden = !showUsage;
+  els.modelSettingsTitle.textContent = showUsage ? "使用量" : "模型与思考强度";
+  els.modelUsageToggle.textContent = showUsage ? "模型与思考强度" : "使用量";
+  els.modelUsageToggle.setAttribute("aria-pressed", String(showUsage));
+}
+
 async function openModelSettings() {
-  const connectorId = currentConnectorId();
   const threadId = state.threadId;
   els.modelSettingsPanel.hidden = false;
-  els.usagePanel.hidden = true;
-  els.filePanel.hidden = true;
+  setModelSettingsView("model");
   els.threadPanel.hidden = true;
-  els.sshConnectPanel.hidden = true;
-  els.connectorPanel.hidden = true;
   els.modelSettingsCurrent.textContent = "正在读取当前会话...";
   els.modelSettingsModels.innerHTML = "";
   els.modelSettingsEfforts.innerHTML = "";
   els.modelSettingsStatus.textContent = "";
-  const data = await request("/api/remote/model-settings", { connectorId });
-  if (connectorId !== currentConnectorId() || threadId !== state.threadId) return;
+  const data = await request("/api/remote/model-settings");
+  if (threadId !== state.threadId) return;
   renderModelSettings(data);
 }
 
 async function changeModelSettings(update = {}) {
   if (modelSettingsChanging) return;
   modelSettingsChanging = true;
-  const connectorId = currentConnectorId();
   const threadId = state.threadId;
   els.modelSettingsStatus.textContent = "正在切换...";
   for (const button of els.modelSettingsPanel.querySelectorAll(".modelOption, .effortOption")) button.disabled = true;
   try {
     const data = await request("/api/remote/model-settings", {
       method: "POST",
-      connectorId,
       body: JSON.stringify(update)
     });
-    if (connectorId !== currentConnectorId() || threadId !== state.threadId) return;
+    if (threadId !== state.threadId) return;
     renderModelSettings(data);
     els.modelSettingsStatus.textContent = "已为当前会话保存。";
   } catch (error) {
@@ -2162,13 +2095,10 @@ function renderUsage(data = {}) {
   els.usageContent.appendChild(resetCard);
 }
 
-async function openUsagePanel() {
-  els.usagePanel.hidden = false;
-  els.modelSettingsPanel.hidden = true;
-  els.filePanel.hidden = true;
+async function openUsageInModelSettings() {
+  els.modelSettingsPanel.hidden = false;
+  setModelSettingsView("usage");
   els.threadPanel.hidden = true;
-  els.sshConnectPanel.hidden = true;
-  els.connectorPanel.hidden = true;
   els.usageContent.innerHTML = '<div class="remoteEvent">正在刷新使用量...</div>';
   els.usageStatus.textContent = "";
   renderUsage(await request("/api/remote/usage"));
@@ -2209,7 +2139,6 @@ function updateLoadMore() {
 
 async function loadMoreMessages() {
   if (!state.threadId || state.running || state.loadingMore) return;
-  const connectorId = currentConnectorId();
   const threadId = state.threadId;
   const previousHeight = els.logWrap.scrollHeight;
   state.loadingMore = true;
@@ -2217,10 +2146,9 @@ async function loadMoreMessages() {
   try {
     const data = await request("/api/remote/more", {
       method: "POST",
-      connectorId,
       body: JSON.stringify({ threadId })
     });
-    if (connectorId !== currentConnectorId() || threadId !== state.threadId) return;
+    if (threadId !== state.threadId) return;
     renderState(data);
     els.logWrap.scrollTop = Math.max(0, els.logWrap.scrollHeight - previousHeight);
     updateScrollJumps();
@@ -2255,6 +2183,20 @@ function fileIcon(item) {
 
 function displayProjectPath(cwd = "", absoluteCwd = "") {
   return absoluteCwd || (cwd ? `/${cwd}` : "项目根目录");
+}
+
+function isDotFolder(item = {}) {
+  return item.type === "dir" && String(item.name || "").startsWith(".");
+}
+
+function applyDotFolderFilter(list, button, hideDotFolders = false) {
+  const hidden = Boolean(hideDotFolders);
+  button.textContent = `筛选：${hidden ? "开" : "关"}`;
+  button.setAttribute("aria-pressed", String(hidden));
+  button.title = hidden ? "当前隐藏以 . 开头的文件夹" : "当前显示以 . 开头的文件夹";
+  for (const row of list.querySelectorAll('[data-dot-folder="true"]')) {
+    row.hidden = hidden;
+  }
 }
 
 function setProjectUploadStatus(message = "", type = "") {
@@ -2319,10 +2261,6 @@ async function uploadProjectItems(files = [], selectionType = "files") {
     }
     return;
   }
-  if (currentConnectorId() && selectedConnector()?.connectionType !== "ssh") {
-    setProjectUploadStatus("Connector 被控电脑文件上传暂不支持。", "error");
-    return;
-  }
   if (files.length > 5000) {
     setProjectUploadStatus("单次最多上传 5000 个文件。", "error");
     return;
@@ -2334,13 +2272,11 @@ async function uploadProjectItems(files = [], selectionType = "files") {
   }
 
   const cwd = state.fileCwd || "";
-  const connectorId = currentConnectorId();
   const form = new FormData();
   files.forEach((file, index) => {
     form.append("files", file, projectUploadRelativePath(file, index));
   });
   const params = new URLSearchParams({ dir: cwd });
-  if (connectorId) params.set("connector", connectorId);
   const buttons = [els.projectUploadButton, els.projectFilesButton, els.projectFolderButton].filter(Boolean);
   buttons.forEach((button) => { button.disabled = true; });
   setProjectUploadStatus(`正在上传 ${files.length} 个文件（${formatSize(totalBytes)}）…`);
@@ -2350,7 +2286,7 @@ async function uploadProjectItems(files = [], selectionType = "files") {
       form,
       (percent) => setProjectUploadStatus(`正在上传 ${files.length} 个文件（${formatSize(totalBytes)}）… ${percent}%`)
     );
-    if (connectorId === currentConnectorId() && cwd === state.fileCwd) {
+    if (cwd === state.fileCwd) {
       await openFiles(data.cwd ?? cwd);
     }
     const folderText = Number(data.directories) > 0 ? `，保留 ${data.directories} 个文件夹层级` : "";
@@ -2374,20 +2310,10 @@ function projectDownloadUrl(file = "", type = "file") {
     path: String(file || ""),
     type: type === "dir" ? "dir" : "file"
   });
-  const connectorId = currentConnectorId();
-  if (connectorId) params.set("connector", connectorId);
   return `${basePath}/api/remote/project-download?${params.toString()}`;
 }
 
 function downloadProjectItem(file = "", name = "", type = "file") {
-  if (currentConnectorId() && selectedConnector()?.connectionType !== "ssh") {
-    upsertAssistantMessage(
-      "Connector 被控电脑文件下载暂不支持。",
-      true,
-      "project-download-unsupported"
-    );
-    return false;
-  }
   const itemType = type === "dir" ? "dir" : "file";
   const baseName = name || projectItemName(file);
   const link = document.createElement("a");
@@ -2401,20 +2327,15 @@ function downloadProjectItem(file = "", name = "", type = "file") {
 }
 
 async function openFiles(dir = "") {
-  const connectorId = state.selectedConnectorId || "";
-  if (state.fileCwdConnectorId !== connectorId) {
-    state.fileCwd = "";
-    state.fileCwdConnectorId = connectorId;
-  }
   els.modelSettingsPanel.hidden = true;
-  els.usagePanel.hidden = true;
-  els.filePanel.hidden = false;
+  els.threadPanel.hidden = false;
+  els.threadButton.setAttribute("aria-expanded", "true");
+  setThreadView("files");
   els.filePreview.hidden = true;
   els.fileList.innerHTML = '<div class="remoteEvent">加载中...</div>';
   try {
     const data = await request(`/api/remote/files?dir=${encodeURIComponent(dir)}`);
     state.fileCwd = data.cwd || "";
-    state.fileCwdConnectorId = connectorId;
     els.filePath.textContent = displayProjectPath(data.cwd, data.absoluteCwd);
     els.fileList.innerHTML = "";
     if (data.cwd) {
@@ -2428,12 +2349,13 @@ async function openFiles(dir = "") {
     }
     for (const item of data.entries || []) {
       const row = document.createElement("div");
-      row.className = "fileItem sshFileItem";
+      row.className = "fileItem fileItemWithActions";
       row.role = "button";
       row.tabIndex = 0;
       row.dataset.type = item.type;
       row.dataset.path = item.path;
       row.dataset.name = item.name;
+      row.dataset.dotFolder = String(isDotFolder(item));
       row.innerHTML = '<span></span><div><strong></strong><small></small></div><div class="fileActions"></div>';
       row.querySelector("span").textContent = fileIcon(item);
       row.querySelector("strong").textContent = item.name;
@@ -2444,6 +2366,7 @@ async function openFiles(dir = "") {
       actions.append(fileActionButton("改名", "rename"), fileActionButton("删除", "delete", "danger"));
       els.fileList.appendChild(row);
     }
+    applyDotFolderFilter(els.fileList, els.projectDotFolderFilter, state.hideProjectDotFolders);
   } catch (error) {
     els.fileList.innerHTML = `<div class="remoteEvent">错误：${error.message}</div>`;
   }
@@ -2519,12 +2442,7 @@ async function deleteProjectItem(file = "", name = "", type = "") {
 }
 
 async function openNewSessionPicker(dir = undefined) {
-  const connectorId = state.selectedConnectorId || "";
-  if (state.newCwdConnectorId !== connectorId) {
-    state.newCwd = "";
-    state.newCwdConnectorId = connectorId;
-  }
-  const nextDir = dir === undefined ? (state.newCwd || (connectorId ? "" : (state.cwd || ""))) : dir;
+  const nextDir = dir === undefined ? (state.newCwd || state.cwd || "") : dir;
   state.newCwd = nextDir || "";
   els.threadPanel.hidden = false;
   setThreadView("new");
@@ -2553,25 +2471,24 @@ async function openNewSessionPicker(dir = undefined) {
       row.type = "button";
       row.dataset.type = item.type;
       row.dataset.path = item.path;
+      row.dataset.dotFolder = String(isDotFolder(item));
       row.innerHTML = '<span></span><strong></strong><small></small>';
       row.querySelector("span").textContent = "📁";
       row.querySelector("strong").textContent = item.name;
       row.querySelector("small").textContent = "文件夹";
       els.newList.appendChild(row);
     }
+    applyDotFolderFilter(els.newList, els.newDotFolderFilter, state.hideNewSessionDotFolders);
   } catch (error) {
     els.newList.innerHTML = `<div class="remoteEvent">错误：${error.message}</div>`;
   }
 }
 
 async function createSessionInSelectedFolder() {
-  const connectorId = currentConnectorId();
   const data = await request("/api/remote/new", {
     method: "POST",
-    connectorId,
     body: JSON.stringify({ cwd: state.newCwd || "" })
   });
-  if (connectorId !== currentConnectorId()) return;
   renderState(data);
   els.threadPanel.hidden = true;
 }
@@ -2586,7 +2503,7 @@ async function previewFile(file) {
     } else {
       els.filePreview.innerHTML = `
         <div class="filePreviewTop"><strong>${escapeHtml(data.path)}</strong><div class="panelActions"><button type="button" data-save-project-file>保存</button><button type="button" data-download-project-file>下载</button></div></div>
-        <div class="sshEditor"><textarea id="projectEditorText" spellcheck="false">${escapeHtml(data.text)}</textarea></div>
+        <div class="projectEditor"><textarea id="projectEditorText" spellcheck="false">${escapeHtml(data.text)}</textarea></div>
       `;
       els.filePreview.querySelector("[data-save-project-file]").addEventListener("click", () => saveProjectFile(data.path));
     }
@@ -2611,424 +2528,26 @@ async function saveProjectFile(file) {
   await previewFile(file);
 }
 
-function updateSshStatus(data = {}) {
-  state.sshConnected = Boolean(data.connected);
-  state.sshLabel = data.label || state.sshLabel || "";
-  state.sshCwd = data.cwd || state.sshCwd || "";
-  els.sshStatus.textContent = state.sshConnected
-    ? `已连接并可运行 Codex：${state.sshLabel}${data.codexVersion ? ` · ${data.codexVersion}` : ""}`
-    : "未连接";
-}
-
-function setSshView(view = "config") {
-  const showFiles = view === "files";
-  els.sshConnectForm.hidden = showFiles;
-  els.sshFilesView.hidden = !showFiles;
-  els.sshPanelTitle.textContent = showFiles ? "ssh电脑" : "ssh连接";
-  els.toggleSshView.textContent = showFiles ? "ssh连接" : "ssh电脑";
-}
-
-async function loadSshStatus() {
-  const data = await request("/api/remote/ssh/status");
-  updateSshStatus(data);
-  return data;
-}
-
-async function openSshConnect() {
-  els.modelSettingsPanel.hidden = true;
-  els.usagePanel.hidden = true;
-  els.sshConnectPanel.hidden = false;
-  setSshView("config");
-  try {
-    updateSshStatus(await loadSshStatus());
-  } catch (error) {
-    els.sshStatus.textContent = `状态读取失败：${error.message}`;
-  }
-}
-
-async function connectSsh() {
-  const target = els.sshTarget.value.trim();
-  const password = els.sshPassword.value;
-  els.sshStatus.textContent = "连接中...";
-  const data = await request("/api/remote/ssh/connect", {
-    method: "POST",
-    body: JSON.stringify({ target, password })
-  });
-  els.sshPassword.value = "";
-  updateSshStatus(data);
-  await loadConnectors();
-  await request("/api/remote/connectors/select", {
-    method: "POST",
-    connectorId: data.connectorId,
-    body: JSON.stringify({ connectorId: data.connectorId })
-  });
-  await applyConnectorSelection(data.connectorId);
-  await openSshComputer(data.cwd || "");
-}
-
-async function disconnectSsh() {
-  const selectedWasSsh = selectedConnector()?.connectionType === "ssh";
-  await request("/api/remote/ssh/disconnect", { method: "POST" });
-  if (selectedWasSsh) {
-    await request("/api/remote/connectors/select", {
-      method: "POST",
-      connectorId: "",
-      body: JSON.stringify({ connectorId: "" })
-    });
-    await applyConnectorSelection("");
-  }
-  await loadConnectors();
-  updateSshStatus({ connected: false });
-  els.sshList.innerHTML = "";
-  els.sshPath.textContent = "";
-  els.sshPreview.hidden = true;
-}
-
-async function openSshComputer(dir = state.sshCwd || "") {
-  els.sshConnectPanel.hidden = false;
-  setSshView("files");
-  els.sshPreview.hidden = true;
-  els.sshList.innerHTML = '<div class="remoteEvent">加载中...</div>';
-  try {
-    const data = await request(`/api/remote/ssh/files?dir=${encodeURIComponent(dir || "")}`);
-    updateSshStatus(data);
-    state.sshCwd = data.cwd || "";
-    els.sshPath.textContent = `${data.label || state.sshLabel || "ssh"}:${data.cwd || "/"}`;
-    els.sshList.innerHTML = "";
-    if (data.cwd && data.cwd !== "/") {
-      const up = document.createElement("button");
-      up.className = "fileItem";
-      up.type = "button";
-      up.dataset.type = "dir";
-      up.dataset.path = data.parent || "/";
-      up.textContent = "↩ 上一级";
-      els.sshList.appendChild(up);
-    }
-    if (!data.entries?.length) {
-      els.sshList.innerHTML = '<div class="remoteEvent">没有文件或文件夹</div>';
-    }
-    for (const item of data.entries || []) {
-      const row = document.createElement("div");
-      row.className = "fileItem sshFileItem";
-      row.role = "button";
-      row.tabIndex = 0;
-      row.dataset.type = item.type;
-      row.dataset.path = item.path;
-      row.dataset.name = item.name;
-      row.innerHTML = '<span></span><div><strong></strong><small></small></div><div class="fileActions"></div>';
-      row.querySelector("span").textContent = fileIcon(item);
-      row.querySelector("strong").textContent = item.name;
-      row.querySelector("small").textContent = item.type === "dir" ? "文件夹" : `${formatSize(item.size)} · ${item.mtime ? new Date(item.mtime).toLocaleString() : ""}`;
-      const actions = row.querySelector(".fileActions");
-      if (item.type === "file") actions.append(sshActionButton("编辑", "edit"));
-      actions.append(sshActionButton("改名", "rename"), sshActionButton("删除", "delete", "danger"));
-      els.sshList.appendChild(row);
-    }
-  } catch (error) {
-    els.sshList.innerHTML = `<div class="remoteEvent">错误：${error.message}</div>`;
-    updateSshStatus({ connected: false });
-  }
-}
-
-function sshActionButton(text, action, extraClass = "") {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.dataset.sshAction = action;
-  button.className = extraClass;
-  button.textContent = text;
-  return button;
-}
-
-async function createSshFolderInCurrentDir() {
-  const name = prompt("请输入远程文件夹名称");
-  if (name === null) return;
-  const data = await request("/api/remote/ssh/folders", {
-    method: "POST",
-    body: JSON.stringify({ dir: state.sshCwd || "", name })
-  });
-  await openSshComputer(data.cwd || state.sshCwd);
-}
-
-async function createSshFileInCurrentDir() {
-  const name = prompt("请输入远程文件名");
-  if (name === null) return;
-  const content = prompt("请输入初始内容，可留空", "");
-  if (content === null) return;
-  const data = await request("/api/remote/ssh/files", {
-    method: "POST",
-    body: JSON.stringify({ dir: state.sshCwd || "", name, content })
-  });
-  await openSshComputer(data.cwd || state.sshCwd);
-}
-
-async function renameSshItem(file, oldName = "") {
-  const name = prompt("请输入新名称", oldName || "");
-  if (name === null) return;
-  const data = await request("/api/remote/ssh/rename", {
-    method: "POST",
-    body: JSON.stringify({ path: file, name })
-  });
-  await openSshComputer(data.cwd || state.sshCwd);
-}
-
-async function deleteSshItem(file, name = "") {
-  if (!confirm(`确定删除“${name || file}”吗？文件夹会递归删除。`)) return;
-  const data = await request("/api/remote/ssh/delete", {
-    method: "POST",
-    body: JSON.stringify({ path: file })
-  });
-  els.sshPreview.hidden = true;
-  await openSshComputer(data.cwd || state.sshCwd);
-}
-
-async function previewSshFile(file) {
-  els.sshPreview.hidden = false;
-  els.sshPreview.innerHTML = '<div class="remoteEvent">加载中...</div>';
-  try {
-    const data = await request(`/api/remote/ssh/file?path=${encodeURIComponent(file)}`);
-    els.sshPreview.innerHTML = `
-      <div class="filePreviewTop"><strong>${escapeHtml(data.path)}</strong><button type="button" data-save-ssh-file>保存</button></div>
-      <div class="sshEditor"><textarea id="sshEditorText" spellcheck="false">${escapeHtml(data.text)}</textarea></div>
-    `;
-    els.sshPreview.querySelector("[data-save-ssh-file]").addEventListener("click", () => saveSshFile(data.path));
-  } catch (error) {
-    els.sshPreview.innerHTML = `<div class="filePreviewTop"><strong>${escapeHtml(file)}</strong></div><div class="remoteEvent">${escapeHtml(error.message)}</div>`;
-  }
-}
-
-async function saveSshFile(file) {
-  const editor = els.sshPreview.querySelector("#sshEditorText");
-  if (!editor) return;
-  await request("/api/remote/ssh/file/write", {
-    method: "POST",
-    body: JSON.stringify({ path: file, content: editor.value })
-  });
-  await previewSshFile(file);
-}
-
-function connectorTime(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString();
-}
-
-function selectedConnector() {
-  return state.connectors.find((device) => device.id === state.selectedConnectorId) || null;
-}
-
-function currentConnectorLabel() {
-  if (!state.selectedConnectorId) {
-    const localRemark = connectorRemark("");
-    return localRemark || "本机";
-  }
-  const device = selectedConnector();
-  if (device) {
-    const remark = connectorRemark(device.id);
-    if (remark) return remark;
-  }
-  return device?.name || device?.hostname || state.selectedConnectorId;
-}
-
-function connectorRemark(id = "") {
-  if (!id) return state.localConnectorRemark || "";
-  const device = state.connectors.find((item) => item.id === id);
-  return device?.remark || "";
-}
-
-async function promptConnectorRemark(device) {
-  const current = connectorRemark(device.id);
-  const input = prompt(`为「${device.name || device.hostname || device.id}」设置备注名：`, current);
-  if (input === null) return;
-  const trimmed = input.trim();
-  const data = await request("/api/remote/connectors/remark", {
-    method: "POST",
-    body: JSON.stringify({ connectorId: device.id || "", remark: trimmed })
-  });
-  if (device.id) {
-    const target = state.connectors.find((item) => item.id === device.id);
-    if (target) target.remark = data.remark || "";
-  } else {
-    state.localConnectorRemark = data.remark || "";
-  }
-  renderConnectors();
-  updateMeta();
-}
-
-function connectorSubtitle(device) {
-  return [device.hostname, device.platform, device.arch].filter(Boolean).join(" · ");
-}
-
-function connectorStatusText(device) {
-  return `${device.online ? "在线" : "离线"}${device.tunnelConnected ? " · 已连接" : ""}${device.lastSeen ? ` · ${connectorTime(device.lastSeen)}` : ""}`;
-}
-
-function appendConnectorRow(device) {
-  const row = document.createElement("div");
-  row.className = "connectorRow";
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = `connectorItem${device.id === state.selectedConnectorId ? " active" : ""}${device.online ? " online" : ""}`;
-  button.dataset.connectorId = device.id;
-  button.innerHTML = '<span class="connectorDot"></span><strong></strong><small></small><small></small>';
-  const remark = connectorRemark(device.id);
-  button.querySelector("strong").textContent = remark || device.name || device.hostname || device.id;
-  button.querySelectorAll("small")[0].textContent = connectorSubtitle(device);
-  button.querySelectorAll("small")[1].textContent = connectorStatusText(device);
-  row.appendChild(button);
-
-  const remarkBtn = document.createElement("button");
-  remarkBtn.type = "button";
-  remarkBtn.className = "connectorRemarkBtn";
-  remarkBtn.title = "设置备注名";
-  remarkBtn.textContent = "备注";
-  remarkBtn.dataset.connectorId = device.id;
-  remarkBtn.addEventListener("click", (event) => {
-    event.stopPropagation();
-    event.preventDefault();
-    promptConnectorRemark(device).catch((error) => upsertAssistantMessage(`备注保存失败：${error.message}`, true));
-  });
-  row.appendChild(remarkBtn);
-  els.connectorList.appendChild(row);
-}
-
-function renderConnectors() {
-  if (!els.connectorList) return;
-  els.connectorList.innerHTML = "";
-  if (!state.disableLocal) {
-    appendConnectorRow({
-      id: "",
-      name: "本机",
-      hostname: "local",
-      platform: "Codex",
-      arch: "",
-      online: true
-    });
-  }
-  if (!state.connectors.length) {
-    const hint = document.createElement("div");
-    hint.className = "remoteEvent";
-    hint.textContent = state.disableLocal ? "还没有接入被控电脑。请在一台电脑上安装被控端（codex-remote-connector）后刷新。" : "还没有接入被控电脑。";
-    els.connectorList.appendChild(hint);
-  } else {
-    for (const device of state.connectors) {
-      appendConnectorRow(device);
-    }
-  }
-}
-
-async function loadConnectors() {
-  if (!els.connectorPanel) return;
-  const data = await request("/api/remote/connectors");
-  state.connectors = Array.isArray(data.devices) ? data.devices : [];
-  if (data.selectedConnectorId !== undefined) state.selectedConnectorId = data.selectedConnectorId || "";
-  state.localConnectorRemark = data.localRemark || "";
-  renderConnectors();
-  updateMeta();
-}
-
-async function openConnectors() {
-  els.modelSettingsPanel.hidden = true;
-  els.usagePanel.hidden = true;
-  els.connectorPanel.hidden = false;
-  els.filePanel.hidden = true;
-  els.threadPanel.hidden = true;
-  els.sshConnectPanel.hidden = true;
-  await loadConnectors();
-}
-
-async function switchConnector(id = "") {
-  const device = state.connectors.find((item) => item.id === id);
-  if (device?.connectionType === "ssh" && !device.online) {
-    els.connectorPanel.hidden = true;
-    await openSshConnect();
-    els.sshStatus.textContent = "此 SSH 设备当前离线，请输入密码重新连接。";
-    return;
-  }
-  if (state.selectedConnectorId === id) {
-    els.connectorPanel.hidden = true;
-    return;
-  }
-  await request("/api/remote/connectors/select", {
-    method: "POST",
-    connectorId: id,
-    body: JSON.stringify({ connectorId: id })
-  });
-  await applyConnectorSelection(id, { closePanel: true });
-}
-
-async function applyConnectorSelection(id = "", options = {}) {
-  state.selectedConnectorId = id;
-  state.externalRunning = false;
-  state.liveVoiceRunning = false;
-  state.liveVoiceConnected = false;
-  state.liveVoiceTaskRunning = false;
-  state.externalTaskStartedAt = "";
-  state.threadId = "";
-  state.threadName = "";
-  state.cwd = "";
-  state.absoluteCwd = "";
-  state.model = "";
-  state.reasoningEffort = "";
-  state.modelSettingsUpdatedAt = "";
-  state.modelOptions = [];
-  state.fileCwd = "";
-  state.fileCwdConnectorId = id;
-  state.newCwd = "";
-  state.newCwdConnectorId = id;
-  state.messages = [];
-  state.activeAssistant = null;
-  state.assistantBubbles.clear();
-  state.replyDone = false;
-  els.log.innerHTML = "";
-  els.modelSettingsPanel.hidden = true;
-  els.usagePanel.hidden = true;
-  if (options.closePanel) els.connectorPanel.hidden = true;
-  updateMeta();
-  await loadState(id).catch((error) => upsertAssistantMessage(`切换失败：${error.message}`, true));
-  if (!els.filePanel.hidden) loadFiles().catch(() => {});
-  if (!els.threadPanel.hidden) openThreads().catch(() => {});
-  if (!els.connectorPanel.hidden) renderConnectors();
-}
-
 let threadListRequestGeneration = 0;
-let threadListRefreshTimer = null;
 
-function runningThreadsSignature(rows = []) {
-  return (Array.isArray(rows) ? rows : [])
-    .map((item) => [
-      item.connectorId || "",
-      item.threadId || item.runnerKey || "",
-      item.externalRunning ? 1 : 0,
-      item.liveVoiceRunning ? 1 : 0,
-      item.liveVoiceConnected ? 1 : 0,
-      item.liveVoiceTaskRunning ? 1 : 0
-    ].join(":"))
-    .sort()
-    .join("|");
-}
-
-function scheduleThreadListRefresh(delay = 150) {
-  if (els.threadPanel.hidden || els.threadExistingView.hidden) return;
-  clearTimeout(threadListRefreshTimer);
-  threadListRefreshTimer = setTimeout(() => {
-    threadListRefreshTimer = null;
-    if (els.threadPanel.hidden || els.threadExistingView.hidden) return;
-    openThreads().catch((error) => console.warn("会话列表刷新失败", error));
-  }, Math.max(0, Number(delay) || 0));
-}
-
-async function openThreads() {
+async function openThreads({ load = true } = {}) {
   els.modelSettingsPanel.hidden = true;
-  els.usagePanel.hidden = true;
-  const connectorId = currentConnectorId();
   const requestGeneration = ++threadListRequestGeneration;
   els.threadPanel.hidden = false;
   setThreadView("existing");
-  els.threadList.innerHTML = '<div class="remoteEvent">加载中...</div>';
+  if (load) {
+    els.threadList.innerHTML = '<div class="remoteEvent">加载中...</div>';
+  }
   try {
-    const data = await request("/api/remote/threads", { connectorId });
-    if (connectorId !== currentConnectorId() || requestGeneration !== threadListRequestGeneration) return;
+    const data = load ? await request("/api/remote/threads") : state.threadListCache;
+    if (requestGeneration !== threadListRequestGeneration) return;
+    if (!data) return;
+    if (load) {
+      state.threadListCache = data;
+      try {
+        localStorage.setItem("codex-remote-thread-list-cache", JSON.stringify(data));
+      } catch {}
+    }
     els.threadList.innerHTML = "";
     if (!data.threads?.length) {
       els.threadList.innerHTML = '<div class="remoteEvent">没有找到会话</div>';
@@ -3070,18 +2589,42 @@ async function openThreads() {
       els.threadList.appendChild(row);
     }
   } catch (error) {
-    if (connectorId !== currentConnectorId() || requestGeneration !== threadListRequestGeneration) return;
+    if (requestGeneration !== threadListRequestGeneration) return;
     els.threadList.innerHTML = "";
     els.threadList.innerHTML = `<div class="remoteEvent">错误：${error.message}</div>`;
   }
 }
 
+function toggleThreadPanel(event) {
+  event?.preventDefault();
+  event?.stopPropagation();
+  if (!els.threadPanel.hidden) {
+    els.threadPanel.hidden = true;
+    els.threadButton.setAttribute("aria-expanded", "false");
+    return;
+  }
+  // Reveal the panel synchronously so mobile WebViews cannot close it again
+  // while the same SVG-button click is still bubbling to the document.
+  els.threadPanel.hidden = false;
+  els.threadButton.setAttribute("aria-expanded", "true");
+  openThreads({ load: false }).catch((error) => {
+    els.threadList.innerHTML = `<div class="remoteEvent">错误：${escapeHtml(error.message || "无法读取会话")}</div>`;
+  });
+}
+
 function setThreadView(view = "existing") {
   const showNew = view === "new";
-  els.threadExistingView.hidden = showNew;
+  const showFiles = view === "files";
+  els.threadExistingView.hidden = showNew || showFiles;
   els.threadNewView.hidden = !showNew;
-  els.threadPanelTitle.textContent = showNew ? "新建会话" : "选择已有会话";
+  els.threadFilesView.hidden = !showFiles;
+  els.threadPanel.classList.toggle("filesView", showFiles);
+  els.threadPanelTitle.textContent = showFiles ? "项目文件夹" : (showNew ? "新建会话" : "选择已有会话");
+  els.refreshThreads.hidden = showNew || showFiles;
   els.toggleThreadView.textContent = showNew ? "选择已有会话" : "新建会话";
+  els.threadFilesToggle.textContent = showFiles ? "选择已有会话" : "项目文件夹";
+  els.threadFilesToggle.setAttribute("aria-pressed", String(showFiles));
+  if (!showFiles) closeProjectUploadMenu();
 }
 
 async function renameThread(thread) {
@@ -3095,7 +2638,15 @@ async function renameThread(thread) {
     state.threadName = data.name || "";
     updateMeta();
   }
-  openThreads();
+  if (state.threadListCache?.threads) {
+    const cached = state.threadListCache.threads.find((item) => item.threadId === thread.threadId);
+    if (cached) {
+      cached.name = data.name || "";
+      cached.title = data.title || cached.title;
+    }
+    try { localStorage.setItem("codex-remote-thread-list-cache", JSON.stringify(state.threadListCache)); } catch {}
+    openThreads({ load: false });
+  }
 }
 
 async function deleteThread(thread) {
@@ -3108,29 +2659,30 @@ async function deleteThread(thread) {
   if (thread.threadId === state.threadId) {
     renderState({ threadId: "", threadName: "", messages: [], running: false });
   }
-  openThreads();
+  if (state.threadListCache?.threads) {
+    state.threadListCache.threads = state.threadListCache.threads.filter((item) => item.threadId !== thread.threadId);
+    try { localStorage.setItem("codex-remote-thread-list-cache", JSON.stringify(state.threadListCache)); } catch {}
+    openThreads({ load: false });
+  }
 }
 
 async function selectThread(threadId) {
-  const connectorId = currentConnectorId();
   const data = await request("/api/remote/select", {
     method: "POST",
-    connectorId,
     body: JSON.stringify({ threadId })
   });
-  if (connectorId !== currentConnectorId()) return;
   state.completedUnreadThreads.delete(threadId);
-  if (state.showFullReplies) await loadState(connectorId);
+  if (state.showFullReplies) await loadState();
   else renderState(data);
   els.threadPanel.hidden = true;
 }
 
 let externalSessionRefreshTimer = null;
 
-function scheduleExternalSessionRefresh(connectorId = currentConnectorId()) {
+function scheduleExternalSessionRefresh() {
   clearTimeout(externalSessionRefreshTimer);
   externalSessionRefreshTimer = setTimeout(() => {
-    loadState(connectorId).catch((error) => console.warn("外部 Codex 会话刷新失败", error));
+    loadState().catch((error) => console.warn("外部 Codex 会话刷新失败", error));
   }, 150);
 }
 
@@ -3144,7 +2696,7 @@ function applyIncomingModelSettings(data = {}, running = state.running) {
   if (Object.prototype.hasOwnProperty.call(data, "model")) state.model = data.model || "";
   if (Object.prototype.hasOwnProperty.call(data, "reasoningEffort")) state.reasoningEffort = data.reasoningEffort || "";
   if (nextUpdatedAt) state.modelSettingsUpdatedAt = nextUpdatedAt;
-  if (settingsChanged && !els.modelSettingsPanel.hidden) {
+  if (settingsChanged && !els.modelSettingsPanel.hidden && !els.modelSettingsView.hidden) {
     renderModelSettings({
       threadId: state.threadId,
       model: state.model,
@@ -3530,7 +3082,7 @@ async function submitApproval(decision = "", payload = {}, options = {}) {
     if (/审批请求不存在或已处理/.test(String(error?.message || ""))) {
       const expiredApproval = state.pendingApproval;
       resolveApprovalRequest(expiredApproval?.requestId, expiredApproval?.approvalScope);
-      loadState(currentConnectorId()).catch(() => {});
+      loadState("").catch(() => {});
       return;
     }
     state.pendingApprovalSubmitting = false;
@@ -3592,20 +3144,6 @@ function handleRemoteEvent(data) {
   if (!rememberRemoteEvent(data)) return;
   if (data.type === "approval_request") { queueApprovalRequest(data); return; }
   if (data.type === "approval_resolved") { resolveApprovalRequest(data.requestId, data.approvalScope); return; }
-  if (data.type === "connectors_changed") { loadConnectors().catch(() => {}); return; }
-  if (data.type === "connector_selected") {
-    const nextId = data.selectedConnectorId || "";
-    if (nextId !== state.selectedConnectorId) {
-      applyConnectorSelection(nextId).catch((error) => upsertAssistantMessage(`同步被控电脑失败：${error.message}`, true));
-    } else {
-      renderConnectors();
-    }
-    return;
-  }
-  if (data.connectorId !== undefined && data.connectorId !== (state.selectedConnectorId || "")) {
-    if (data.type === "runner_status") state.runningThreads = Array.isArray(data.runningThreads) ? data.runningThreads : state.runningThreads;
-    return;
-  }
   if (data.type === "model_settings_update") {
     if (data.threadId !== state.threadId) return;
     applyIncomingModelSettings(data);
@@ -3630,8 +3168,7 @@ function handleRemoteEvent(data) {
       false,
       false
     );
-    scheduleExternalSessionRefresh(currentConnectorId());
-    scheduleThreadListRefresh();
+    scheduleExternalSessionRefresh("");
     return;
   }
   if (data.type === "status") {
@@ -3661,9 +3198,7 @@ function handleRemoteEvent(data) {
     renderTaskExecutionStatus();
   }
   if (data.type === "runner_status") {
-    const previousSignature = runningThreadsSignature(state.runningThreads);
     state.runningThreads = Array.isArray(data.runningThreads) ? data.runningThreads : [];
-    if (previousSignature !== runningThreadsSignature(state.runningThreads)) scheduleThreadListRefresh();
   }
   if (data.type === "message") {
     if (data.role === "assistant" && (data.transient || data.final)) {
@@ -3708,12 +3243,10 @@ function handleRemoteEvent(data) {
     // with a lagging thread snapshot, making a short reply such as "ok"
     // disappear until the conversation is reopened. The following status
     // event updates the running state without touching the rendered messages.
-    scheduleThreadListRefresh(250);
   }
   if (data.type === "thread_completion" && data.threadId) {
     if (data.completedUnread) state.completedUnreadThreads.add(data.threadId);
     else state.completedUnreadThreads.delete(data.threadId);
-    scheduleThreadListRefresh();
   }
   if (data.type === "error") {
     upsertAssistantMessage(`错误：${data.text}`, true, data.messageId || "error");
@@ -3728,7 +3261,7 @@ function handleRemoteEvent(data) {
   }
   if (data.type === "state") {
     if (state.showFullReplies && data.threadId && !Array.isArray(data.fullMessages)) {
-      loadState(currentConnectorId()).catch((error) => console.warn("读取 Codex 完整回复失败", error));
+      loadState("").catch((error) => console.warn("读取 Codex 完整回复失败", error));
     } else {
       renderState(data);
     }
@@ -3823,13 +3356,8 @@ async function refreshNativeNotificationStatus() {
 
 async function sendMessage(mode = "steer") {
   cancelPendingAndroidImeEnter();
-  const connectorId = currentConnectorId();
   const message = composerText().trim();
   if (!message && !state.uploads.length) return;
-  if (state.disableLocal && !connectorId) {
-    upsertAssistantMessage("当前为纯控制中心模式，请先在「PC 被控电脑」面板添加并切换到一台被控电脑。", true);
-    return;
-  }
   const outgoingMessage = messageWithUploads(message);
   const sendMode = mode === "steer" ? "steer" : "queue";
   const stateBeforeSend = {
@@ -3853,10 +3381,8 @@ async function sendMessage(mode = "steer") {
   try {
     const result = await request("/api/remote/send", {
       method: "POST",
-      connectorId,
       body: JSON.stringify({ message: outgoingMessage, followMode: sendMode })
     });
-    if (connectorId !== currentConnectorId()) return;
     state.uploads = [];
     renderUploadList();
     if (result?.local || result?.liveVoice) {
@@ -3901,16 +3427,13 @@ async function sendMessage(mode = "steer") {
 
 async function interruptCurrentTask() {
   if (!taskExecutionCanInterrupt() || taskInterruptPending) return false;
-  const connectorId = currentConnectorId();
   taskInterruptPending = true;
   renderTaskExecutionStatus();
   try {
     const result = await request("/api/remote/send", {
       method: "POST",
-      connectorId,
       body: JSON.stringify({ message: "/stop", followMode: "steer" })
     });
-    if (connectorId !== currentConnectorId()) return false;
     setRunning(
       result.running,
       result.queueLength,
@@ -4125,58 +3648,23 @@ document.addEventListener("click", (event) => {
     els.threadPanel.hidden = true;
   }
   if (
-    !els.usagePanel.hidden &&
-    !event.target.closest("#usagePanel") &&
-    !event.target.closest("#usageRemote")
-  ) {
-    els.usagePanel.hidden = true;
-  }
-  if (
     !els.modelSettingsPanel.hidden &&
     !event.target.closest("#modelSettingsPanel") &&
     !event.target.closest("#modelSettingsRemote")
   ) {
     els.modelSettingsPanel.hidden = true;
-    els.usagePanel.hidden = true;
-  }
-  if (
-    !els.filePanel.hidden &&
-    !event.target.closest("#filePanel") &&
-    !event.target.closest("#filesRemote")
-  ) {
-    els.filePanel.hidden = true;
-  }
-  if (
-    !els.sshConnectPanel.hidden &&
-    !event.target.closest("#sshConnectPanel") &&
-    !event.target.closest("#sshConnectRemote")
-  ) {
-    els.sshConnectPanel.hidden = true;
-  }
-  if (
-    !els.connectorPanel.hidden &&
-    !event.target.closest("#connectorPanel") &&
-    !event.target.closest("#connectorsRemote")
-  ) {
-    els.connectorPanel.hidden = true;
   }
 });
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     const dismissedOverlay = !els.threadPanel.hidden
-      || !els.filePanel.hidden
-      || !els.sshConnectPanel.hidden
-      || !els.connectorPanel.hidden
       || !els.modelSettingsPanel.hidden
       || !els.queuePanel.hidden
       || !els.commandMenu.hidden;
     closeCommandMenu();
     closeProjectUploadMenu();
     els.threadPanel.hidden = true;
-    els.filePanel.hidden = true;
-    els.sshConnectPanel.hidden = true;
-    els.connectorPanel.hidden = true;
     els.modelSettingsPanel.hidden = true;
     els.queuePanel.hidden = true;
     if (!dismissedOverlay && taskExecutionCanInterrupt()) {
@@ -4192,17 +3680,19 @@ if (window.visualViewport) {
   updateVisualViewport();
 }
 
-els.filesButton.addEventListener("click", () => openFiles());
-els.usageButton.addEventListener("click", () => {
-  openUsagePanel().catch((error) => {
-    els.usageContent.innerHTML = "";
-    els.usageStatus.textContent = `读取失败：${error.message}`;
+els.modelSettingsButton.addEventListener("click", () => {
+  openModelSettings().catch((error) => {
+    els.modelSettingsStatus.textContent = `读取失败：${error.message}`;
   });
 });
-els.closeUsage.addEventListener("click", () => {
-  els.usagePanel.hidden = true;
-});
-els.modelSettingsButton.addEventListener("click", () => {
+els.modelUsageToggle.addEventListener("click", () => {
+  if (els.modelUsageView.hidden) {
+    openUsageInModelSettings().catch((error) => {
+      els.usageContent.innerHTML = "";
+      els.usageStatus.textContent = `读取失败：${error.message}`;
+    });
+    return;
+  }
   openModelSettings().catch((error) => {
     els.modelSettingsStatus.textContent = `读取失败：${error.message}`;
   });
@@ -4210,71 +3700,15 @@ els.modelSettingsButton.addEventListener("click", () => {
 els.closeModelSettings.addEventListener("click", () => {
   els.modelSettingsPanel.hidden = true;
 });
-els.connectorsButton?.addEventListener("click", () => {
-  openConnectors().catch((error) => upsertAssistantMessage(`被控电脑错误： ${error.message}`, true));
-});
-els.closeConnectors?.addEventListener("click", () => {
-  els.connectorPanel.hidden = true;
-});
-els.refreshConnectors?.addEventListener("click", () => {
-  loadConnectors().catch((error) => upsertAssistantMessage(`被控电脑错误： ${error.message}`, true));
-});
-els.connectorList?.addEventListener("click", (event) => {
-  const row = event.target.closest(".connectorItem");
-  if (!row) return;
-  const id = row.dataset.connectorId || "";
-  switchConnector(id).catch((error) => upsertAssistantMessage(`切换失败：${error.message}`, true));
-});
-els.sshConnectButton.addEventListener("click", () => openSshConnect());
-els.closeSshConnect.addEventListener("click", () => {
-  els.sshConnectPanel.hidden = true;
-});
-els.toggleSshView.addEventListener("click", () => {
-  if (els.sshFilesView.hidden) openSshComputer().catch((error) => {
-    els.sshList.innerHTML = `<div class="remoteEvent">错误：${error.message}</div>`;
-  });
-  else setSshView("config");
-});
-els.sshConnectForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  connectSsh().catch((error) => {
-    els.sshStatus.textContent = `连接失败：${error.message}`;
-  });
-});
-els.sshDisconnect.addEventListener("click", () => {
-  disconnectSsh().catch((error) => {
-    els.sshStatus.textContent = `断开失败：${error.message}`;
-  });
-});
-els.createSshFolder.addEventListener("click", () => {
-  createSshFolderInCurrentDir().catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
-});
-els.createSshFile.addEventListener("click", () => {
-  createSshFileInCurrentDir().catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
-});
-els.sshList.addEventListener("click", (event) => {
-  event.stopPropagation();
-  const actionButton = event.target.closest("[data-ssh-action]");
-  const row = event.target.closest(".fileItem");
-  if (!row) return;
-  const file = row.dataset.path || "";
-  const name = row.dataset.name || "";
-  if (actionButton) {
-    const action = actionButton.dataset.sshAction;
-    if (action === "edit") previewSshFile(file);
-    if (action === "rename") renameSshItem(file, name).catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
-    if (action === "delete") deleteSshItem(file, name).catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
-    return;
-  }
-  if (row.dataset.type === "dir") openSshComputer(file);
-  else previewSshFile(file);
-});
-
 els.createFolder.addEventListener("click", () => {
   createFolderInCurrentFilePanel().catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
 });
 els.createFile.addEventListener("click", () => {
   createFileInCurrentFilePanel().catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
+});
+els.projectDotFolderFilter.addEventListener("click", () => {
+  state.hideProjectDotFolders = !state.hideProjectDotFolders;
+  applyDotFolderFilter(els.fileList, els.projectDotFolderFilter, state.hideProjectDotFolders);
 });
 els.projectUploadButton.addEventListener("click", toggleProjectUploadMenu);
 els.projectFilesButton.addEventListener("click", () => {
@@ -4292,11 +3726,6 @@ els.projectFilesInput.addEventListener("change", () => {
 });
 els.projectFolderInput.addEventListener("change", () => {
   uploadProjectItems([...els.projectFolderInput.files], "folder");
-});
-
-els.closeFiles.addEventListener("click", () => {
-  closeProjectUploadMenu();
-  els.filePanel.hidden = true;
 });
 
 els.fileList.addEventListener("click", (event) => {
@@ -4328,21 +3757,41 @@ els.newList.addEventListener("click", (event) => {
   if (!row) return;
   openNewSessionPicker(row.dataset.path || "");
 });
+els.newDotFolderFilter.addEventListener("click", () => {
+  state.hideNewSessionDotFolders = !state.hideNewSessionDotFolders;
+  applyDotFolderFilter(els.newList, els.newDotFolderFilter, state.hideNewSessionDotFolders);
+});
 
 els.createSession.addEventListener("click", () => {
   createSessionInSelectedFolder().catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
 });
 
-els.threadButton.addEventListener("click", () => {
-  openThreads();
+els.threadButton.addEventListener("click", toggleThreadPanel);
+
+els.refreshThreads.addEventListener("click", () => {
+  if (els.refreshThreads.disabled) return;
+  els.refreshThreads.disabled = true;
+  els.refreshThreads.textContent = "刷新中...";
+  openThreads().finally(() => {
+    els.refreshThreads.disabled = false;
+    els.refreshThreads.textContent = "刷新";
+  });
 });
 
 els.closeThreads.addEventListener("click", () => {
   els.threadPanel.hidden = true;
+  els.threadButton.setAttribute("aria-expanded", "false");
 });
 els.toggleThreadView.addEventListener("click", () => {
   if (els.threadNewView.hidden) openNewSessionPicker();
-  else openThreads();
+  else openThreads({ load: false });
+});
+els.threadFilesToggle.addEventListener("click", () => {
+  if (els.threadFilesView.hidden) {
+    openFiles(state.fileCwd || "");
+    return;
+  }
+  openThreads({ load: false });
 });
 
 els.loadMore.addEventListener("click", () => {
@@ -4375,8 +3824,7 @@ els.newChat?.addEventListener("click", () => {
 });
 
 renderCommandList();
-loadSshStatus().catch(() => updateSshStatus({ connected: false }));
-syncAutoApprovalNotificationPreference()
+(state.autoApprove ? syncAutoApprovalNotificationPreference() : Promise.resolve())
   .catch(() => null)
   .then(loadState)
   .then(connectEvents)

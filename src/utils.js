@@ -116,10 +116,6 @@ export function rpcErrorMessage(error) {
   return error.message || error.data || JSON.stringify(error);
 }
 
-export function connectorNow() {
-  return new Date().toISOString();
-}
-
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

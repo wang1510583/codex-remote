@@ -142,22 +142,6 @@ async function receiveProjectUpload(req, stagingDir) {
   });
 }
 
-export async function stageProjectUploads(req) {
-  await mkdir(uploadDir, { recursive: true });
-  const stagingDir = await mkdtemp(path.join(uploadDir, ".codex-ssh-project-upload-"));
-  try {
-    const rows = await receiveProjectUpload(req, stagingDir);
-    return {
-      rows,
-      stagingDir,
-      cleanup: () => rm(stagingDir, { recursive: true, force: true })
-    };
-  } catch (error) {
-    await rm(stagingDir, { recursive: true, force: true }).catch(() => {});
-    throw error;
-  }
-}
-
 async function realExistingDirectory(target) {
   let current = target;
   while (true) {

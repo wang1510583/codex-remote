@@ -224,6 +224,7 @@ test("the slash menu persists auto approval and automatically accepts safe appro
   assert.match(source, /localStorage\.setItem\("codex-remote-auto-approve", state\.autoApprove \? "1" : "0"\)/);
   assert.match(source, /\/api\/remote\/notifications\/approval-preference/);
   assert.match(source, /JSON\.stringify\(\{ autoApprove: state\.autoApprove \}\)/);
+  assert.match(source, /state\.autoApprove \? syncAutoApprovalNotificationPreference\(\) : Promise\.resolve\(\)/);
   assert.match(source, /submitApproval\(automaticSubmission\.decision, automaticSubmission\.payload, \{ automatic: true \}\)/);
   assert.match(styles, /\.commandItemActive\s*\{/);
 

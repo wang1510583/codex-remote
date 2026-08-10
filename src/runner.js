@@ -23,10 +23,6 @@ import {
 } from "./threads.js";
 import { createLocalAppServer } from "./codex-server.js";
 import {
-  connectorSupportsConcurrentAppServers, createConnectorAppServer,
-  connectorThreadSummaries, getConnectorAppServer, remoteSessionProvider, isConnectorOnline
-} from "./connectors.js";
-import {
   completionMessage, failureNotificationMessage, notifyWechatTaskDone, sendWebPushTaskDone
 } from "./webpush.js";
 import { sendNativeTaskDone } from "./native-notifications.js";
@@ -208,23 +204,13 @@ function getLocalAppServer() {
 }
 
 export function appServerForState(state = {}) {
-  if (state.connectorId) return bindAppServerSettings(getConnectorAppServer(state.connectorId), state.connectorId);
   return getLocalAppServer();
 }
 
 // A CodexAppServer tracks exactly one active turn. Keep the singleton above as
 // an idle control channel, but give every local conversation its own client
-// connection so different threads can run at the same time. Connector agents
-// currently expose one app-server channel, so they continue to share it.
+// connection so different threads can run at the same time.
 export function runnerAppServerForState(state = {}) {
-  if (state.connectorId) {
-    return bindAppServerSettings(
-      connectorSupportsConcurrentAppServers(state.connectorId)
-        ? createConnectorAppServer(state.connectorId)
-        : getConnectorAppServer(state.connectorId),
-      state.connectorId
-    );
-  }
   return bindAppServerSettings(createLocalAppServer(), "");
 }
 
@@ -232,8 +218,7 @@ async function sessionModelSettings(state = {}) {
   if (state.threadId) {
     const saved = await modelSettingsForThread(state.threadId, state.connectorId || "");
     if (saved?.model) return saved;
-    const provider = state.connectorId ? remoteSessionProvider(state.connectorId) : localSessionProvider;
-    const thread = await loadThreadFromProvider(state.threadId, provider).catch(() => null);
+    const thread = await loadThreadFromProvider(state.threadId, localSessionProvider).catch(() => null);
     if (thread?.model) {
       const inferred = {
         model: thread.model,
@@ -246,7 +231,7 @@ async function sessionModelSettings(state = {}) {
     }
   }
   const server = appServerForState(state);
-  const cwd = state.connectorId ? String(state.cwd || "") : stateAbsoluteCwd(state.cwd || "");
+  const cwd = stateAbsoluteCwd(state.cwd || "");
   return server.configuredModelSettings(cwd);
 }
 
@@ -748,7 +733,7 @@ export async function createRunner(state = {}) {
     contextUsage: contextUsage || null,
     reconnecting: false,
     externalTurn: null,
-    ownsAppServer: !state.connectorId || connectorSupportsConcurrentAppServers(state.connectorId),
+    ownsAppServer: true,
     emit: null
   };
   runner.emit = (event) => broadcastRunner(runner, event);
@@ -901,15 +886,7 @@ export async function runnerForIncomingState(state = {}) {
 }
 
 export function executionConflictForState(state = {}, exceptRunner = null) {
-  const connectorId = state.connectorId || "";
-  if (!connectorId || connectorSupportsConcurrentAppServers(connectorId)) return null;
-  return uniqueRunners().find((runner) => runner.running
-    && (runner.connectorId || "") === connectorId
-    && runner !== exceptRunner) || null;
-}
-
-function externalTaskLabel(connectorId = "") {
-  return connectorId ? "被控电脑上的 Codex" : "本机 Codex Desktop/CLI";
+  return null;
 }
 
 export async function externalStatusForState(state = {}, refresh = false) {
@@ -921,7 +898,7 @@ export async function externalStatusForState(state = {}, refresh = false) {
       snapshot = await refreshExternalSession(state.threadId, connectorId);
     } catch {
       // A cached running status is safer than allowing a second writer when a
-      // connector or session read has a transient failure.
+      // session read has a transient failure.
     }
   }
   snapshot = snapshot || externalSessionSnapshot(state.threadId, connectorId);
@@ -960,7 +937,7 @@ export async function assertExternalSessionIdle(state = {}) {
   const snapshot = await externalStatusForState(state, true);
   if (!snapshot?.running) return snapshot;
   throw Object.assign(
-    new Error(`${externalTaskLabel(state.connectorId || "")} 正在执行这个会话，网页端已进入只读实时同步，请等任务结束后再发送。`),
+    new Error("本机 Codex Desktop/CLI 正在执行这个会话，网页端已进入只读实时同步，请等任务结束后再发送。"),
     { statusCode: 409, externalRunning: true }
   );
 }
@@ -1058,7 +1035,7 @@ async function localCommandResponse(message, connectorId = "") {
       `- 正在处理：${currentRunner?.running ? "是" : "否"}`,
       `- 跟随模式：${(currentRunner?.followMode || followMode) === "steer" ? "引导" : "队列"}`,
       `- 工作目录：${currentCwdLabel}`,
-      `- 被控端：${state.connectorId || "本机"}`,
+      "- 执行端：本机",
       `- 模型：${state.model || "默认"}`,
       `- 思考强度：${reasoningEffortLabel(state.reasoningEffort) || "默认"}`,
       `- Fast 模式：${fastModeLabel(fastStatus)}`
@@ -1448,7 +1425,7 @@ export async function runRemoteTask(message, runner) {
 export async function startRemoteTask(message, state, runner = null, options = {}) {
   runner = runner || await runnerForState(state, false);
   const conflict = executionConflictForState(state, runner);
-  if (conflict) throw new Error("当前被控端只提供一个 Codex 执行通道，已有会话正在运行。");
+  if (conflict) throw new Error("当前 Codex 执行通道已有会话正在运行。");
   runner = runner || await runnerForState(state, true);
   stopExternalSessionMonitor(runner.connectorId || "");
   runner.running = true;
@@ -1653,7 +1630,7 @@ export async function submitRemoteMessage(message, requestedFollowMode = "", con
   selectedRunnerKey = runnerKeyForState(state);
   let runner = await runnerForState(state, false);
   const conflict = executionConflictForState(state, runner);
-  if (conflict) throw Object.assign(new Error("当前被控端只提供一个 Codex 执行通道，请等待正在运行的会话结束。"), { statusCode: 409 });
+  if (conflict) throw Object.assign(new Error("当前 Codex 执行通道已有会话正在运行，请等待结束。"), { statusCode: 409 });
   runner = runner || await runnerForState(state, true);
   if (runner.running) {
     const effectiveFollowMode = oneShotFollowMode || runner.followMode;
@@ -1741,7 +1718,7 @@ export async function listedThreadRuntime(
 }
 
 export async function listThreads(connectorId = "") {
-  const provider = connectorId ? remoteSessionProvider(connectorId) : localSessionProvider;
+  const provider = localSessionProvider;
   const names = await readThreadNames();
   const completions = await readThreadCompletions();
   const rows = [];
@@ -1763,47 +1740,6 @@ export async function listThreads(connectorId = "") {
       name: "", cwd: runner.cwd, updatedAt: runner.state.inflight?.startedAt || new Date().toISOString(),
       messageCount: runner.state.messages?.length || 0, running: true, queueLength: runner.messageQueue.length
     });
-  }
-  if (connectorSupportsConcurrentAppServers(connectorId)) {
-    try {
-      const summaries = await connectorThreadSummaries(connectorId, 80);
-      for (const thread of summaries || []) {
-        if (!thread?.id || thread.parentThreadId || includedThreadIds.has(thread.id)) continue;
-        const name = typeof names[thread.id] === "string" ? names[thread.id] : "";
-        const runner = runnerByThread.get(thread.id);
-        const running = Boolean(runner?.running);
-        includedThreadIds.add(thread.id);
-        rows.push({
-          threadId: thread.id,
-          title: name || thread.name || thread.preview || "未命名会话",
-          originalTitle: thread.name || thread.preview || "未命名会话",
-          name,
-          cwd: runner?.cwd || thread.cwd || "",
-          updatedAt: runner?.state.inflight?.startedAt
-            || (Number(thread.updatedAt) > 0 ? new Date(Number(thread.updatedAt) * 1000).toISOString() : ""),
-          messageCount: runner?.state.messages?.length ?? null,
-          running,
-          externalRunning: false,
-          completedUnread: Boolean(!running && completions[thread.id]),
-          queueLength: runner?.messageQueue.length || 0
-        });
-      }
-      for (const runner of uniqueRunners().filter((item) => item.running
-        && item.state.threadId
-        && (item.connectorId || "") === connectorId
-        && !includedThreadIds.has(item.state.threadId))) {
-        runningRows.push({
-          threadId: runner.state.threadId, runtimeKey: runner.key,
-          title: threadTitle(runner.state.messages || [], runner.cwd ? `/${runner.cwd}` : "根目录会话"),
-          originalTitle: threadTitle(runner.state.messages || []), name: "", cwd: runner.cwd,
-          updatedAt: runner.state.inflight?.startedAt || new Date().toISOString(),
-          messageCount: runner.state.messages?.length || 0, running: true, queueLength: runner.messageQueue.length
-        });
-      }
-      return [...runningRows, ...rows];
-    } catch (error) {
-      console.warn(`SSH Codex 会话索引读取失败，回退到日志扫描：${error?.message || error}`);
-    }
   }
   const entries = await listSessionEntries(provider);
   const { parseSessionFile } = await import("./threads.js");
@@ -1889,7 +1825,7 @@ export async function listThreads(connectorId = "") {
 export async function selectRemoteThread(rawThreadId, connectorId = "") {
   const threadId = cleanText(rawThreadId, 120).trim();
   await persistExistingFailureNotices(await readState(connectorId), connectorId);
-  const provider = connectorId ? remoteSessionProvider(connectorId) : localSessionProvider;
+  const provider = localSessionProvider;
   if (threadId.startsWith("runtime:")) {
     const runner = runners.get(threadId.slice("runtime:".length));
     if (!runner) throw Object.assign(new Error("这个运行中会话已经结束。"), { statusCode: 404 });
@@ -1956,8 +1892,7 @@ export async function selectRemoteThread(rawThreadId, connectorId = "") {
 }
 
 export async function loadThreadPage(threadId, connectorId = "", limit = 1000) {
-  const provider = connectorId ? remoteSessionProvider(connectorId) : localSessionProvider;
-  return loadThreadFromProvider(threadId, provider, limit);
+  return loadThreadFromProvider(threadId, localSessionProvider, limit);
 }
 
 export async function deleteThread(threadId, connectorId = "") {
@@ -1968,8 +1903,7 @@ export async function deleteThread(threadId, connectorId = "") {
     );
   }
   await assertExternalSessionIdle({ threadId, connectorId });
-  const provider = connectorId ? remoteSessionProvider(connectorId) : localSessionProvider;
-  await deleteThreadFromProvider(threadId, provider);
+  await deleteThreadFromProvider(threadId, localSessionProvider);
   await deleteThreadModelSettings(threadId, connectorId);
   if (!connectorId) await deleteLiveVoiceTranscripts(threadId);
   await deleteThreadNotices(threadId, connectorId);
@@ -1978,8 +1912,8 @@ export async function deleteThread(threadId, connectorId = "") {
 export async function createRemoteSession(rawCwd = "", connectorId = "") {
   const previousState = await readState(connectorId);
   await persistExistingFailureNotices(previousState, connectorId);
-  const cwd = connectorId ? String(rawCwd || "") : stateCwdValue(rawCwd || "");
-  if (!connectorId) await assertProjectDirectory(cwd);
+  const cwd = stateCwdValue(rawCwd || "");
+  await assertProjectDirectory(cwd);
   const busy = executionConflictForState({ cwd, connectorId });
   const previousRunner = await runnerForState({ ...previousState, connectorId }, false);
   const appServer = appServerForState({ connectorId });
@@ -1989,7 +1923,7 @@ export async function createRemoteSession(rawCwd = "", connectorId = "") {
     appServer.activeCwd = "";
   }
   contextUsage = freshContextUsage();
-  const absoluteCwd = connectorId ? cwd : stateAbsoluteCwd(cwd);
+  const absoluteCwd = stateAbsoluteCwd(cwd);
   const defaults = busy
     ? { model: busy.state.model || "", reasoningEffort: busy.state.reasoningEffort || "" }
     : await appServer.configuredModelSettings(absoluteCwd);

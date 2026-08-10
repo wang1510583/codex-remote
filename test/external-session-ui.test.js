@@ -61,22 +61,35 @@ test("older or unversioned HTTP settings cannot overwrite a newer SSE setting", 
   assert.equal(vm.runInContext("settingsResponseIsCurrent('2026-07-13T02:00:01.000Z')", context), true);
 });
 
-test("model settings requests discard responses after connector or thread changes", async () => {
+test("model settings requests discard responses after thread changes", async () => {
   const source = await readFile(new URL("../public/remote.js", import.meta.url), "utf8");
   const open = source.slice(source.indexOf("async function openModelSettings"), source.indexOf("async function changeModelSettings"));
   const change = source.slice(source.indexOf("async function changeModelSettings"), source.indexOf("function usageResetTime"));
   assert.match(open, /const threadId = state\.threadId/);
-  assert.match(open, /connectorId !== currentConnectorId\(\) \|\| threadId !== state\.threadId/);
+  assert.match(open, /threadId !== state\.threadId/);
   assert.match(change, /const threadId = state\.threadId/);
-  assert.match(change, /connectorId !== currentConnectorId\(\) \|\| threadId !== state\.threadId/);
+  assert.match(change, /threadId !== state\.threadId/);
 });
 
-test("an open thread panel refreshes when running state reaches a terminal event", async () => {
-  const source = await readFile(new URL("../public/remote.js", import.meta.url), "utf8");
-  const scheduler = source.slice(
-    source.indexOf("function scheduleThreadListRefresh"),
-    source.indexOf("async function openThreads")
-  );
+test("usage is embedded in the model settings panel and toggles beside close", async () => {
+  const [source, html] = await Promise.all([
+    readFile(new URL("../public/remote.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/remote.html", import.meta.url), "utf8")
+  ]);
+  const panel = html.slice(html.indexOf('id="modelSettingsPanel"'), html.indexOf('id="threadPanel"'));
+  assert.doesNotMatch(html, /id="usageRemote"|id="usagePanel"|id="closeUsage"/);
+  assert.match(panel, /id="modelUsageToggle"[\s\S]*?id="closeModelSettings"/);
+  assert.match(panel, /id="modelSettingsView"[\s\S]*?id="modelUsageView"[\s\S]*?id="usageContent"/);
+  assert.match(source, /function setModelSettingsView\(view = "model"\)/);
+  assert.match(source, /els\.modelUsageToggle\.addEventListener\("click"/);
+  assert.match(source, /openUsageInModelSettings\(\)/);
+});
+
+test("the thread panel uses its cached list until manual refresh", async () => {
+  const [source, html] = await Promise.all([
+    readFile(new URL("../public/remote.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/remote.html", import.meta.url), "utf8")
+  ]);
   const handler = source.slice(
     source.indexOf("function handleRemoteEvent"),
     source.indexOf("async function resyncEvents")
@@ -86,11 +99,72 @@ test("an open thread panel refreshes when running state reaches a terminal event
     source.indexOf("function setThreadView")
   );
 
-  assert.match(scheduler, /threadPanel\.hidden \|\| els\.threadExistingView\.hidden/);
-  assert.match(handler, /data\.type === "runner_status"[\s\S]*?scheduleThreadListRefresh/);
-  assert.match(handler, /data\.type === "done"[\s\S]*?scheduleThreadListRefresh/);
-  assert.match(handler, /data\.type === "external_session_update"[\s\S]*?scheduleThreadListRefresh/);
+  const toggle = source.slice(source.indexOf("function toggleThreadPanel"), source.indexOf("function setThreadView"));
+  assert.doesNotMatch(source, /scheduleThreadListRefresh|threadListRefreshTimer/);
+  assert.match(html, /id="refreshThreads" type="button">刷新<\/button>/);
+  assert.match(html, /id="threadList" class="threadList"><div class="remoteEvent">点击刷新加载会话<\/div>/);
+  assert.match(toggle, /openThreads\(\{ load: false \}\)/);
+  assert.match(source, /els\.refreshThreads\.addEventListener\("click"[\s\S]*?openThreads\(\)\.finally/);
+  assert.match(source, /localStorage\.setItem\("codex-remote-thread-list-cache"/);
+  assert.match(source, /els\.refreshThreads\.hidden = showNew \|\| showFiles/);
+  assert.doesNotMatch(handler, /scheduleThreadListRefresh/);
   assert.match(openThreads, /requestGeneration !== threadListRequestGeneration/);
+  assert.match(openThreads, /load \? await request\("\/api\/remote\/threads"\) : state\.threadListCache/);
+});
+
+test("removed remote-control modules leave no startup calls that abort local initialization", async () => {
+  const source = await readFile(new URL("../public/remote.js", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /loadSshStatus|updateSshStatus|openConnectors|loadConnectors/);
+  assert.match(source, /syncAutoApprovalNotificationPreference\(\)[\s\S]*?\.then\(loadState\)[\s\S]*?\.then\(connectEvents\)/);
+});
+
+test("the session button opens synchronously and stops the document click from closing it", async () => {
+  const [source, html] = await Promise.all([
+    readFile(new URL("../public/remote.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/remote.html", import.meta.url), "utf8")
+  ]);
+  const toggle = source.slice(source.indexOf("function toggleThreadPanel"), source.indexOf("function setThreadView"));
+  assert.match(toggle, /event\?\.stopPropagation\(\)/);
+  assert.match(toggle, /els\.threadPanel\.hidden = false/);
+  assert.match(toggle, /openThreads\(\{ load: false \}\)\.catch/);
+  assert.match(source, /els\.threadButton\.addEventListener\("click", toggleThreadPanel\)/);
+  assert.match(source, /let threadListRequestGeneration = 0/);
+  assert.match(html, /id="threadRemote"[\s\S]*?aria-controls="threadPanel"[\s\S]*?aria-expanded="false"/);
+});
+
+test("project files are embedded in the session panel and toggle beside close", async () => {
+  const [source, html] = await Promise.all([
+    readFile(new URL("../public/remote.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/remote.html", import.meta.url), "utf8")
+  ]);
+  const panel = html.slice(html.indexOf('id="threadPanel"'), html.indexOf('class="remoteLogWrap"'));
+  assert.doesNotMatch(html, /id="filesRemote"|id="filePanel"|id="closeFiles"/);
+  assert.match(panel, /id="threadFilesToggle"[\s\S]*?id="closeThreads"/);
+  assert.match(panel, /id="threadExistingView"[\s\S]*?id="threadNewView"[\s\S]*?id="threadFilesView"[\s\S]*?id="fileList"/);
+  assert.match(source, /function setThreadView\(view = "existing"\)[\s\S]*?view === "files"/);
+  assert.match(source, /els\.threadFilesToggle\.addEventListener\("click"/);
+  assert.match(source, /setThreadView\("files"\)/);
+});
+
+test("module panel close buttons stay hidden while outside click and Escape remain available", async () => {
+  const html = await readFile(new URL("../public/remote.html", import.meta.url), "utf8");
+  assert.match(html, /id="closeModelSettings" type="button" hidden>关闭<\/button>/);
+  assert.match(html, /id="closeThreads" type="button" hidden>关闭<\/button>/);
+});
+
+test("new-session and project views can independently hide dot-prefixed folders", async () => {
+  const [source, html, styles] = await Promise.all([
+    readFile(new URL("../public/remote.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/remote.html", import.meta.url), "utf8"),
+    readFile(new URL("../public/styles.css", import.meta.url), "utf8")
+  ]);
+  assert.match(html, /id="newDotFolderFilter"[\s\S]*?>筛选：关<\/button>/);
+  assert.match(html, /id="projectDotFolderFilter"[\s\S]*?>筛选：关<\/button>/);
+  assert.match(source, /item\.type === "dir" && String\(item\.name \|\| ""\)\.startsWith\("\."\)/);
+  assert.match(source, /row\.dataset\.dotFolder = String\(isDotFolder\(item\)\)/);
+  assert.match(source, /state\.hideProjectDotFolders = !state\.hideProjectDotFolders/);
+  assert.match(source, /state\.hideNewSessionDotFolders = !state\.hideNewSessionDotFolders/);
+  assert.match(styles, /\.fileItem\[hidden\][\s\S]*?display:\s*none/);
 });
 
 test("current, running, and unread thread states remain independently identifiable", async () => {

@@ -296,10 +296,8 @@ test("an active Live Voice session can obtain a reconnect ticket after the web s
       messages: [],
       inflight: null
     }),
-    readViewStateFn: async () => ({ selectedConnectorId: "remote-device" }),
     runningThreadsFn: () => [],
-    broadcastFn: () => {},
-    localDisabled: false
+    broadcastFn: () => {}
   });
 
   assert.equal(
@@ -312,7 +310,7 @@ test("an active Live Voice session can obtain a reconnect ticket after the web s
   );
   await assert.rejects(
     () => adapter.getSession("thread-unknown"),
-    /当前网页选择的是被控端/
+    /不是网页当前选择的会话/
   );
   lease.release();
 });

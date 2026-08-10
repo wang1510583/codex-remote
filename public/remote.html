@@ -8,7 +8,7 @@
     <link rel="manifest" href="site.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="icon.svg" />
     <link rel="apple-touch-icon" href="icon.svg" />
-    <link rel="stylesheet" href="styles.css?v=20260809-auto-approval-notifications" />
+    <link rel="stylesheet" href="styles.css?v=20260810-persistent-approval-suppression" />
   </head>
   <body class="remotePage">
     <main class="remoteApp">
@@ -29,130 +29,68 @@
           </span>
         </div>
         <div class="topActions">
-          <button id="usageRemote" class="iconButton" type="button" title="使用量" aria-label="使用量">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="19" x2="4" y2="10"/><line x1="10" y1="19" x2="10" y2="5"/><line x1="16" y1="19" x2="16" y2="13"/><line x1="22" y1="19" x2="22" y2="3"/></svg>
-          </button>
           <button id="modelSettingsRemote" class="iconButton" type="button" title="模型与思考强度" aria-label="模型与思考强度">
             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
           </button>
-          <button id="sshConnectRemote" class="iconButton" type="button" title="ssh连接" aria-label="ssh连接">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2" ry="2"/><line x1="3" y1="10" x2="21" y2="10"/><polyline points="7 15 10 12 7 9"/><line x1="13" y1="15" x2="17" y2="15"/></svg>
-          </button>
-          <button id="filesRemote" class="iconButton" type="button" title="项目文件夹" aria-label="项目文件夹">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-          </button>
-          <button id="connectorsRemote" class="iconButton" type="button" title="被控电脑" aria-label="被控电脑">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="14" height="11" rx="2" ry="2"/><rect x="8" y="10" width="14" height="11" rx="2" ry="2"/></svg>
-          </button>
-          <button id="threadRemote" class="iconButton" type="button" title="会话" aria-label="会话">
+          <button id="threadRemote" class="iconButton" type="button" title="会话" aria-label="会话" aria-controls="threadPanel" aria-expanded="false">
             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="12" x2="14" y2="12"/></svg>
           </button>
         </div>
       </header>
 
-      <aside id="usagePanel" class="filePanel usagePanel" hidden>
-        <div class="filePanelTop">
-          <strong>使用量</strong>
-          <div class="panelActions">
-            <button id="closeUsage" type="button">关闭</button>
-          </div>
-        </div>
-        <div id="usageContent" class="usageContent">
-          <div class="remoteEvent">正在刷新使用量...</div>
-        </div>
-        <div id="usageStatus" class="remoteEvent" aria-live="polite"></div>
-      </aside>
-
       <aside id="modelSettingsPanel" class="filePanel modelSettingsPanel" hidden>
         <div class="filePanelTop">
-          <strong>模型与思考强度</strong>
+          <strong id="modelSettingsTitle">模型与思考强度</strong>
           <div class="panelActions">
-            <button id="closeModelSettings" type="button">关闭</button>
+            <button id="modelUsageToggle" type="button" aria-pressed="false">使用量</button>
+            <button id="closeModelSettings" type="button" hidden>关闭</button>
           </div>
         </div>
-        <div id="modelSettingsCurrent" class="modelSettingsCurrent">正在读取当前会话...</div>
-        <section class="modelSettingsSection">
-          <div class="modelSettingsLabel">模型</div>
-          <div id="modelSettingsModels" class="modelSettingsModels"></div>
-        </section>
-        <section class="modelSettingsSection">
-          <div class="modelSettingsLabel">思考强度</div>
-          <div id="modelSettingsEfforts" class="modelSettingsEfforts"></div>
-        </section>
-        <div id="modelSettingsStatus" class="remoteEvent" aria-live="polite"></div>
-      </aside>
-
-      <aside id="sshConnectPanel" class="filePanel" hidden>
-        <div class="filePanelTop">
-          <strong id="sshPanelTitle">ssh连接</strong>
-          <div class="panelActions">
-            <button id="toggleSshView" type="button">ssh电脑</button>
-            <button id="closeSshConnect" type="button">关闭</button>
-          </div>
+        <div id="modelSettingsView">
+          <div id="modelSettingsCurrent" class="modelSettingsCurrent">正在读取当前会话...</div>
+          <section class="modelSettingsSection">
+            <div class="modelSettingsLabel">模型</div>
+            <div id="modelSettingsModels" class="modelSettingsModels"></div>
+          </section>
+          <section class="modelSettingsSection">
+            <div class="modelSettingsLabel">思考强度</div>
+            <div id="modelSettingsEfforts" class="modelSettingsEfforts"></div>
+          </section>
+          <div id="modelSettingsStatus" class="remoteEvent" aria-live="polite"></div>
         </div>
-        <form id="sshConnectForm" class="sshConnectForm" data-ssh-view="config">
-          <label>
-            <span>用户</span>
-            <input id="sshTarget" class="loginInput" type="text" placeholder="ssh 用户名@主机名" autocomplete="off" />
-          </label>
-          <label>
-            <span>密码</span>
-            <input id="sshPassword" class="loginInput" type="password" placeholder="SSH 密码" autocomplete="current-password" />
-          </label>
-          <div class="panelActions">
-            <button id="sshConnectSubmit" class="primary" type="submit">连接</button>
-            <button id="sshDisconnect" type="button">断开</button>
-            <span id="sshStatus" class="remoteEvent">未连接</span>
+        <div id="modelUsageView" hidden>
+          <div id="usageContent" class="usageContent">
+            <div class="remoteEvent">正在刷新使用量...</div>
           </div>
-        </form>
-        <div id="sshFilesView" data-ssh-view="files" hidden>
-          <div class="panelActions">
-            <button id="createSshFolder" type="button">新建文件夹</button>
-            <button id="createSshFile" type="button">新建文件</button>
-          </div>
-          <div id="sshPath" class="filePath"></div>
-          <div id="sshList" class="fileList"></div>
-          <div id="sshPreview" class="filePreview" hidden></div>
+          <div id="usageStatus" class="remoteEvent" aria-live="polite"></div>
         </div>
       </aside>
-      <aside id="connectorPanel" class="filePanel" hidden>
-        <div class="filePanelTop">
-          <strong>被控电脑</strong>
-          <div class="panelActions">
-            <button id="refreshConnectors" type="button">刷新</button>
-            <button id="closeConnectors" type="button">关闭</button>
-          </div>
-        </div>
-        <div class="connectorHint">选择要控制的电脑，切换后会话与文件随之切换。</div>
-        <div id="connectorList" class="connectorList"></div>
-      </aside>
-
-
 
       <aside id="threadPanel" class="threadPanel" hidden>
         <div class="threadPanelTop">
           <strong id="threadPanelTitle">选择已有会话</strong>
           <div class="panelActions">
+            <button id="refreshThreads" type="button">刷新</button>
             <button id="toggleThreadView" type="button">新建会话</button>
-            <button id="closeThreads" type="button">关闭</button>
+            <button id="threadFilesToggle" type="button" aria-pressed="false">项目文件夹</button>
+            <button id="closeThreads" type="button" hidden>关闭</button>
           </div>
         </div>
         <div id="threadExistingView">
-          <div id="threadList" class="threadList"></div>
+          <div id="threadList" class="threadList"><div class="remoteEvent">点击刷新加载会话</div></div>
         </div>
         <div id="threadNewView" hidden>
+          <div class="newSessionFilterActions panelActions">
+            <button id="newDotFolderFilter" class="dotFolderFilter" type="button" aria-pressed="false">筛选：关</button>
+          </div>
           <div id="newPath" class="filePath"></div>
           <div id="newList" class="fileList"></div>
           <div class="newSessionActions">
             <button id="createSessionRemote" class="primary" type="button">在当前文件夹创建会话</button>
           </div>
         </div>
-      </aside>
-
-      <aside id="filePanel" class="filePanel" hidden>
-        <div class="filePanelTop">
-          <strong>项目文件夹</strong>
-          <div class="panelActions">
+        <div id="threadFilesView" hidden>
+          <div class="threadFileActions panelActions">
             <div class="projectUploadPicker">
               <button id="uploadProjectRemote" type="button" aria-haspopup="true" aria-expanded="false">上传</button>
               <div id="projectUploadMenu" class="projectUploadMenu" hidden>
@@ -164,13 +102,13 @@
             </div>
             <button id="createFolderRemote" type="button">新建文件夹</button>
             <button id="createFileRemote" type="button">新建文件</button>
-            <button id="closeFiles" type="button">关闭</button>
+            <button id="projectDotFolderFilter" class="dotFolderFilter" type="button" aria-pressed="false">筛选：关</button>
           </div>
+          <div id="filePath" class="filePath"></div>
+          <div id="projectUploadStatus" class="projectUploadStatus" role="status" aria-live="polite" hidden></div>
+          <div id="fileList" class="fileList"></div>
+          <div id="filePreview" class="filePreview" hidden></div>
         </div>
-        <div id="filePath" class="filePath"></div>
-        <div id="projectUploadStatus" class="projectUploadStatus" role="status" aria-live="polite" hidden></div>
-        <div id="fileList" class="fileList"></div>
-        <div id="filePreview" class="filePreview" hidden></div>
       </aside>
 
       <section class="remoteLogWrap">
@@ -235,6 +173,6 @@
       </div>
     </div>
     <script src="pwa.js"></script>
-    <script src="remote.js?v=20260809-auto-approval-notifications"></script>
+    <script src="remote.js?v=20260810-persistent-approval-suppression"></script>
   </body>
 </html>

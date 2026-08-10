@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -184,6 +184,50 @@ test("auto approval suppresses only approval notifications and restores them whe
   const approvalReceived = matchingMessage(ws, (message) => message.title === "Codex等待审核");
   hub.sendApprovalRequired({ title: "文件修改确认" });
   assert.equal((await approvalReceived).title, "Codex等待审核");
+});
+
+test("approval suppression persists across restarts and purges queued approval notifications", async (t) => {
+  const queuePath = await temporaryQueuePath(t);
+  const options = {
+    token: "persistent-suppression-token",
+    queuePath,
+    logger: { log() {}, warn() {}, error() {} }
+  };
+  const firstHub = createNativeNotificationHub(options);
+  assert.deepEqual(firstHub.sendApprovalRequired({ title: "待清理审核" }), {
+    configured: true,
+    sent: 0,
+    total: 0
+  });
+  assert.deepEqual(firstHub.setApprovalNotificationsSuppressed(true), {
+    approvalNotificationsSuppressed: true,
+    purgedApprovalNotifications: 1
+  });
+
+  const stored = JSON.parse(await readFile(queuePath, "utf8"));
+  assert.equal(stored.approvalNotificationsSuppressed, true);
+  assert.equal(stored.notifications.some((item) => item.title === "Codex等待审核"), false);
+
+  stored.notifications.push({
+    id: "legacy-queued-approval",
+    title: "Codex等待审核",
+    body: "旧版本遗留的审核通知",
+    ts: Date.now()
+  });
+  await writeFile(queuePath, `${JSON.stringify(stored, null, 2)}\n`);
+
+  const restartedHub = createNativeNotificationHub(options);
+  assert.deepEqual(restartedHub.approvalNotificationPreference(), {
+    approvalNotificationsSuppressed: true
+  });
+  assert.deepEqual(restartedHub.sendApprovalRequired({ title: "重启后的审核" }), {
+    configured: true,
+    sent: 0,
+    total: 0,
+    suppressed: true
+  });
+  const restartedStore = JSON.parse(await readFile(queuePath, "utf8"));
+  assert.equal(restartedStore.notifications.some((item) => item.title === "Codex等待审核"), false);
 });
 
 test("WebToApp replays an offline notification and stops after device acknowledgement", async (t) => {

@@ -139,9 +139,10 @@ test("runtime reconciliation failures keep a recent external task running", asyn
   assert.equal(reconciled.externalRunning, true);
 });
 
-test("external session monitor supports local and connector session providers", async () => {
+test("external session monitor uses the local session provider", async () => {
   const source = await readFile(new URL("../src/external-sessions.js", import.meta.url), "utf8");
-  assert.match(source, /connectorId\s*\?\s*remoteSessionProvider\(connectorId\)\s*:\s*localSessionProvider/);
+  assert.match(source, /return localSessionProvider/);
+  assert.doesNotMatch(source, /remoteSessionProvider/);
   assert.match(source, /provider\.listFiles\(\)/);
   assert.match(source, /provider\.readFile\(hit\.file\)/);
 });

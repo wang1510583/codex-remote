@@ -74,7 +74,6 @@ test("project panel provides download buttons for files and streamed folder ZIPs
   assert.match(source, /action === "download"\)\s+downloadProjectItem\(file, name, row\.dataset\.type/);
   assert.match(source, /\/api\/remote\/project-download\?/);
   assert.match(source, /itemType === "dir" \? `\$\{baseName\}\.zip` : baseName/);
-  assert.match(source, /被控电脑文件下载暂不支持/);
   assert.match(styles, /\.fileActions\s*\{[\s\S]*?flex-wrap:\s*wrap/);
   assert.match(router, /createProjectFolderZip\(folder, archiveName\)/);
   assert.match(router, /const abort = \(\) => \{[\s\S]*?archive\.abort\(\)/);

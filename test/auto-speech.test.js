@@ -182,6 +182,6 @@ test("only final assistant SSE bubbles trigger auto speech", async () => {
   );
   assert.match(source, /element\.dataset\.speechText\s*=\s*String\(text \|\| ""\)/);
   assert.match(source, /els\.log\.addEventListener\("click", handleUserBubbleSpeechInteraction\)/);
-  assert.match(html, /remote\.js\?v=20260809-auto-approval-notifications/);
-  assert.match(html, /styles\.css\?v=20260809-auto-approval-notifications/);
+  assert.match(html, /remote\.js\?v=20260810-persistent-approval-suppression/);
+  assert.match(html, /styles\.css\?v=20260810-persistent-approval-suppression/);
 });

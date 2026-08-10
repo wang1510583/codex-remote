@@ -1,20 +1,11 @@
 import { createHash } from "node:crypto";
-import path from "node:path";
 import {
-  dataDir, statePath, draftsPath, followModesPath, messageMetaPath,
-  threadNamesPath, threadCompletionsPath, connectorsViewStatePath, threadModelSettingsPath,
+  statePath, draftsPath, followModesPath, messageMetaPath,
+  threadNamesPath, threadCompletionsPath, threadModelSettingsPath,
   liveVoiceTranscriptsPath, threadNoticesPath
 } from "./config.js";
 import { cleanText } from "./utils.js";
 import { readJsonFile, updateJsonFile, writeJsonFile } from "./json-file.js";
-
-export function connectorPrefix(connectorId = "") {
-  return connectorId ? `${connectorId}:` : "";
-}
-
-export function statePathFor(connectorId = "") {
-  return connectorId ? path.join(dataDir, `remote-state-${connectorId}.json`) : statePath;
-}
 
 async function readJson(file, fallback) {
   return readJsonFile(file, fallback);
@@ -94,9 +85,9 @@ export async function deleteLiveVoiceTranscripts(threadId = "") {
 
 const threadNoticeLimit = 200;
 
-function threadNoticeKey(threadId = "", connectorId = "") {
+function threadNoticeKey(threadId = "") {
   const id = String(threadId || "").trim();
-  return id ? `${connectorPrefix(connectorId)}${id}` : "";
+  return id;
 }
 
 function storedThreadNotice(message = {}) {
@@ -113,8 +104,8 @@ function storedThreadNotice(message = {}) {
   };
 }
 
-export async function appendThreadNotice(threadId = "", message = {}, connectorId = "") {
-  const key = threadNoticeKey(threadId, connectorId);
+export async function appendThreadNotice(threadId = "", message = {}) {
+  const key = threadNoticeKey(threadId);
   const next = storedThreadNotice(message);
   if (!key || !next) return { added: false, message: null };
   let result = { added: false, message: null };
@@ -135,16 +126,16 @@ export async function appendThreadNotice(threadId = "", message = {}, connectorI
   return result;
 }
 
-export async function readThreadNotices(threadId = "", connectorId = "") {
-  const key = threadNoticeKey(threadId, connectorId);
+export async function readThreadNotices(threadId = "") {
+  const key = threadNoticeKey(threadId);
   if (!key) return [];
   const all = await readJson(threadNoticesPath, {});
   const rows = Array.isArray(all?.[key]) ? all[key] : [];
   return rows.map(storedThreadNotice).filter(Boolean);
 }
 
-export async function deleteThreadNotices(threadId = "", connectorId = "") {
-  const key = threadNoticeKey(threadId, connectorId);
+export async function deleteThreadNotices(threadId = "") {
+  const key = threadNoticeKey(threadId);
   if (!key) return;
   await updateJson(threadNoticesPath, {}, (all) => {
     delete all[key];
@@ -152,16 +143,15 @@ export async function deleteThreadNotices(threadId = "", connectorId = "") {
   });
 }
 
-export async function readState(connectorId = "") {
-  const parsed = await readJson(statePathFor(connectorId), null);
+export async function readState() {
+  const parsed = await readJson(statePath, null);
   if (!parsed) return {
-    threadId: "", runtimeId: "", connectorId, cwd: "", model: "", reasoningEffort: "",
+    threadId: "", runtimeId: "", cwd: "", model: "", reasoningEffort: "",
     modelSettingsUpdatedAt: "", modelSettingsSource: "", messages: [], inflight: null
   };
   return {
     threadId: typeof parsed.threadId === "string" ? parsed.threadId : "",
     runtimeId: typeof parsed.runtimeId === "string" ? parsed.runtimeId : "",
-    connectorId: connectorId || (typeof parsed.connectorId === "string" ? parsed.connectorId : ""),
     cwd: typeof parsed.cwd === "string" ? parsed.cwd : "",
     model: typeof parsed.model === "string" ? parsed.model : "",
     reasoningEffort: typeof parsed.reasoningEffort === "string" ? parsed.reasoningEffort : "",
@@ -172,12 +162,12 @@ export async function readState(connectorId = "") {
   };
 }
 
-export async function writeState(state, connectorId = "") {
-  await writeJson(statePathFor(connectorId), state);
+export async function writeState(state) {
+  await writeJson(statePath, state);
 }
 
-export async function writeStateIfIdle(state, connectorId = "") {
-  await updateJson(statePathFor(connectorId), {}, (current) => {
+export async function writeStateIfIdle(state) {
+  await updateJson(statePath, {}, (current) => {
     const currentThreadId = typeof current.threadId === "string" ? current.threadId : "";
     if (currentThreadId !== String(state.threadId || "") || current.inflight) return current;
     if (!currentThreadId && state.runtimeId) {
@@ -199,8 +189,8 @@ export async function writeStateIfIdle(state, connectorId = "") {
   });
 }
 
-export async function updateStateModelSettings(expectedState = {}, value = {}, connectorId = "") {
-  await updateJson(statePathFor(connectorId), {}, (current) => {
+export async function updateStateModelSettings(expectedState = {}, value = {}) {
+  await updateJson(statePath, {}, (current) => {
     const expectedThreadId = String(expectedState.threadId || "");
     const currentThreadId = typeof current.threadId === "string" ? current.threadId : "";
     if (currentThreadId !== expectedThreadId) return current;
@@ -237,16 +227,14 @@ async function readDrafts() {
   return parsed && typeof parsed === "object" ? parsed : {};
 }
 
-export async function draftForState(state = {}, connectorId = "") {
+export async function draftForState(state = {}) {
   const drafts = await readDrafts();
-  const prefix = connectorPrefix(connectorId);
-  const item = drafts[`${prefix}${draftKeyFor(state.threadId || "", state.cwd || "")}`];
+  const item = drafts[draftKeyFor(state.threadId || "", state.cwd || "")];
   return typeof item?.text === "string" ? item.text : "";
 }
 
-export async function saveDraftForState(state = {}, text = "", connectorId = "") {
-  const prefix = connectorPrefix(connectorId);
-  const key = `${prefix}${draftKeyFor(state.threadId || "", state.cwd || "")}`;
+export async function saveDraftForState(state = {}, text = "") {
+  const key = draftKeyFor(state.threadId || "", state.cwd || "");
   await updateJson(draftsPath, {}, (drafts) => {
     if (text) drafts[key] = { text, updatedAt: new Date().toISOString() };
     else delete drafts[key];
@@ -259,14 +247,14 @@ async function readFollowModes() {
   return parsed && typeof parsed === "object" ? parsed : {};
 }
 
-export async function followModeForState(state = {}, connectorId = "") {
+export async function followModeForState(state = {}) {
   const modes = await readFollowModes();
-  const mode = modes[`${connectorPrefix(connectorId)}${stateKeyFor(state)}`];
+  const mode = modes[stateKeyFor(state)];
   return mode === "steer" ? "steer" : "queue";
 }
 
-export async function saveFollowModeForState(state = {}, mode = "queue", connectorId = "") {
-  const key = `${connectorPrefix(connectorId)}${stateKeyFor(state)}`;
+export async function saveFollowModeForState(state = {}, mode = "queue") {
+  const key = stateKeyFor(state);
   await updateJson(followModesPath, {}, (modes) => {
     modes[key] = mode === "steer" ? "steer" : "queue";
     return modes;
@@ -278,10 +266,10 @@ async function readAllThreadModelSettings() {
   return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
 }
 
-export async function modelSettingsForThread(threadId = "", connectorId = "") {
+export async function modelSettingsForThread(threadId = "") {
   if (!threadId) return null;
   const settings = await readAllThreadModelSettings();
-  const value = settings[`${connectorPrefix(connectorId)}${threadId}`];
+  const value = settings[threadId];
   if (!value || typeof value !== "object") return null;
   const model = typeof value.model === "string" ? value.model : "";
   const reasoningEffort = typeof value.reasoningEffort === "string" ? value.reasoningEffort : "";
@@ -296,9 +284,9 @@ export function shouldReplaceThreadModelSettings(existing = {}, incoming = {}) {
   return !(Number.isFinite(existingTime) && Number.isFinite(incomingTime) && incomingTime < existingTime);
 }
 
-export async function saveThreadModelSettings(threadId = "", value = {}, connectorId = "") {
+export async function saveThreadModelSettings(threadId = "", value = {}) {
   if (!threadId || !value.model) return;
-  const key = `${connectorPrefix(connectorId)}${threadId}`;
+  const key = threadId;
   await updateJson(threadModelSettingsPath, {}, (settings) => {
     const requestedUpdatedAt = typeof value.updatedAt === "string" && value.updatedAt
       ? value.updatedAt
@@ -320,9 +308,9 @@ export async function saveThreadModelSettings(threadId = "", value = {}, connect
   });
 }
 
-export async function deleteThreadModelSettings(threadId = "", connectorId = "") {
+export async function deleteThreadModelSettings(threadId = "") {
   if (!threadId) return;
-  const key = `${connectorPrefix(connectorId)}${threadId}`;
+  const key = threadId;
   await updateJson(threadModelSettingsPath, {}, (settings) => {
     delete settings[key];
     return settings;
@@ -390,20 +378,6 @@ export async function setThreadCompletion(threadId = "", value = null) {
     else delete completions[threadId];
     return completions;
   });
-}
-
-export async function readConnectorViewState() {
-  const parsed = await readJson(connectorsViewStatePath, {});
-  return parsed && typeof parsed === "object" ? {
-    selectedConnectorId: typeof parsed.selectedConnectorId === "string" ? parsed.selectedConnectorId : "",
-    updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : ""
-  } : { selectedConnectorId: "", updatedAt: "" };
-}
-
-export async function writeConnectorViewState(selectedConnectorId = "") {
-  const view = { selectedConnectorId: cleanText(selectedConnectorId, 80).replace(/[^A-Za-z0-9_-]/g, ""), updatedAt: new Date().toISOString() };
-  await writeJson(connectorsViewStatePath, view);
-  return view;
 }
 
 export function syncLoadedCounts(state) {
