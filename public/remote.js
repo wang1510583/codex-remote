@@ -1108,6 +1108,155 @@ function pastedFiles(event) {
     .filter(Boolean);
 }
 
+const pichomeDownloadDragType = "application/x-pichome-download+json";
+
+function safeDroppedFilename(value = "") {
+  return String(value || "")
+    .replace(/[\x00-\x1f\\/:*?"<>|]/g, "_")
+    .trim()
+    .slice(0, 180);
+}
+
+function firstDroppedUrl(value = "") {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith("#") && /^https:\/\//i.test(line)) || "";
+}
+
+function isPichomeDownloadDragUrl(value = "") {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:"
+      && url.hostname === window.location.hostname
+      && !url.username
+      && !url.password
+      && url.searchParams.get("mod") === "pichome"
+      && url.searchParams.get("op") === "download"
+      && Boolean(url.searchParams.get("dpath"));
+  } catch {
+    return false;
+  }
+}
+
+function pichomeDropPayload(transfer) {
+  if (!transfer) return null;
+  const candidates = [];
+  let filename = "";
+  try {
+    const custom = JSON.parse(transfer.getData(pichomeDownloadDragType) || "null");
+    if (custom?.url) candidates.push(String(custom.url));
+    if (custom?.name) filename = safeDroppedFilename(custom.name);
+  } catch {}
+  try {
+    const html = transfer.getData("text/html");
+    if (html) {
+      const documentNode = new DOMParser().parseFromString(html, "text/html");
+      const link = documentNode.querySelector("a[href]");
+      if (link?.href) candidates.push(link.href);
+      if (!filename && link?.getAttribute("download")) {
+        filename = safeDroppedFilename(link.getAttribute("download"));
+      }
+    }
+  } catch {}
+  try {
+    const uri = firstDroppedUrl(transfer.getData("text/uri-list"));
+    if (uri) candidates.push(uri);
+  } catch {}
+  try {
+    const plain = firstDroppedUrl(transfer.getData("text/plain"));
+    if (plain) candidates.push(plain);
+  } catch {}
+  const url = candidates.find(isPichomeDownloadDragUrl);
+  return url ? { url, filename } : null;
+}
+
+function filenameFromContentDisposition(value = "") {
+  const encoded = String(value).match(/filename\*\s*=\s*UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try { return safeDroppedFilename(decodeURIComponent(encoded.trim().replace(/^"|"$/g, ""))); } catch {}
+  }
+  const quoted = String(value).match(/filename\s*=\s*"([^"]+)"/i)?.[1];
+  if (quoted) return safeDroppedFilename(quoted);
+  const plain = String(value).match(/filename\s*=\s*([^;]+)/i)?.[1];
+  return plain ? safeDroppedFilename(plain) : "";
+}
+
+async function uploadPichomeAttachment(file) {
+  if (file.size <= 49 * 1024 * 1024) {
+    await uploadFiles([file]);
+    return;
+  }
+
+  // The regular composer endpoint intentionally buffers small uploads and is
+  // capped at 50MB.  Reuse the app's streaming project-upload endpoint for a
+  // larger Pichome video, but keep the resulting file in the same uploads
+  // directory used by normal composer attachments.
+  const attachmentDir = "codex远程网页连接/codex-remote-main/data/uploads";
+  const rootResponse = await fetch(`${basePath}/api/remote/files?dir=`);
+  const rootData = await rootResponse.json().catch(() => ({}));
+  if (!rootResponse.ok || !rootData.absoluteCwd) {
+    throw new Error(rootData.error || "无法确定附件保存目录");
+  }
+  const bucket = `${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(16).slice(2, 10)}`;
+  const form = new FormData();
+  form.append("files", file, `${bucket}/${file.name}`);
+  const params = new URLSearchParams({ dir: attachmentDir });
+  const response = await fetch(`${basePath}/api/remote/project-upload?${params.toString()}`, {
+    method: "POST",
+    body: form
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `上传失败（HTTP ${response.status}）`);
+  const root = String(rootData.absoluteCwd).replace(/\/+$/, "");
+  const files = (data.files || []).map((row) => {
+    const relative = String(row.path || "").replace(/^\/+/, "");
+    if (!relative.startsWith(`${attachmentDir}/`)) throw new Error("附件保存路径异常");
+    const absolute = `${root}/${relative}`;
+    return {
+      name: row.name || file.name,
+      path: absolute,
+      size: Number(row.size) || file.size,
+      url: `${basePath}/api/remote/download?p=${encodeURIComponent(absolute)}`
+    };
+  });
+  if (!files.length) throw new Error("上传完成但没有返回附件信息");
+  state.uploads.push(...files);
+  renderUploadList();
+}
+
+async function uploadPichomeDrop(payload) {
+  els.uploadButton.disabled = true;
+  try {
+    const response = await fetch(payload.url, {
+      method: "GET",
+      credentials: "include",
+      cache: "no-store"
+    });
+    if (!response.ok) throw new Error(`Pichome 下载失败（HTTP ${response.status}）`);
+    const announcedSize = Number(response.headers.get("content-length") || 0);
+    if (announcedSize > 500 * 1024 * 1024) {
+      throw new Error("该素材超过输入栏当前 500MB 上传上限");
+    }
+    const blob = await response.blob();
+    if (!blob.size) throw new Error("Pichome 返回了空文件");
+    if (blob.size > 500 * 1024 * 1024) {
+      throw new Error("该素材超过输入栏当前 500MB 上传上限");
+    }
+    const dispositionName = filenameFromContentDisposition(response.headers.get("content-disposition") || "");
+    const name = payload.filename || dispositionName || `pichome-${Date.now()}`;
+    const file = new File([blob], name, {
+      type: blob.type || response.headers.get("content-type") || "application/octet-stream",
+      lastModified: Date.now()
+    });
+    await uploadPichomeAttachment(file);
+  } catch (error) {
+    upsertAssistantMessage(`拖入 Pichome 素材失败：${error.message}`, true, "upload-error");
+  } finally {
+    els.uploadButton.disabled = false;
+  }
+}
+
 function messageWithUploads(message) {
   if (!state.uploads.length) return message;
   const lines = state.uploads.map((file, index) => `${index + 1}. ${file.name}\n   路径：${file.path}`);
@@ -3615,6 +3764,31 @@ els.input.addEventListener("select", () => {
 });
 els.input.addEventListener("paste", (event) => {
   const files = pastedFiles(event);
+  if (!files.length) return;
+  event.preventDefault();
+  uploadFiles(files);
+});
+els.input.addEventListener("dragover", (event) => {
+  const transfer = event.dataTransfer;
+  if (!transfer) return;
+  const types = [...(transfer.types || [])];
+  if (!types.includes("Files")
+    && !types.includes(pichomeDownloadDragType)
+    && !types.includes("text/uri-list")
+    && !types.includes("text/html")) return;
+  event.preventDefault();
+  transfer.dropEffect = "copy";
+});
+els.input.addEventListener("drop", (event) => {
+  const transfer = event.dataTransfer;
+  if (!transfer) return;
+  const payload = pichomeDropPayload(transfer);
+  if (payload) {
+    event.preventDefault();
+    uploadPichomeDrop(payload);
+    return;
+  }
+  const files = [...transfer.files];
   if (!files.length) return;
   event.preventDefault();
   uploadFiles(files);
