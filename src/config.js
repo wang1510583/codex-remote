@@ -45,6 +45,7 @@ export const generatedImageDir = path.join(dataDir, "generated-images");
 export const restartScript = path.join(rootDir, "restart-codex-remote.cmd");
 export const statePath = path.join(dataDir, "remote-state.json");
 export const liveVoiceTranscriptsPath = path.join(dataDir, "live-voice-transcripts.json");
+export const threadNoticesPath = path.join(dataDir, "thread-notices.json");
 export const threadNamesPath = path.join(dataDir, "thread-names.json");
 export const draftsPath = path.join(dataDir, "drafts.json");
 export const followModesPath = path.join(dataDir, "follow-modes.json");
@@ -54,9 +55,6 @@ export const threadCompletionsPath = path.join(dataDir, "thread-completions.json
 export const pushVapidPath = path.join(dataDir, "push-vapid.json");
 export const pushSubscriptionsPath = path.join(dataDir, "push-subscriptions.json");
 export const nativeNotificationQueuePath = path.join(dataDir, "native-notification-queue.json");
-export const connectorStatePath = path.join(dataDir, "connectors.json");
-export const connectorsViewStatePath = path.join(dataDir, "connector-view.json");
-export const sshProfilePath = path.join(dataDir, "ssh-profile.json");
 export const sessionsDir = path.join(os.homedir(), ".codex", "sessions");
 
 export const wechatGatewayUrl = (process.env.WECHAT_GATEWAY_URL || "").replace(/\/+$/, "");
@@ -65,11 +63,15 @@ export const wechatTarget = process.env.WECHAT_TO || "";
 export const wechatSource = process.env.WECHAT_SOURCE || "codex-remote-web";
 
 // Dedicated credential embedded into WebToApp-generated APKs. Keep it separate
-// from both the web login password and the remote connector pairing token.
+// from the web login password.
 export const nativeNotificationToken = process.env.CODEX_REMOTE_NOTIFICATION_TOKEN || "";
+// Local Codex CLI PermissionRequest hooks authenticate with a dedicated token.
+// Reusing the APK notification token keeps existing single-user deployments
+// working without exposing the web login password to hook processes.
+export const cliApprovalHookToken = process.env.CODEX_REMOTE_CLI_HOOK_TOKEN || nativeNotificationToken;
+export const cliApprovalTimeoutMs = Number(process.env.CODEX_REMOTE_CLI_APPROVAL_TIMEOUT_MS || 9 * 60 * 1000);
 
 export const remotePassword = process.env.CODEX_REMOTE_PASSWORD || process.env.REMOTE_PASSWORD || (process.env.CODEX_REMOTE_PASSWORD_B64 ? Buffer.from(process.env.CODEX_REMOTE_PASSWORD_B64, "base64").toString("utf8") : "") || (process.env.REMOTE_LOGIN_B64 ? Buffer.from(process.env.REMOTE_LOGIN_B64, "base64").toString("utf8") : "");
-export const connectorPairToken = process.env.CODEX_REMOTE_CONNECTOR_TOKEN || remotePassword;
 export const authCookieName = "codex_remote_auth";
 export const authSecret = process.env.CODEX_REMOTE_AUTH_SECRET || randomBytes(32).toString("hex");
 export const authToken = createHash("sha256").update(`${remotePassword}:${authSecret}`).digest("hex");
@@ -83,22 +85,17 @@ export const codexConnectTimeoutMs = Number(process.env.CODEX_CONNECT_TIMEOUT_MS
 // Default 0 means no timeout limit: wait until Codex CLI completes or exits.
 export const codexTurnTimeoutMs = Number(process.env.CODEX_TURN_TIMEOUT_MS || 0);
 // Sessions started by Codex Desktop/CLI are observed through their JSONL
-// rollout files. Polling also works through the existing remote connector
-// session API, so controlled computers do not need a protocol upgrade.
+// rollout files.
 export const externalSessionPollMs = Number(process.env.CODEX_EXTERNAL_SESSION_POLL_MS || 1000);
 // A process crash can leave a final task_started record without task_complete.
 // Treat a completely unchanged rollout as stale after this safety window.
 export const externalSessionStaleMs = Number(process.env.CODEX_EXTERNAL_SESSION_STALE_MS || 2 * 60 * 60 * 1000);
-export const connectorPollMs = Number(process.env.CODEX_REMOTE_CONNECTOR_POLL_MS || 3000);
-export const connectorHeartbeatTimeoutMs = Number(process.env.CODEX_REMOTE_CONNECTOR_HEARTBEAT_MS || 180000);
-export const disableLocal = /^(1|true|yes|on)$/i.test(process.env.CODEX_REMOTE_DISABLE_LOCAL || "");
 
 // Android Live Voice compatibility gateway. A dedicated token is preferred,
 // while falling back to the web password keeps existing single-user installs
 // compatible with the current Android app configuration.
 export const codexLiveVoiceToken = process.env.CODEX_REMOTE_VOICE_TOKEN || remotePassword;
 export const codexLiveVoiceEnabled = Boolean(codexLiveVoiceToken)
-  && !disableLocal
   && !/^(0|false|no|off)$/i.test(process.env.CODEX_REMOTE_LIVE_VOICE_ENABLED || "1");
 export const codexLiveVoiceVoice = process.env.CODEX_REMOTE_LIVE_VOICE_VOICE || "cove";
 export const codexLiveVoiceTicketTtlMs = Number(process.env.CODEX_REMOTE_LIVE_VOICE_TICKET_TTL_MS || 60000);

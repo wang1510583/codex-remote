@@ -225,6 +225,44 @@ textarea:focus {
   padding-left: 2px;
 }
 
+.taskExecutionStatus {
+  align-self: flex-start;
+  max-width: 100%;
+  margin: 2px 0 4px 2px;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: #b9b3a8;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  animation: taskExecutionPulse 1.8s ease-in-out infinite;
+}
+
+.taskExecutionStatus:hover:not(:disabled),
+.taskExecutionStatus:focus-visible {
+  color: #e7e2d7;
+}
+
+.taskExecutionStatus:focus-visible {
+  outline: 1px solid #8b83ca;
+  outline-offset: 3px;
+}
+
+.taskExecutionStatus:disabled {
+  color: #8f8a82;
+  cursor: default;
+}
+
+@keyframes taskExecutionPulse {
+  0%, 100% { opacity: 0.72; }
+  50% { opacity: 1; }
+}
+
 .remoteLog.hideThoughts > .messageBlock.assistantBlock:not(.completionBlock),
 .remoteLog.hideThoughts > .message.assistant:not(.completion),
 .remoteLog.onlyMine > .messageBlock:not(.userBlock),
@@ -752,6 +790,7 @@ textarea:focus {
   min-width: 34px;
   height: 32px;
   min-height: 32px;
+  touch-action: manipulation;
 }
 
 .threadPanel,
@@ -777,8 +816,8 @@ textarea:focus {
   width: min(620px, calc(100vw - 24px));
 }
 
-.usagePanel {
-  width: min(500px, calc(100vw - 24px));
+.threadPanel.filesView {
+  width: min(760px, calc(100vw - 24px));
 }
 
 .usageContent {
@@ -1014,12 +1053,26 @@ textarea:focus {
   background: #171717;
 }
 
-.modelSettingsPanel > .remoteEvent:empty {
+#modelSettingsStatus:empty,
+#usageStatus:empty {
   display: none;
 }
 
-.modelSettingsPanel > .remoteEvent {
+#modelSettingsStatus,
+#usageStatus {
   margin-top: 10px;
+}
+
+#modelSettingsView[hidden],
+#modelUsageView[hidden],
+#threadExistingView[hidden],
+#threadNewView[hidden],
+#threadFilesView[hidden] {
+  display: none;
+}
+
+#refreshThreads[hidden] {
+  display: none;
 }
 
 .threadPanelTop,
@@ -1042,13 +1095,27 @@ textarea:focus {
   gap: 4px;
 }
 
-#filePanel > .filePanelTop > .panelActions {
+.threadFileActions {
   flex-wrap: wrap;
+  justify-content: flex-start;
+  margin-bottom: 8px;
+}
+
+.newSessionFilterActions {
   justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+.dotFolderFilter[aria-pressed="true"] {
+  border-color: #4f8f69;
+  color: #d7f7e2;
+  background: #183426;
 }
 
 .filePanelTop .panelActions button,
-.threadPanelTop .panelActions button {
+.threadPanelTop .panelActions button,
+.threadFileActions button,
+.newSessionFilterActions button {
   min-height: 29px;
   padding: 4px 11px;
   border-radius: 4px;
@@ -1083,15 +1150,6 @@ textarea:focus {
 .projectUploadMenu button {
   width: 100%;
   text-align: left;
-}
-
-.sshConnectForm .panelActions button,
-#sshFilesView > .panelActions button {
-  min-height: 29px;
-  padding: 4px 11px;
-  border-radius: 4px;
-  font-size: 13px;
-  line-height: 1;
 }
 
 .threadList,
@@ -1148,7 +1206,11 @@ textarea:focus {
   cursor: pointer;
 }
 
-.fileItem.sshFileItem {
+.fileItem[hidden] {
+  display: none;
+}
+
+.fileItem.fileItemWithActions {
   grid-template-columns: auto minmax(0, 1fr) auto;
 }
 
@@ -1182,148 +1244,6 @@ textarea:focus {
   color: #b9b3a8;
   font-size: 9px;
   line-height: 1;
-}
-
-.connectorList,
-.connectorJobs {
-  display: grid;
-  gap: 8px;
-}
-
-.connectorItem {
-  display: grid;
-  grid-template-columns: 10px minmax(0, 1fr);
-  gap: 4px 10px;
-  align-items: center;
-  width: 100%;
-  text-align: left;
-  padding: 9px 11px;
-  border-color: #3f3f46;
-  background: #171717;
-}
-
-.connectorItem.active {
-  border-color: #f3f0e8;
-  background: #222;
-}
-
-.connectorDot {
-  grid-row: span 3;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: #737373;
-}
-
-.connectorItem.online .connectorDot {
-  background: #22c55e;
-}
-
-.connectorItem strong,
-.connectorItem small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.connectorItem small {
-  color: #b9b3a8;
-  font-size: 10px;
-}
-
-.connectorRow {
-  display: flex;
-  gap: 6px;
-  align-items: stretch;
-}
-.connectorRow .connectorItem {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.connectorRemarkBtn {
-  flex: 0 0 auto;
-  align-self: center;
-  padding: 0 12px;
-  height: 36px;
-  border-radius: 8px;
-  border: 1px solid #3f3f46;
-  background: #171717;
-  color: #d4d4d8;
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.connectorRemarkBtn:hover {
-  border-color: #f3f0e8;
-  background: #222;
-  color: #f3f0e8;
-}
-
-.connectorJobForm {
-  display: grid;
-  gap: 8px;
-  margin: 10px 0;
-  padding-top: 10px;
-  border-top: 1px solid #2f2f2f;
-}
-
-.connectorJobForm label {
-  display: grid;
-  gap: 5px;
-  color: #b9b3a8;
-  font-size: 11px;
-}
-
-.connectorJobForm textarea {
-  min-height: 88px;
-  resize: vertical;
-}
-
-.connectorJobForm button {
-  min-height: 32px;
-}
-
-.connectorJob {
-  display: grid;
-  gap: 4px;
-  padding: 9px 11px;
-  border: 1px solid #333;
-  border-radius: 6px;
-  background: #141414;
-}
-
-.connectorJob.completed {
-  border-color: rgba(34, 197, 94, 0.55);
-}
-
-.connectorJob.failed {
-  border-color: rgba(239, 68, 68, 0.7);
-}
-
-.connectorJob strong,
-.connectorJob small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.connectorJob small {
-  color: #b9b3a8;
-  font-size: 10px;
-}
-
-.connectorJob pre {
-  max-height: 160px;
-  overflow: auto;
-  margin: 0;
-  padding: 8px;
-  border-radius: 4px;
-  background: #050505;
-  color: #e7e5e4;
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 
 .folderDeleteButton {
@@ -1599,6 +1519,7 @@ textarea:focus {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .taskExecutionStatus { animation: none; }
   .message.user { transition: none; }
   .speechFeedback { animation: none; }
 }
@@ -1768,15 +1689,38 @@ textarea:focus {
   gap: 8px;
 }
 
+.commandGroup {
+  position: sticky;
+  top: -10px;
+  z-index: 1;
+  margin: 2px -2px 0;
+  padding: 8px 4px 5px;
+  color: #d7b866;
+  background: #111;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
 .commandItem {
   display: grid;
-  grid-template-columns: 96px 68px minmax(0, 1fr);
+  grid-template-columns: 164px 80px minmax(0, 1fr);
   gap: 8px;
   width: 100%;
   align-items: center;
   text-align: left;
   min-width: 0;
   overflow: hidden;
+}
+
+.commandItemActive {
+  border-color: rgba(71, 190, 118, 0.72);
+  background: rgba(40, 112, 68, 0.22);
+}
+
+.commandItemActive span,
+.commandItemActive small {
+  color: #b9e8c9;
 }
 
 .commandItem > * {
@@ -1866,29 +1810,12 @@ textarea:focus {
   border-color: #f3f0e8;
 }
 
-.sshConnectForm {
-  display: grid;
-  gap: 12px;
-}
-
-.sshConnectForm[hidden],
-#sshFilesView[hidden] {
-  display: none !important;
-}
-
-.sshConnectForm label {
-  display: grid;
-  gap: 6px;
-  color: #b9b3a8;
-  font-size: 12px;
-}
-
-.sshEditor {
+.projectEditor {
   display: grid;
   gap: 8px;
 }
 
-.sshEditor textarea {
+.projectEditor textarea {
   min-height: 240px;
 }
 
@@ -2017,7 +1944,7 @@ textarea:focus {
   }
 
   .commandItem {
-    grid-template-columns: 88px minmax(0, 1fr);
+    grid-template-columns: 156px minmax(0, 1fr);
   }
 
   .commandItem small {
@@ -2028,17 +1955,16 @@ textarea:focus {
     grid-template-columns: 1fr;
   }
 
-  #filePanel > .filePanelTop {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 8px;
+  .threadPanelTop {
+    align-items: flex-start;
   }
 
-  #filePanel > .filePanelTop > .panelActions {
-    justify-content: flex-start;
+  .threadPanelTop > .panelActions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
-  .fileItem.sshFileItem {
+  .fileItem.fileItemWithActions {
     align-items: start;
     gap: 6px;
     padding: 9px 10px;
@@ -2054,5 +1980,231 @@ textarea:focus {
     min-height: 27px;
     padding: 3px 7px;
     font-size: 12px;
+  }
+}
+
+.approvalModal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 14px;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.approvalModal[hidden] {
+  display: none;
+}
+
+.approvalDialog {
+  width: min(680px, 100%);
+  max-height: min(760px, 92vh);
+  overflow: auto;
+  border: 1px solid #5d5790;
+  border-radius: 8px;
+  background: #131313;
+  color: #f3f0e8;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+}
+
+.approvalTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.approvalKind {
+  display: inline-block;
+  margin-bottom: 6px;
+  padding: 2px 8px;
+  border: 1px solid #5d5790;
+  border-radius: 6px;
+  background: #36345f;
+  color: #d7d4ff;
+  font-size: 11px;
+}
+
+.approvalTitle {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.approvalMeta {
+  max-width: 46%;
+  overflow: hidden;
+  color: #9a9a9a;
+  font-size: 11px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approvalBody {
+  display: grid;
+  gap: 12px;
+  padding: 16px 18px;
+}
+
+.approvalSection {
+  display: grid;
+  gap: 6px;
+}
+
+.approvalLabel {
+  color: #b9b3a8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.approvalSummary {
+  color: #e7e2d8;
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.approvalCode,
+.approvalDiff,
+.approvalJson {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #050505;
+  color: #c8c8c8;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.approvalFile {
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  background: #171717;
+}
+
+.approvalFile strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approvalFile small {
+  color: #9a9a9a;
+  font-size: 11px;
+}
+
+.approvalQuestion {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  background: #171717;
+}
+
+.approvalQuestion strong {
+  color: #e7e2d8;
+  font-size: 14px;
+}
+
+.approvalQuestion p {
+  margin: 0;
+  color: #b9b3a8;
+  font-size: 12px;
+}
+
+.approvalOption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #d1d5db;
+  font-size: 13px;
+}
+
+.approvalInput,
+.approvalSelect,
+.approvalTextarea {
+  width: 100%;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #050505;
+  color: #f3f0e8;
+  padding: 9px 10px;
+  font: inherit;
+  outline: none;
+}
+
+.approvalTextarea {
+  min-height: 76px;
+  resize: vertical;
+}
+
+.approvalInput:focus,
+.approvalSelect:focus,
+.approvalTextarea:focus {
+  border-color: #a78bfa;
+}
+
+.approvalActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 4px 18px 14px;
+}
+
+.approvalActions button {
+  min-height: 38px;
+}
+
+.approvalStatus {
+  min-height: 20px;
+  padding: 0 18px 14px;
+  color: #ffbeb3;
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .approvalModal {
+    align-items: end;
+    padding: 8px;
+  }
+
+  .approvalDialog {
+    width: 100%;
+    max-height: 88vh;
+    border-radius: 8px;
+  }
+
+  .approvalTop {
+    display: grid;
+  }
+
+  .approvalMeta {
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .approvalActions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .approvalActions .approvalActionWide {
+    grid-column: 1 / -1;
   }
 }

@@ -30,9 +30,3 @@ export function redirectToLogin(res, basePath = "") {
   res.writeHead(302, { Location: `${basePath}/login.html` });
   res.end();
 }
-
-export function connectorAuthToken(req) {
-  const header = req.headers.authorization || "";
-  const match = /^Bearer\s+(.+)$/i.exec(header);
-  return match ? match[1].trim() : "";
-}

@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { codexBin, codexModel, codexReasoningEffort, codexWorkDir } from "./config.js";
 import { broadcast } from "./sse.js";
-import { rpcErrorMessage } from "./utils.js";
+import { cleanText, rpcErrorMessage } from "./utils.js";
 import { projectPath, absoluteStateCwd } from "./paths.js";
 import {
   assistantBubbleText, saveGeneratedImage, contextUsageFromEvent,
   fullReplyItemTextLimit, fullReplyMessageFromThreadItem
 } from "./threads.js";
 import { createLocalAppServerTransport } from "./transport/local.js";
+import { sendNativeApprovalRequired } from "./native-notifications.js";
 
 export const supplementalModelOptions = Object.freeze([
   Object.freeze({
@@ -23,6 +24,15 @@ export const supplementalModelOptions = Object.freeze([
     id: "mimo-v2.5-pro",
     model: "mimo-v2.5-pro",
     displayName: "mimo-v2.5-pro",
+    defaultReasoningEffort: "high",
+    supportedReasoningEfforts: Object.freeze([
+      Object.freeze({ reasoningEffort: "high" })
+    ])
+  }),
+  Object.freeze({
+    id: "deepseek-v4-flash",
+    model: "deepseek-v4-flash",
+    displayName: "deepseek-v4-flash",
     defaultReasoningEffort: "high",
     supportedReasoningEfforts: Object.freeze([
       Object.freeze({ reasoningEffort: "high" })
@@ -80,6 +90,137 @@ export function isFastServiceTier(value, fastTier = null) {
   ].filter(Boolean)).has(normalized);
 }
 
+const serverRequestTitles = {
+  "execCommandApproval": "命令执行确认",
+  "applyPatchApproval": "文件修改确认",
+  "item/commandExecution/requestApproval": "命令执行确认",
+  "item/fileChange/requestApproval": "文件修改确认",
+  "item/permissions/requestApproval": "权限申请确认",
+  "item/tool/requestUserInput": "等待用户输入",
+  "mcpServer/elicitation/request": "MCP 表单确认",
+  "item/tool/call": "动态工具调用确认",
+  "thread/approveGuardianDeniedAction": "安全拦截确认"
+};
+
+const userApprovalMethods = new Set([
+  "execCommandApproval",
+  "applyPatchApproval",
+  "item/commandExecution/requestApproval",
+  "item/fileChange/requestApproval",
+  "item/permissions/requestApproval",
+  "item/tool/requestUserInput",
+  "mcpServer/elicitation/request",
+  "item/tool/call",
+  "thread/approveGuardianDeniedAction"
+]);
+
+function compactText(value, maxLength = 200) {
+  const text = Array.isArray(value)
+    ? value.join(" ")
+    : String(value || "");
+  return cleanText(text.replace(/\s+/g, " ").trim(), maxLength);
+}
+
+function serverRequestDisplay(record = {}) {
+  const method = record.method || "";
+  const params = record.params || {};
+  const display = {
+    requestId: String(record.id),
+    approvalScope: String(record.approvalScope || ""),
+    method,
+    kind: "approval",
+    threadId: params.threadId || params.conversationId || record.threadId || "",
+    turnId: params.turnId || record.turnId || "",
+    startedAtMs: params.startedAtMs || record.startedAtMs || Date.now(),
+    title: serverRequestTitles[method] || "Codex 请求确认",
+    summary: "",
+    reason: compactText(params.reason, 2000),
+    command: "",
+    cwd: String(params.cwd || ""),
+    files: [],
+    permissions: null,
+    questions: [],
+    message: "",
+    tool: "",
+    arguments: null,
+    mode: "",
+    schema: null,
+    availableDecisions: [],
+    canAcceptForSession: false,
+    canApplyExecpolicy: false,
+    event: null
+  };
+  if (method === "execCommandApproval" || method === "item/commandExecution/requestApproval") {
+    display.kind = "command";
+    display.command = compactText(params.command, 20000);
+    display.summary = params.reason || display.command || "Codex 请求执行命令";
+    if (params.networkApprovalContext) {
+      display.summary = `网络访问 ${params.networkApprovalContext.host}（${params.networkApprovalContext.protocol}）`;
+    }
+    if (method === "item/commandExecution/requestApproval") {
+      display.availableDecisions = Array.isArray(params.availableDecisions)
+        ? params.availableDecisions
+        : [];
+      display.canAcceptForSession = true;
+      display.canApplyExecpolicy = Array.isArray(params.proposedExecpolicyAmendment)
+        && params.proposedExecpolicyAmendment.length > 0;
+    }
+    return display;
+  }
+  if (method === "applyPatchApproval" || method === "item/fileChange/requestApproval") {
+    display.kind = "file";
+    if (method === "applyPatchApproval") {
+      display.files = Object.entries(params.fileChanges || {}).map(([filePath, change]) => ({
+        path: filePath,
+        type: change?.type || "update",
+        detail: compactText(change?.unified_diff || change?.content || "", 8000)
+      }));
+      display.summary = `${display.files.length} 个文件`;
+      display.canAcceptForSession = true;
+    } else {
+      display.summary = params.reason || "Codex 请求确认文件修改";
+      display.canAcceptForSession = true;
+    }
+    return display;
+  }
+  if (method === "item/permissions/requestApproval") {
+    display.kind = "permission";
+    display.permissions = params.permissions || {};
+    display.summary = params.reason || "Codex 请求扩展权限";
+    return display;
+  }
+  if (method === "item/tool/requestUserInput") {
+    display.kind = "input";
+    display.questions = Array.isArray(params.questions) ? params.questions : [];
+    display.summary = display.questions[0]?.question || "Codex 请求用户输入";
+    return display;
+  }
+  if (method === "mcpServer/elicitation/request") {
+    display.kind = "elicitation";
+    display.message = compactText(params.message, 4000);
+    display.mode = params.mode || "";
+    display.schema = params.requestedSchema && typeof params.requestedSchema === "object"
+      ? params.requestedSchema
+      : null;
+    display.summary = display.message || "MCP 请求确认";
+    return display;
+  }
+  if (method === "item/tool/call") {
+    display.kind = "tool";
+    display.tool = params.tool || "";
+    display.arguments = params.arguments || null;
+    display.summary = `调用工具 ${display.tool}`;
+    return display;
+  }
+  if (method === "thread/approveGuardianDeniedAction") {
+    display.kind = "guardian";
+    display.event = params.event || null;
+    display.summary = "安全机制已拦截一个操作，需要你确认是否继续";
+    return display;
+  }
+  return display;
+}
+
 function missingModelProviderName(error) {
   const message = String(error?.message || error || "");
   const match = message.match(/Model provider\s+([`'"]?)([^`'"\s]+)\1\s+not found/i);
@@ -102,6 +243,7 @@ export class CodexAppServer {
     this.resolveCwd = options.resolveCwd || ((state = {}) => absoluteStateCwd(state));
     this.nextId = 1;
     this.pending = new Map();
+    this.serverRequests = new Map();
     this.initialized = false;
     this.activeThreadId = "";
     this.activeCwd = "";
@@ -115,6 +257,10 @@ export class CodexAppServer {
     this.starting = null;
     this.settingsUpdatePromise = null;
     this.turnStarting = false;
+    this.approvalScope = String(options.approvalScope || randomUUID());
+    this.notifyApprovalRequired = typeof options.notifyApprovalRequired === "function"
+      ? options.notifyApprovalRequired
+      : sendNativeApprovalRequired;
     this.optOutNotificationMethods = Array.isArray(options.optOutNotificationMethods)
       ? options.optOutNotificationMethods.filter(Boolean)
       : [];
@@ -145,6 +291,7 @@ export class CodexAppServer {
 
   async startAndInitialize() {
     this.pending.clear();
+    this.serverRequests.clear();
     this.initialized = false;
     this.activeThreadId = "";
     this.activeCwd = "";
@@ -192,6 +339,16 @@ export class CodexAppServer {
   rejectAll(error) {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    for (const record of this.serverRequests.values()) {
+      broadcast({
+        type: "approval_resolved",
+        requestId: String(record.id),
+        approvalScope: this.approvalScope,
+        method: record.method,
+        connectorId: this.runner?.connectorId || ""
+      });
+    }
+    this.serverRequests.clear();
     for (const waiters of this.threadSettingsWaiters.values()) {
       for (const waiter of waiters) waiter.finish(null);
     }
@@ -208,6 +365,10 @@ export class CodexAppServer {
     let message;
     try { message = JSON.parse(line); }
     catch { console.error(line); return; }
+    if (message.id && message.method !== undefined) {
+      this.onServerRequest(message);
+      return;
+    }
     if (message.id) {
       const pending = this.pending.get(message.id);
       if (!pending) return;
@@ -223,6 +384,182 @@ export class CodexAppServer {
       return;
     }
     this.onNotification(message);
+  }
+
+  sendServerResponse(id, result, error = null) {
+    const response = { id };
+    if (error) {
+      response.error = {
+        code: Number(error.code) || -32000,
+        message: error.message || "Codex server request failed"
+      };
+    } else {
+      response.result = result;
+    }
+    try {
+      this.transport?.send?.(JSON.stringify(response));
+    } catch (sendError) {
+      console.error("failed to respond to Codex server request", sendError);
+    }
+  }
+
+  onServerRequest(message) {
+    const method = String(message.method || "");
+    const params = message.params || {};
+    if (method === "currentTime/read") {
+      this.sendServerResponse(message.id, { currentTimeAt: Math.floor(Date.now() / 1000) });
+      return;
+    }
+    if (!userApprovalMethods.has(method)) {
+      this.sendServerResponse(message.id, null, new Error(`不支持的服务端请求：${method}`));
+      return;
+    }
+    const requestId = String(message.id);
+    if (this.serverRequests.has(requestId)) return;
+    const record = {
+      id: message.id,
+      approvalScope: this.approvalScope,
+      method,
+      params,
+      threadId: params.threadId || params.conversationId || this.turn?.threadId || "",
+      turnId: params.turnId || this.turn?.turnId || "",
+      startedAtMs: params.startedAtMs || Date.now(),
+      createdAt: Date.now()
+    };
+    const display = serverRequestDisplay(record);
+    this.serverRequests.set(requestId, record);
+    broadcast({
+      type: "approval_request",
+      connectorId: this.runner?.connectorId || "",
+      ...display
+    });
+    try {
+      this.notifyApprovalRequired(display);
+    } catch (error) {
+      console.error("native approval notification failed", error?.message || error);
+    }
+  }
+
+  pendingApprovalRequests() {
+    return [...this.serverRequests.values()]
+      .sort((left, right) => left.createdAt - right.createdAt)
+      .map((record) => serverRequestDisplay(record));
+  }
+
+  hasPendingServerRequest(requestId) {
+    return this.serverRequests.has(String(requestId || ""));
+  }
+
+  respondToServerRequest(id, result, error = null) {
+    const key = String(id || "");
+    const record = this.serverRequests.get(key);
+    if (!record) return false;
+    this.serverRequests.delete(key);
+    this.sendServerResponse(record.id, result, error);
+    broadcast({
+      type: "approval_resolved",
+      requestId: key,
+      approvalScope: this.approvalScope,
+      method: record.method,
+      connectorId: this.runner?.connectorId || ""
+    });
+    return true;
+  }
+
+  resolvePendingServerRequest(requestId) {
+    const key = String(requestId || "");
+    const record = this.serverRequests.get(key);
+    if (!record) return;
+    this.serverRequests.delete(key);
+    broadcast({
+      type: "approval_resolved",
+      requestId: key,
+      approvalScope: this.approvalScope,
+      method: record.method,
+      connectorId: this.runner?.connectorId || ""
+    });
+  }
+
+  respondToApprovalRequest(body = {}) {
+    const key = String(body.requestId || "");
+    const record = this.serverRequests.get(key);
+    if (!record) {
+      throw Object.assign(new Error("审批请求不存在或已处理。"), { statusCode: 404 });
+    }
+    try {
+      const result = this.approvalResultForRequest(record, body);
+      this.respondToServerRequest(record.id, result);
+      return { ok: true, method: record.method };
+    } catch (error) {
+      this.respondToServerRequest(record.id, null, error);
+      return { ok: true, method: record.method, declined: true };
+    }
+  }
+
+  approvalResultForRequest(record, body = {}) {
+    const decision = String(body.decision || "").trim();
+    const method = record.method;
+    const params = record.params || {};
+    if (method === "execCommandApproval" || method === "applyPatchApproval") {
+      if (["approved", "accept", "approve"].includes(decision)) {
+        return { decision: "approved" };
+      }
+      if (["approved_for_session", "acceptForSession"].includes(decision)) {
+        return { decision: "approved_for_session" };
+      }
+      if (["denied", "decline", "deny"].includes(decision)) {
+        return { decision: { denied: { rejection: String(body.reason || "用户拒绝执行。") } } };
+      }
+      if (["abort", "cancel"].includes(decision)) {
+        return { decision: "abort" };
+      }
+      throw Object.assign(new Error("无效的审批决定。"), { statusCode: 400 });
+    }
+    if (method === "item/commandExecution/requestApproval") {
+      if (decision === "accept") return { decision: "accept" };
+      if (decision === "acceptForSession") return { decision: "acceptForSession" };
+      if (decision === "decline") return { decision: "decline" };
+      if (decision === "cancel") return { decision: "cancel" };
+      throw Object.assign(new Error("无效的审批决定。"), { statusCode: 400 });
+    }
+    if (method === "item/fileChange/requestApproval") {
+      if (decision === "accept") return { decision: "accept" };
+      if (decision === "acceptForSession") return { decision: "acceptForSession" };
+      if (decision === "decline") return { decision: "decline" };
+      if (decision === "cancel") return { decision: "cancel" };
+      throw Object.assign(new Error("无效的审批决定。"), { statusCode: 400 });
+    }
+    if (method === "item/permissions/requestApproval") {
+      const declined = ["decline", "deny", "cancel"].includes(decision);
+      const requested = params.permissions || {};
+      return {
+        permissions: declined ? { fileSystem: null, network: null } : requested,
+        scope: decision === "acceptForSession" || body.scope === "session" ? "session" : "turn"
+      };
+    }
+    if (method === "item/tool/requestUserInput") {
+      if (["cancel", "decline"].includes(decision)) return { answers: {} };
+      const answers = body.answers && typeof body.answers === "object" ? body.answers : {};
+      return { answers };
+    }
+    if (method === "mcpServer/elicitation/request") {
+      const action = ["decline", "cancel"].includes(decision) ? decision : "accept";
+      return {
+        action,
+        content: action === "accept" && body.content !== undefined ? body.content : null
+      };
+    }
+    if (method === "item/tool/call") {
+      const success = ["accept", "approved", "allow"].includes(decision);
+      return { success, contentItems: [] };
+    }
+    if (method === "thread/approveGuardianDeniedAction") {
+      if (["decline", "deny", "cancel"].includes(decision)) {
+        throw Object.assign(new Error("用户拒绝批准该操作。"), { statusCode: 400 });
+      }
+      return {};
+    }
+    throw Object.assign(new Error(`不支持处理服务端请求：${method}`), { statusCode: 400 });
   }
 
   updateContextUsage(payload = {}) {
@@ -409,6 +746,9 @@ export class CodexAppServer {
     const method = message.method;
     const params = message.params || {};
     const payload = params.payload || params.event || params;
+    if (method === "serverRequest/resolved" && params.requestId) {
+      this.resolvePendingServerRequest(params.requestId);
+    }
     if (method === "thread/settings/updated") this.dispatchThreadSettingsUpdate(params);
     const notificationTurnId = params.turnId || params.turn?.id || "";
     const notificationMatchesTurn = Boolean(this.turn
@@ -658,7 +998,7 @@ export class CodexAppServer {
     if (threadId && threadId === this.activeThreadId && resolvedCwd === this.activeCwd) return threadId;
     const params = {
       cwd: resolvedCwd,
-      approvalPolicy: "never",
+      approvalPolicy: "on-request",
       sandbox: "danger-full-access",
       model: configured.model || undefined,
       modelProvider: configured.modelProvider || undefined,
@@ -709,6 +1049,7 @@ export class CodexAppServer {
         this.request("turn/start", {
           threadId: state.threadId,
           cwd,
+          approvalPolicy: "on-request",
           model: settings.model || undefined,
           effort: settings.reasoningEffort || undefined,
           input: [{ type: "text", text: message, text_elements: [] }]
@@ -1121,6 +1462,7 @@ export class CodexAppServer {
     const error = new Error("Codex app-server connection closed.");
     try { this.transport.kill?.(); } catch {}
     this.rejectAll(error);
+    this.serverRequests.clear();
     this.initialized = false;
     this.activeThreadId = "";
     this.activeCwd = "";

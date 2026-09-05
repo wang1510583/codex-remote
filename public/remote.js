@@ -12,11 +12,12 @@ const state = {
   absoluteCwd: "",
   fileLinkRoots: [],
   fileCwd: "",
-  fileCwdConnectorId: "",
   newCwd: "",
-  newCwdConnectorId: "",
+  hideProjectDotFolders: false,
+  hideNewSessionDotFolders: false,
   loadedCount: 0,
   messageCount: 0,
+  loadingMore: false,
   activeAssistant: null,
   assistantBubbles: new Map(),
   replyDone: false,
@@ -30,16 +31,17 @@ const state = {
   uploads: [],
   connected: false,
   draftKey: "",
-  sshConnected: false,
-  sshLabel: "",
-  sshCwd: "",
   eventDisconnected: false,
   lastEventSeq: 0,
   resyncingEvents: false,
   notifiedMessages: new Set(),
   currentTaskStartedAtMs: null,
+  currentTaskDetail: "",
+  currentTaskDetailKind: "",
+  currentTaskDetailAtMs: null,
   pushSubscribed: false,
   nativeNotificationConnected: false,
+  autoApprove: localStorage.getItem("codex-remote-auto-approve") === "1",
   autoSpeech: localStorage.getItem("codex-remote-auto-speech") === "1",
   spokenMessageIds: new Set(),
   speechUtterances: new Set(),
@@ -48,16 +50,22 @@ const state = {
   showFullReplies: localStorage.getItem("codex-remote-show-full-replies") === "1",
   fullMessageCount: 0,
   completedUnreadThreads: new Set(),
-  connectors: [],
-  connectorJobs: [],
-  selectedConnectorId: "",
+  threadListCache: (() => {
+    try {
+      const cached = JSON.parse(localStorage.getItem("codex-remote-thread-list-cache") || "null");
+      return Array.isArray(cached?.threads) ? cached : null;
+    } catch {
+      return null;
+    }
+  })(),
   model: "",
   reasoningEffort: "",
   modelSettingsUpdatedAt: "",
   modelOptions: [],
-  localConnectorRemark: "",
-  disableLocal: false,
-  localNotices: []
+  localNotices: [],
+  pendingApproval: null,
+  pendingApprovalQueue: [],
+  pendingApprovalSubmitting: false
 };
 const basePath = ["/codexremote", "/codex-remote"].find((path) => location.pathname === path || location.pathname.startsWith(`${path}/`)) || "";
 const draftPrefix = "codex-remote-draft:";
@@ -65,10 +73,12 @@ let draftTimer = 0;
 let modelSettingsChanging = false;
 let stateLoadGeneration = 0;
 let realtimeReconcileTimer = 0;
+let taskExecutionStatusTimer = 0;
+let taskInterruptPending = false;
 const processedEventSeqs = new Set();
 const pendingRemoteEvents = [];
 const slashCommands = [
-  { command: "/help", title: "帮助", detail: "显示当前已接入的 Codex 命令" },
+  { group: "Codex 命令", command: "/help", title: "帮助", detail: "显示当前已接入的 Codex 命令" },
   { command: "/status", title: "状态", detail: "读取 app-server、线程、模型和目录状态" },
   { command: "/model", title: "查看模型", detail: "通过 Codex CLI model/list 查看可用模型" },
   { command: "/model ", title: "切换模型", detail: "输入 /model <模型ID>，只接受 CLI 返回的可用选项" },
@@ -82,11 +92,28 @@ const slashCommands = [
   { command: "/follow steer", title: "引导模式", detail: "运行中发送的新消息引导当前任务" },
   { command: "/steer ", title: "立即引导", detail: "把后续文字发送给当前正在运行的任务" },
   { command: "/notify", title: "通知", detail: notificationDetail, action: requestNotifications },
+  { command: "/autoapprove", title: "自动确认审核", detail: autoApprovalDetail, action: toggleAutoApproval, active: () => state.autoApprove },
   { command: "/tts", title: "自动语音朗读", detail: speechDetail, action: toggleAutoSpeech },
   { command: "/full", title: "显示Codex完整回复", detail: fullRepliesDetail, action: toggleFullReplies },
   { command: "/result", title: "只看结果", detail: () => state.hideThoughts ? "当前只显示用户气泡和 ✅ 气泡，点击后显示全部" : "隐藏思考过程气泡，只显示用户气泡和 ✅ 气泡", action: toggleResultOnly },
   { command: "/mine", title: "只看自己", detail: () => state.onlyMine ? "当前只显示自己发送的气泡，点击后显示全部" : "只显示自己发送的消息气泡", action: toggleOnlyMine },
-  { command: "/stop", title: "中断", detail: "通过 turn/interrupt 中断当前回合" }
+  { command: "/stop", title: "中断", detail: "通过 turn/interrupt 中断当前回合" },
+  { group: "Mem0 记忆技能", command: "$mem0:onboard", title: "初始化", detail: "新项目首次使用、更新 API Key 或重新配置时运行", execute: true },
+  { command: "$mem0:health", title: "健康检查", detail: "连接、搜索或写入异常时诊断；可附加 --deep 检查记忆质量", execute: true },
+  { command: "$mem0:remember", title: "记住内容", detail: "保存重要决定、偏好、规范或经验；输入框文字会作为记忆内容", execute: true },
+  { command: "$mem0:peek", title: "快速搜索", detail: "按关键词或记忆 ID 快速查找；输入框文字会作为查询", execute: true },
+  { command: "$mem0:tour", title: "浏览记忆", detail: "查看当前项目的全部记忆；可附加 --all-projects", execute: true },
+  { command: "$mem0:stats", title: "记忆统计", detail: "查看数量、分类、时间分布和延迟；可附加 --weekly", execute: true },
+  { command: "$mem0:list-projects", title: "项目列表", detail: "查看云端有哪些记忆项目、数量和最近活动", execute: true },
+  { command: "$mem0:switch-project", title: "切换项目", detail: "覆盖当前目录的项目范围；输入项目名，或使用 --global / --no-global", execute: true },
+  { command: "$mem0:pin", title: "固定记忆", detail: "保护关键记忆不被清理；输入关键词、记忆 ID 或 unpin 指令", execute: true },
+  { command: "$mem0:forget", title: "删除记忆", detail: "查找并删除错误、过期或敏感记忆，实际删除前仍会确认", execute: true },
+  { command: "$mem0:memory-reviewer", title: "质量审查", detail: "只读检查重复、矛盾和陈旧记忆，不会修改数据", execute: true },
+  { command: "$mem0:dream", title: "整理记忆", detail: "合并重复、处理矛盾并清理陈旧记忆，应用前会显示差异并确认", execute: true },
+  { command: "$mem0:export", title: "导出备份", detail: "把当前项目全部记忆导出为 Markdown 文件", execute: true },
+  { command: "$mem0:import", title: "导入记忆", detail: "从 Mem0 导出文件或 MEMORY.md 恢复；输入框可填写文件路径", execute: true },
+  { command: "$mem0:context-loader", title: "加载上下文", detail: "开始复杂任务或切换模块时，预先加载相关历史决定和规范", execute: true },
+  { command: "$mem0:mem0", title: "SDK 帮助", detail: "编写 Python/TypeScript Mem0 API 集成代码时查看 SDK 用法", execute: true }
 ];
 
 function reasoningEffortLabel(value = "") {
@@ -100,47 +127,20 @@ const els = {
   input: document.querySelector("#remoteInput"),
   sendQueue: document.querySelector("#sendQueueRemote"),
   sendSteer: document.querySelector("#sendSteerRemote"),
-  connectorsButton: document.querySelector("#connectorsRemote"),
-  connectorPanel: document.querySelector("#connectorPanel"),
-  connectorList: document.querySelector("#connectorList"),
-  connectorJobs: document.querySelector("#connectorJobs"),
-  connectorJobForm: document.querySelector("#connectorJobForm"),
-  connectorPrompt: document.querySelector("#connectorPrompt"),
-  connectorCwd: document.querySelector("#connectorCwd"),
-  runConnectorJob: document.querySelector("#runConnectorJob"),
-  refreshConnectors: document.querySelector("#refreshConnectors"),
-  closeConnectors: document.querySelector("#closeConnectors"),
-  sshConnectButton: document.querySelector("#sshConnectRemote"),
-  usageButton: document.querySelector("#usageRemote"),
-  usagePanel: document.querySelector("#usagePanel"),
-  closeUsage: document.querySelector("#closeUsage"),
   usageContent: document.querySelector("#usageContent"),
   usageStatus: document.querySelector("#usageStatus"),
   modelSettingsButton: document.querySelector("#modelSettingsRemote"),
   modelSettingsPanel: document.querySelector("#modelSettingsPanel"),
+  modelSettingsTitle: document.querySelector("#modelSettingsTitle"),
+  modelUsageToggle: document.querySelector("#modelUsageToggle"),
+  modelSettingsView: document.querySelector("#modelSettingsView"),
+  modelUsageView: document.querySelector("#modelUsageView"),
   closeModelSettings: document.querySelector("#closeModelSettings"),
   modelSettingsCurrent: document.querySelector("#modelSettingsCurrent"),
   modelSettingsModels: document.querySelector("#modelSettingsModels"),
   modelSettingsEfforts: document.querySelector("#modelSettingsEfforts"),
   modelSettingsStatus: document.querySelector("#modelSettingsStatus"),
   onlyMineButton: document.querySelector("#onlyMineRemote"),
-  sshConnectPanel: document.querySelector("#sshConnectPanel"),
-  sshPanelTitle: document.querySelector("#sshPanelTitle"),
-  toggleSshView: document.querySelector("#toggleSshView"),
-  sshConnectForm: document.querySelector("#sshConnectForm"),
-  sshFilesView: document.querySelector("#sshFilesView"),
-  sshTarget: document.querySelector("#sshTarget"),
-  sshPassword: document.querySelector("#sshPassword"),
-  sshStatus: document.querySelector("#sshStatus"),
-  sshDisconnect: document.querySelector("#sshDisconnect"),
-  sshPath: document.querySelector("#sshPath"),
-  sshList: document.querySelector("#sshList"),
-  sshPreview: document.querySelector("#sshPreview"),
-  createSshFolder: document.querySelector("#createSshFolder"),
-  createSshFile: document.querySelector("#createSshFile"),
-  closeSshConnect: document.querySelector("#closeSshConnect"),
-  filesButton: document.querySelector("#filesRemote"),
-  filePanel: document.querySelector("#filePanel"),
   fileList: document.querySelector("#fileList"),
   filePath: document.querySelector("#filePath"),
   filePreview: document.querySelector("#filePreview"),
@@ -153,17 +153,21 @@ const els = {
   projectUploadStatus: document.querySelector("#projectUploadStatus"),
   createFolder: document.querySelector("#createFolderRemote"),
   createFile: document.querySelector("#createFileRemote"),
-  closeFiles: document.querySelector("#closeFiles"),
+  projectDotFolderFilter: document.querySelector("#projectDotFolderFilter"),
   newChat: document.querySelector("#newRemote"),
   newPath: document.querySelector("#newPath"),
   newList: document.querySelector("#newList"),
+  newDotFolderFilter: document.querySelector("#newDotFolderFilter"),
   createSession: document.querySelector("#createSessionRemote"),
   threadButton: document.querySelector("#threadRemote"),
   threadPanel: document.querySelector("#threadPanel"),
   threadPanelTitle: document.querySelector("#threadPanelTitle"),
+  refreshThreads: document.querySelector("#refreshThreads"),
   toggleThreadView: document.querySelector("#toggleThreadView"),
+  threadFilesToggle: document.querySelector("#threadFilesToggle"),
   threadExistingView: document.querySelector("#threadExistingView"),
   threadNewView: document.querySelector("#threadNewView"),
+  threadFilesView: document.querySelector("#threadFilesView"),
   threadList: document.querySelector("#threadList"),
   closeThreads: document.querySelector("#closeThreads"),
   loadMore: document.querySelector("#loadMoreMessages"),
@@ -180,7 +184,14 @@ const els = {
   uploadList: document.querySelector("#uploadList"),
   statusIcon: document.querySelector("#remoteStatusIcon"),
   meta: document.querySelector("#remoteMeta"),
-  mode: document.querySelector("#remoteMode")
+  mode: document.querySelector("#remoteMode"),
+  approvalModal: document.querySelector("#approvalModal"),
+  approvalKind: document.querySelector("#approvalKind"),
+  approvalTitle: document.querySelector("#approvalTitle"),
+  approvalMeta: document.querySelector("#approvalMeta"),
+  approvalBody: document.querySelector("#approvalBody"),
+  approvalActions: document.querySelector("#approvalActions"),
+  approvalStatus: document.querySelector("#approvalStatus")
 };
 
 function notificationPermission() {
@@ -301,7 +312,7 @@ function speechMessageKey(data = {}) {
   const messagePart = rawId && rawId !== "assistant"
     ? rawId
     : `content:${String(data.content || "")}`;
-  return `${currentConnectorId()}\n${state.threadId || state.cwd || "new"}\n${messagePart}`;
+  return `${state.threadId || state.cwd || "new"}\n${messagePart}`;
 }
 
 function speakCompletedAssistantMessage(data = {}) {
@@ -549,9 +560,6 @@ function updateStatusIcon() {
 
 function setRunning(running, queueLength = state.queueLength, queueMessages = state.queueMessages, followMode = state.followMode, steerLength = state.steerLength, steerMessages = state.steerMessages, contextUsage = state.contextUsage, runningThreads = state.runningThreads, reconnecting = false, externalRunning = false, liveVoiceRunning = state.liveVoiceRunning, liveVoiceConnected = state.liveVoiceConnected, liveVoiceTaskRunning = state.liveVoiceTaskRunning) {
   const wasRunning = state.running;
-  const wasExternalRunning = state.externalRunning;
-  const wasLiveVoiceRunning = state.liveVoiceRunning;
-  const previousRunningThreads = runningThreadsSignature(state.runningThreads);
   state.running = Boolean(running);
   state.liveVoiceRunning = state.running && Boolean(liveVoiceRunning);
   state.liveVoiceConnected = state.liveVoiceRunning && Boolean(liveVoiceConnected);
@@ -565,27 +573,34 @@ function setRunning(running, queueLength = state.queueLength, queueMessages = st
   state.steerMessages = Array.isArray(steerMessages) ? steerMessages : [];
   state.followMode = followMode === "steer" ? "steer" : "queue";
   setContextUsage(contextUsage);
-  if (state.running) state.replyDone = false;
+  if (state.running) {
+    state.replyDone = false;
+    if (!Number.isFinite(state.currentTaskStartedAtMs)) {
+      const externalStartedAtMs = state.externalTaskStartedAt ? Date.parse(state.externalTaskStartedAt) : NaN;
+      state.currentTaskStartedAtMs = Number.isFinite(externalStartedAtMs) ? externalStartedAtMs : Date.now();
+    }
+    if (!wasRunning && !state.currentTaskDetail) {
+      updateTaskExecutionDetail("正在连接 Codex，等待第一个执行事件", "connecting");
+    }
+  } else {
+    state.currentTaskStartedAtMs = null;
+    clearTaskExecutionDetail();
+  }
   els.sendQueue.disabled = false;
   els.sendSteer.disabled = false;
   els.sendQueue.title = state.externalRunning ? "等当前 Codex 回合结束后继续执行" : "队列模式发送（备用）";
   els.sendSteer.title = state.externalRunning ? "引导当前 Codex 回合（默认，Ctrl+Enter）" : "引导模式发送（默认，Ctrl+Enter）";
-  if (els.newChat) els.newChat.disabled = state.running && !state.liveVoiceRunning;
+  if (els.newChat) els.newChat.disabled = false;
   els.threadButton.disabled = false;
   updateMeta();
   renderQueuePanel();
   updateStatusIcon();
+  syncTaskExecutionStatus();
   updateRealtimeReconcile();
-  if (
-    wasRunning !== state.running
-    || wasExternalRunning !== state.externalRunning
-    || wasLiveVoiceRunning !== state.liveVoiceRunning
-    || previousRunningThreads !== runningThreadsSignature(state.runningThreads)
-  ) scheduleThreadListRefresh();
+  updateLoadMore();
 }
 
 function updateMeta() {
-  const connectorTag = state.selectedConnectorId ? `[${currentConnectorLabel()}] ` : "";
   const title = state.threadId ? (state.threadName || `会话 ${state.threadId.slice(0, 8)}`) : "新会话";
   const mode = state.followMode === "steer" ? "引导模式" : "队列模式";
   const percent = state.contextUsage ? Math.max(0, Math.min(100, Math.round(Number(state.contextUsage.remainingPercent)))) : null;
@@ -602,8 +617,8 @@ function updateMeta() {
               ? "Live Voice 已断线 · 后台任务继续执行 · 等待重连"
               : "Live Voice 已断线 · 等待安卓自动重连"))
       : (state.reconnecting ? "Codex 正在重新连接 · 任务继续等待" : normalModeText);
-  els.meta.textContent = `${connectorTag}${title}`;
-  els.meta.title = `${connectorTag}${title}`;
+  els.meta.textContent = title;
+  els.meta.title = title;
   els.mode.textContent = modeText;
   els.mode.title = modeText;
 }
@@ -901,8 +916,7 @@ function escapeHtml(text) {
 }
 
 function downloadUrl(file) {
-  const connector = typeof currentConnectorId === "function" ? currentConnectorId() : "";
-  return `${basePath}/api/remote/download?p=${encodeURIComponent(file)}${connector ? `&connector=${encodeURIComponent(connector)}` : ""}`;
+  return `${basePath}/api/remote/download?p=${encodeURIComponent(file)}`;
 }
 
 function inlineUrl(file) {
@@ -1070,9 +1084,7 @@ async function uploadFiles(files) {
   }
   els.uploadButton.disabled = true;
   try {
-    const connector = currentConnectorId();
-    const suffix = connector ? `?connector=${encodeURIComponent(connector)}` : "";
-    const response = await fetch(`${basePath}/api/remote/upload${suffix}`, { method: "POST", body: form });
+    const response = await fetch(`${basePath}/api/remote/upload`, { method: "POST", body: form });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     state.uploads.push(...(data.files || []));
@@ -1094,6 +1106,155 @@ function pastedFiles(event) {
     .filter((item) => item.kind === "file")
     .map((item) => item.getAsFile())
     .filter(Boolean);
+}
+
+const pichomeDownloadDragType = "application/x-pichome-download+json";
+
+function safeDroppedFilename(value = "") {
+  return String(value || "")
+    .replace(/[\x00-\x1f\\/:*?"<>|]/g, "_")
+    .trim()
+    .slice(0, 180);
+}
+
+function firstDroppedUrl(value = "") {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith("#") && /^https:\/\//i.test(line)) || "";
+}
+
+function isPichomeDownloadDragUrl(value = "") {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:"
+      && url.hostname === window.location.hostname
+      && !url.username
+      && !url.password
+      && url.searchParams.get("mod") === "pichome"
+      && url.searchParams.get("op") === "download"
+      && Boolean(url.searchParams.get("dpath"));
+  } catch {
+    return false;
+  }
+}
+
+function pichomeDropPayload(transfer) {
+  if (!transfer) return null;
+  const candidates = [];
+  let filename = "";
+  try {
+    const custom = JSON.parse(transfer.getData(pichomeDownloadDragType) || "null");
+    if (custom?.url) candidates.push(String(custom.url));
+    if (custom?.name) filename = safeDroppedFilename(custom.name);
+  } catch {}
+  try {
+    const html = transfer.getData("text/html");
+    if (html) {
+      const documentNode = new DOMParser().parseFromString(html, "text/html");
+      const link = documentNode.querySelector("a[href]");
+      if (link?.href) candidates.push(link.href);
+      if (!filename && link?.getAttribute("download")) {
+        filename = safeDroppedFilename(link.getAttribute("download"));
+      }
+    }
+  } catch {}
+  try {
+    const uri = firstDroppedUrl(transfer.getData("text/uri-list"));
+    if (uri) candidates.push(uri);
+  } catch {}
+  try {
+    const plain = firstDroppedUrl(transfer.getData("text/plain"));
+    if (plain) candidates.push(plain);
+  } catch {}
+  const url = candidates.find(isPichomeDownloadDragUrl);
+  return url ? { url, filename } : null;
+}
+
+function filenameFromContentDisposition(value = "") {
+  const encoded = String(value).match(/filename\*\s*=\s*UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try { return safeDroppedFilename(decodeURIComponent(encoded.trim().replace(/^"|"$/g, ""))); } catch {}
+  }
+  const quoted = String(value).match(/filename\s*=\s*"([^"]+)"/i)?.[1];
+  if (quoted) return safeDroppedFilename(quoted);
+  const plain = String(value).match(/filename\s*=\s*([^;]+)/i)?.[1];
+  return plain ? safeDroppedFilename(plain) : "";
+}
+
+async function uploadPichomeAttachment(file) {
+  if (file.size <= 49 * 1024 * 1024) {
+    await uploadFiles([file]);
+    return;
+  }
+
+  // The regular composer endpoint intentionally buffers small uploads and is
+  // capped at 50MB.  Reuse the app's streaming project-upload endpoint for a
+  // larger Pichome video, but keep the resulting file in the same uploads
+  // directory used by normal composer attachments.
+  const attachmentDir = "codex远程网页连接/codex-remote-main/data/uploads";
+  const rootResponse = await fetch(`${basePath}/api/remote/files?dir=`);
+  const rootData = await rootResponse.json().catch(() => ({}));
+  if (!rootResponse.ok || !rootData.absoluteCwd) {
+    throw new Error(rootData.error || "无法确定附件保存目录");
+  }
+  const bucket = `${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(16).slice(2, 10)}`;
+  const form = new FormData();
+  form.append("files", file, `${bucket}/${file.name}`);
+  const params = new URLSearchParams({ dir: attachmentDir });
+  const response = await fetch(`${basePath}/api/remote/project-upload?${params.toString()}`, {
+    method: "POST",
+    body: form
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `上传失败（HTTP ${response.status}）`);
+  const root = String(rootData.absoluteCwd).replace(/\/+$/, "");
+  const files = (data.files || []).map((row) => {
+    const relative = String(row.path || "").replace(/^\/+/, "");
+    if (!relative.startsWith(`${attachmentDir}/`)) throw new Error("附件保存路径异常");
+    const absolute = `${root}/${relative}`;
+    return {
+      name: row.name || file.name,
+      path: absolute,
+      size: Number(row.size) || file.size,
+      url: `${basePath}/api/remote/download?p=${encodeURIComponent(absolute)}`
+    };
+  });
+  if (!files.length) throw new Error("上传完成但没有返回附件信息");
+  state.uploads.push(...files);
+  renderUploadList();
+}
+
+async function uploadPichomeDrop(payload) {
+  els.uploadButton.disabled = true;
+  try {
+    const response = await fetch(payload.url, {
+      method: "GET",
+      credentials: "include",
+      cache: "no-store"
+    });
+    if (!response.ok) throw new Error(`Pichome 下载失败（HTTP ${response.status}）`);
+    const announcedSize = Number(response.headers.get("content-length") || 0);
+    if (announcedSize > 500 * 1024 * 1024) {
+      throw new Error("该素材超过输入栏当前 500MB 上传上限");
+    }
+    const blob = await response.blob();
+    if (!blob.size) throw new Error("Pichome 返回了空文件");
+    if (blob.size > 500 * 1024 * 1024) {
+      throw new Error("该素材超过输入栏当前 500MB 上传上限");
+    }
+    const dispositionName = filenameFromContentDisposition(response.headers.get("content-disposition") || "");
+    const name = payload.filename || dispositionName || `pichome-${Date.now()}`;
+    const file = new File([blob], name, {
+      type: blob.type || response.headers.get("content-type") || "application/octet-stream",
+      lastModified: Date.now()
+    });
+    await uploadPichomeAttachment(file);
+  } catch (error) {
+    upsertAssistantMessage(`拖入 Pichome 素材失败：${error.message}`, true, "upload-error");
+  } finally {
+    els.uploadButton.disabled = false;
+  }
 }
 
 function messageWithUploads(message) {
@@ -1365,6 +1526,143 @@ function formatDuration(ms) {
   return `本次任务工作了 ${seconds}秒`;
 }
 
+function formatWorkingElapsed(ms) {
+  const totalSeconds = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function approvalBelongsToCurrentThread(request = state.pendingApproval) {
+  if (!request) return false;
+  return !request.threadId || !state.threadId || request.threadId === state.threadId;
+}
+
+function taskExecutionLabel() {
+  if (taskInterruptPending) return "Interrupting";
+  if (approvalBelongsToCurrentThread()) return "Waiting for approval";
+  if (state.reconnecting) return "Reconnecting";
+  if (state.liveVoiceRunning && !state.liveVoiceTaskRunning) return "Live Voice connected";
+  if (state.liveVoiceTaskRunning) return "Working via Live Voice";
+  return "Working";
+}
+
+function compactTaskDetail(value = "", limit = 180) {
+  const text = String(value || "")
+    .replace(/^\s*#{1,6}\s*/gm, "")
+    .replace(/^\s*```[^\n]*\n?/gm, "")
+    .replace(/^\s*```\s*$/gm, "")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/^[✅🤔❌⏳🧠📋🔧⌨️📝🔌🌐🖼️🎨⏱️🔍🤝↳•]\s*/u, "")
+    .replace(/[|*_~]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(1, limit - 1)).trimEnd()}…`;
+}
+
+function updateTaskExecutionDetail(detail = "", kind = "activity") {
+  const next = compactTaskDetail(detail);
+  if (!next) return false;
+  state.currentTaskDetail = next;
+  state.currentTaskDetailKind = kind;
+  state.currentTaskDetailAtMs = Date.now();
+  renderTaskExecutionStatus();
+  return true;
+}
+
+function clearTaskExecutionDetail() {
+  state.currentTaskDetail = "";
+  state.currentTaskDetailKind = "";
+  state.currentTaskDetailAtMs = null;
+}
+
+function cliTaskDetail(data = {}) {
+  const content = compactTaskDetail(data.content || "", 150);
+  const kind = String(data.fullKind || "");
+  if (kind === "reasoning") return { kind, detail: `正在分析：${content || "等待推理摘要"}` };
+  if (kind === "plan") return { kind, detail: `正在规划：${content || "制定执行步骤"}` };
+  if (kind === "patch") return { kind, detail: `正在修改代码：${content || "等待补丁内容"}` };
+  if (kind === "mcp") return { kind, detail: `正在调用 MCP：${content || "等待工具进展"}` };
+  if (kind === "tool-call") return { kind, detail: `正在调用工具：${content || "等待工具响应"}` };
+  if (kind === "tool-output") return { kind, detail: `正在检查工具结果：${content || "处理命令输出"}` };
+  if (kind === "collaboration") return { kind, detail: `正在处理协作事件：${content}` };
+  if (kind === "system") return { kind, detail: `正在处理：${content}` };
+  return { kind: kind || "activity", detail: content };
+}
+
+function approvalTaskDetail(request = state.pendingApproval) {
+  if (!request) return "";
+  const file = Array.isArray(request.files) ? request.files[0]?.path : "";
+  const subject = request.command || file || request.summary || request.title || request.method || "需要用户确认";
+  return `等待批准：${compactTaskDetail(subject, 140)}`;
+}
+
+function taskExecutionDetailText() {
+  const detail = approvalBelongsToCurrentThread()
+    ? approvalTaskDetail()
+    : state.currentTaskDetail;
+  if (!detail) return "等待 Codex 返回新进展";
+  const updatedAtMs = Number(state.currentTaskDetailAtMs);
+  const ageSeconds = Number.isFinite(updatedAtMs)
+    ? Math.max(0, Math.floor((Date.now() - updatedAtMs) / 1000))
+    : 0;
+  return ageSeconds >= 15 ? `${detail}（最后更新 ${ageSeconds}s 前）` : detail;
+}
+
+function taskExecutionCanInterrupt() {
+  return state.running
+    && !approvalBelongsToCurrentThread()
+    && (!state.liveVoiceRunning || state.liveVoiceTaskRunning);
+}
+
+function renderTaskExecutionStatus() {
+  let status = els.log.querySelector(".taskExecutionStatus");
+  if (!state.running) {
+    status?.remove();
+    return;
+  }
+  if (!status) {
+    status = document.createElement("button");
+    status.type = "button";
+    status.className = "taskExecutionStatus";
+    status.addEventListener("click", () => {
+      if (taskExecutionCanInterrupt()) interruptCurrentTask();
+    });
+  }
+  const startedAtMs = Number.isFinite(state.currentTaskStartedAtMs)
+    ? state.currentTaskStartedAtMs
+    : Date.now();
+  const elapsed = formatWorkingElapsed(Date.now() - startedAtMs);
+  const canInterrupt = taskExecutionCanInterrupt();
+  const suffix = canInterrupt ? " • Esc to interrupt" : "";
+  status.textContent = `• ${taskExecutionLabel()} (${elapsed}${suffix}) — ${taskExecutionDetailText()}`;
+  status.disabled = !canInterrupt;
+  status.setAttribute("aria-live", "polite");
+  status.title = canInterrupt ? "点击或按 Esc 中断当前任务" : taskExecutionLabel();
+  // Appending an existing node moves it after the newest bubble. This keeps
+  // the status attached to the live end of the transcript as replies stream.
+  els.log.appendChild(status);
+}
+
+function syncTaskExecutionStatus() {
+  renderTaskExecutionStatus();
+  if (!state.running) {
+    if (taskExecutionStatusTimer) clearInterval(taskExecutionStatusTimer);
+    taskExecutionStatusTimer = 0;
+    return;
+  }
+  if (!taskExecutionStatusTimer) {
+    taskExecutionStatusTimer = setInterval(renderTaskExecutionStatus, 1000);
+  }
+}
+
 function appendMessage(role, text, meta = {}) {
   if (!text) return;
   const shouldFollow = isNearBottom();
@@ -1404,6 +1702,7 @@ function appendMessage(role, text, meta = {}) {
     wrapper.appendChild(time);
   }
   els.log.appendChild(wrapper);
+  renderTaskExecutionStatus();
   if (shouldFollow) scrollToLatest(true);
   else requestAnimationFrame(updateScrollJumps);
   return item;
@@ -1466,15 +1765,13 @@ function assistantBubbleByMessageId(messageId, includeFinal = false) {
 
 function localNoticeContext() {
   return {
-    connectorId: currentConnectorId(),
     threadId: state.threadId || "",
     cwd: state.cwd || ""
   };
 }
 
 function sameNoticeContext(left = {}, right = localNoticeContext()) {
-  return (left.connectorId || "") === (right.connectorId || "") &&
-    (left.threadId || "") === (right.threadId || "") &&
+  return (left.threadId || "") === (right.threadId || "") &&
     (left.cwd || "") === (right.cwd || "");
 }
 
@@ -1571,49 +1868,52 @@ function insertCommand(command) {
   scheduleAndroidImeProbe();
 }
 
+function executeSkillCommand(command) {
+  const text = composerText().trim();
+  if (text.startsWith("$mem0:")) {
+    els.input.value = text.replace(/^\$mem0:\S+/, command);
+  } else {
+    els.input.value = text ? `${command} ${text}` : command;
+  }
+  saveDraft();
+  closeCommandMenu();
+  autosizeInput();
+  sendMessage("steer");
+}
+
 function renderCommandList() {
   els.commandList.innerHTML = "";
+  let currentGroup = "";
   for (const item of slashCommands) {
+    if (item.group && item.group !== currentGroup) {
+      currentGroup = item.group;
+      const heading = document.createElement("div");
+      heading.className = "commandGroup";
+      heading.textContent = currentGroup;
+      els.commandList.appendChild(heading);
+    }
     const button = document.createElement("button");
     button.className = "commandItem";
     button.type = "button";
+    const active = typeof item.active === "function" && item.active();
+    button.classList.toggle("commandItemActive", active);
+    if (item.active) button.setAttribute("aria-pressed", active ? "true" : "false");
     button.innerHTML = "<strong></strong><span></span><small></small>";
     button.querySelector("strong").textContent = item.command;
     button.querySelector("span").textContent = item.title;
     button.querySelector("small").textContent = typeof item.detail === "function" ? item.detail() : item.detail;
-    button.addEventListener("click", () => item.action ? item.action() : insertCommand(item.command));
+    button.addEventListener("click", () => {
+      if (item.action) item.action();
+      else if (item.execute) executeSkillCommand(item.command);
+      else insertCommand(item.command);
+    });
     els.commandList.appendChild(button);
   }
 }
 
-function currentConnectorId() {
-  return state.selectedConnectorId || "";
-}
-
-function connectorMatchesCurrent(data = {}) {
-  return data.connectorId === undefined || data.connectorId === currentConnectorId();
-}
-
 async function request(url, options = {}) {
-  const method = (options.method || (options.body ? "POST" : "GET")).toUpperCase();
-  let finalUrl = url;
-  const requestConnectorId = options.connectorId !== undefined ? options.connectorId || "" : currentConnectorId();
-  const connectorParam = `connector=${encodeURIComponent(requestConnectorId)}`;
-  if (!options.body) {
-    finalUrl += (url.includes("?") ? "&" : "?") + connectorParam;
-  }
-  let finalOptions = { ...options };
-  delete finalOptions.connectorId;
-  if (options.body && method !== "GET") {
-    try {
-      const parsed = JSON.parse(options.body);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.connectorId === undefined) {
-        parsed.connectorId = requestConnectorId;
-        finalOptions.body = JSON.stringify(parsed);
-      }
-    } catch {}
-  }
-  const response = await fetch(`${basePath}${finalUrl}`, {
+  const finalOptions = { ...options };
+  const response = await fetch(`${basePath}${url}`, {
     headers: { "Content-Type": "application/json" },
     ...finalOptions
   });
@@ -1632,11 +1932,10 @@ function isCurrentStateSnapshot(generation, snapshotEventSeq) {
   return !Number.isFinite(sequence) || sequence >= state.lastEventSeq;
 }
 
-async function loadState(connectorId = currentConnectorId()) {
+async function loadState() {
   const generation = ++stateLoadGeneration;
   const stateUrl = state.showFullReplies ? "/api/remote/state?full=1" : "/api/remote/state";
-  const data = await request(stateUrl, { connectorId });
-  if (connectorId !== currentConnectorId()) return;
+  const data = await request(stateUrl);
   if (!isCurrentStateSnapshot(generation, data.eventSeq)) return false;
   renderState(data);
   return true;
@@ -1650,21 +1949,21 @@ function settingsResponseIsCurrent(updatedAt = "") {
 }
 
 function renderState(data) {
-  if (!connectorMatchesCurrent(data)) return;
   // Any direct state render (thread selection, SSE state event, pagination)
   // supersedes older /state requests that may still be in flight.
   stateLoadGeneration += 1;
   saveDraft();
-  const previousConnectorId = state.selectedConnectorId || "";
-  if (data.connectorId !== undefined) state.selectedConnectorId = data.connectorId || "";
-  if (Array.isArray(data.connectors)) state.connectors = data.connectors;
-  if (data.localRemark !== undefined) state.localConnectorRemark = data.localRemark || "";
-  if (data.disableLocal !== undefined) state.disableLocal = data.disableLocal;
+  if (Array.isArray(data.pendingApprovals)) {
+    syncApprovalRequests(data.pendingApprovals);
+  }
   const shouldFollow = isNearBottom();
   const previousTop = els.logWrap.scrollTop;
   const previousThreadId = state.threadId;
   const nextThreadId = data.threadId || "";
-  if (nextThreadId !== previousThreadId || (state.selectedConnectorId || "") !== previousConnectorId) stopSpeech();
+  if (nextThreadId !== previousThreadId) {
+    stopSpeech();
+    clearTaskExecutionDetail();
+  }
   const applySettings = nextThreadId !== previousThreadId
     || settingsResponseIsCurrent(data.modelSettingsUpdatedAt || "");
   if (Number(data.eventSeq) > state.lastEventSeq) state.lastEventSeq = Number(data.eventSeq);
@@ -1721,6 +2020,23 @@ function renderState(data) {
   if (shouldFollow) scrollToLatest(true);
   else els.logWrap.scrollTop = previousTop;
   updateLoadMore();
+  const taskStartedAt = data.externalRunning ? state.externalTaskStartedAt : data.inflight?.startedAt;
+  if (data.running && taskStartedAt) {
+    const startedAtMs = Date.parse(taskStartedAt);
+    if (Number.isFinite(startedAtMs)) state.currentTaskStartedAtMs = startedAtMs;
+  }
+  if (data.running && !state.currentTaskDetail) {
+    const liveDetail = [...(data.liveMessages || [])].reverse()
+      .find((message) => message?.role === "assistant" && message.content);
+    const externalDetail = data.externalRunning
+      ? [...(data.messages || [])].reverse()
+          .find((message) => message?.role === "assistant" && /^🤔\s/u.test(message.content || ""))
+      : null;
+    const detailMessage = liveDetail || externalDetail;
+    if (detailMessage) {
+      updateTaskExecutionDetail(`正在分析：${compactTaskDetail(detailMessage.content, 150)}`, "reasoning");
+    }
+  }
   setRunning(
     data.running,
     data.queueLength,
@@ -1736,14 +2052,7 @@ function renderState(data) {
     Boolean(data.liveVoiceConnected),
     Boolean(data.liveVoiceTaskRunning)
   );
-  const taskStartedAt = state.externalRunning ? state.externalTaskStartedAt : data.inflight?.startedAt;
-  if (state.running && taskStartedAt) {
-    const startedAtMs = Date.parse(taskStartedAt);
-    if (Number.isFinite(startedAtMs)) state.currentTaskStartedAtMs = startedAtMs;
-  } else if (!state.running) {
-    state.currentTaskStartedAtMs = null;
-  }
-  if (!els.modelSettingsPanel.hidden && state.threadId !== previousThreadId) {
+  if (!els.modelSettingsPanel.hidden && !els.modelSettingsView.hidden && state.threadId !== previousThreadId) {
     queueMicrotask(() => openModelSettings().catch((error) => {
       els.modelSettingsStatus.textContent = `读取失败：${error.message}`;
     }));
@@ -1794,38 +2103,41 @@ function renderModelSettings(data = {}) {
   return true;
 }
 
+function setModelSettingsView(view = "model") {
+  const showUsage = view === "usage";
+  els.modelSettingsView.hidden = showUsage;
+  els.modelUsageView.hidden = !showUsage;
+  els.modelSettingsTitle.textContent = showUsage ? "使用量" : "模型与思考强度";
+  els.modelUsageToggle.textContent = showUsage ? "模型与思考强度" : "使用量";
+  els.modelUsageToggle.setAttribute("aria-pressed", String(showUsage));
+}
+
 async function openModelSettings() {
-  const connectorId = currentConnectorId();
   const threadId = state.threadId;
   els.modelSettingsPanel.hidden = false;
-  els.usagePanel.hidden = true;
-  els.filePanel.hidden = true;
+  setModelSettingsView("model");
   els.threadPanel.hidden = true;
-  els.sshConnectPanel.hidden = true;
-  els.connectorPanel.hidden = true;
   els.modelSettingsCurrent.textContent = "正在读取当前会话...";
   els.modelSettingsModels.innerHTML = "";
   els.modelSettingsEfforts.innerHTML = "";
   els.modelSettingsStatus.textContent = "";
-  const data = await request("/api/remote/model-settings", { connectorId });
-  if (connectorId !== currentConnectorId() || threadId !== state.threadId) return;
+  const data = await request("/api/remote/model-settings");
+  if (threadId !== state.threadId) return;
   renderModelSettings(data);
 }
 
 async function changeModelSettings(update = {}) {
   if (modelSettingsChanging) return;
   modelSettingsChanging = true;
-  const connectorId = currentConnectorId();
   const threadId = state.threadId;
   els.modelSettingsStatus.textContent = "正在切换...";
   for (const button of els.modelSettingsPanel.querySelectorAll(".modelOption, .effortOption")) button.disabled = true;
   try {
     const data = await request("/api/remote/model-settings", {
       method: "POST",
-      connectorId,
       body: JSON.stringify(update)
     });
-    if (connectorId !== currentConnectorId() || threadId !== state.threadId) return;
+    if (threadId !== state.threadId) return;
     renderModelSettings(data);
     els.modelSettingsStatus.textContent = "已为当前会话保存。";
   } catch (error) {
@@ -1932,13 +2244,10 @@ function renderUsage(data = {}) {
   els.usageContent.appendChild(resetCard);
 }
 
-async function openUsagePanel() {
-  els.usagePanel.hidden = false;
-  els.modelSettingsPanel.hidden = true;
-  els.filePanel.hidden = true;
+async function openUsageInModelSettings() {
+  els.modelSettingsPanel.hidden = false;
+  setModelSettingsView("usage");
   els.threadPanel.hidden = true;
-  els.sshConnectPanel.hidden = true;
-  els.connectorPanel.hidden = true;
   els.usageContent.innerHTML = '<div class="remoteEvent">正在刷新使用量...</div>';
   els.usageStatus.textContent = "";
   renderUsage(await request("/api/remote/usage"));
@@ -1967,18 +2276,35 @@ function updateLoadMore() {
   }
   const hasMore = state.threadId && state.messageCount > state.loadedCount;
   els.loadMore.hidden = !hasMore;
-  els.loadMore.textContent = hasMore ? `加载更多（${state.loadedCount}/${state.messageCount}）` : "加载更多";
+  els.loadMore.disabled = Boolean(state.loadingMore || state.running);
+  els.loadMore.textContent = !hasMore
+    ? "加载更多"
+    : state.loadingMore
+      ? `正在加载（${state.loadedCount}/${state.messageCount}）...`
+      : state.running
+        ? `任务完成后可加载（${state.loadedCount}/${state.messageCount}）`
+        : `加载更多（${state.loadedCount}/${state.messageCount}）`;
 }
 
 async function loadMoreMessages() {
-  if (!state.threadId || state.running) return;
-  const connectorId = currentConnectorId();
+  if (!state.threadId || state.running || state.loadingMore) return;
+  const threadId = state.threadId;
   const previousHeight = els.logWrap.scrollHeight;
-  const data = await request("/api/remote/more", { method: "POST", connectorId });
-  if (connectorId !== currentConnectorId()) return;
-  renderState(data);
-  els.logWrap.scrollTop = Math.max(0, els.logWrap.scrollHeight - previousHeight);
-  updateScrollJumps();
+  state.loadingMore = true;
+  updateLoadMore();
+  try {
+    const data = await request("/api/remote/more", {
+      method: "POST",
+      body: JSON.stringify({ threadId })
+    });
+    if (threadId !== state.threadId) return;
+    renderState(data);
+    els.logWrap.scrollTop = Math.max(0, els.logWrap.scrollHeight - previousHeight);
+    updateScrollJumps();
+  } finally {
+    state.loadingMore = false;
+    updateLoadMore();
+  }
 }
 
 function threadSubtitle(thread, isActive = false) {
@@ -2006,6 +2332,20 @@ function fileIcon(item) {
 
 function displayProjectPath(cwd = "", absoluteCwd = "") {
   return absoluteCwd || (cwd ? `/${cwd}` : "项目根目录");
+}
+
+function isDotFolder(item = {}) {
+  return item.type === "dir" && String(item.name || "").startsWith(".");
+}
+
+function applyDotFolderFilter(list, button, hideDotFolders = false) {
+  const hidden = Boolean(hideDotFolders);
+  button.textContent = `筛选：${hidden ? "开" : "关"}`;
+  button.setAttribute("aria-pressed", String(hidden));
+  button.title = hidden ? "当前隐藏以 . 开头的文件夹" : "当前显示以 . 开头的文件夹";
+  for (const row of list.querySelectorAll('[data-dot-folder="true"]')) {
+    row.hidden = hidden;
+  }
 }
 
 function setProjectUploadStatus(message = "", type = "") {
@@ -2070,10 +2410,6 @@ async function uploadProjectItems(files = [], selectionType = "files") {
     }
     return;
   }
-  if (currentConnectorId() && selectedConnector()?.connectionType !== "ssh") {
-    setProjectUploadStatus("Connector 被控电脑文件上传暂不支持。", "error");
-    return;
-  }
   if (files.length > 5000) {
     setProjectUploadStatus("单次最多上传 5000 个文件。", "error");
     return;
@@ -2085,13 +2421,11 @@ async function uploadProjectItems(files = [], selectionType = "files") {
   }
 
   const cwd = state.fileCwd || "";
-  const connectorId = currentConnectorId();
   const form = new FormData();
   files.forEach((file, index) => {
     form.append("files", file, projectUploadRelativePath(file, index));
   });
   const params = new URLSearchParams({ dir: cwd });
-  if (connectorId) params.set("connector", connectorId);
   const buttons = [els.projectUploadButton, els.projectFilesButton, els.projectFolderButton].filter(Boolean);
   buttons.forEach((button) => { button.disabled = true; });
   setProjectUploadStatus(`正在上传 ${files.length} 个文件（${formatSize(totalBytes)}）…`);
@@ -2101,7 +2435,7 @@ async function uploadProjectItems(files = [], selectionType = "files") {
       form,
       (percent) => setProjectUploadStatus(`正在上传 ${files.length} 个文件（${formatSize(totalBytes)}）… ${percent}%`)
     );
-    if (connectorId === currentConnectorId() && cwd === state.fileCwd) {
+    if (cwd === state.fileCwd) {
       await openFiles(data.cwd ?? cwd);
     }
     const folderText = Number(data.directories) > 0 ? `，保留 ${data.directories} 个文件夹层级` : "";
@@ -2125,20 +2459,10 @@ function projectDownloadUrl(file = "", type = "file") {
     path: String(file || ""),
     type: type === "dir" ? "dir" : "file"
   });
-  const connectorId = currentConnectorId();
-  if (connectorId) params.set("connector", connectorId);
   return `${basePath}/api/remote/project-download?${params.toString()}`;
 }
 
 function downloadProjectItem(file = "", name = "", type = "file") {
-  if (currentConnectorId() && selectedConnector()?.connectionType !== "ssh") {
-    upsertAssistantMessage(
-      "Connector 被控电脑文件下载暂不支持。",
-      true,
-      "project-download-unsupported"
-    );
-    return false;
-  }
   const itemType = type === "dir" ? "dir" : "file";
   const baseName = name || projectItemName(file);
   const link = document.createElement("a");
@@ -2152,20 +2476,15 @@ function downloadProjectItem(file = "", name = "", type = "file") {
 }
 
 async function openFiles(dir = "") {
-  const connectorId = state.selectedConnectorId || "";
-  if (state.fileCwdConnectorId !== connectorId) {
-    state.fileCwd = "";
-    state.fileCwdConnectorId = connectorId;
-  }
   els.modelSettingsPanel.hidden = true;
-  els.usagePanel.hidden = true;
-  els.filePanel.hidden = false;
+  els.threadPanel.hidden = false;
+  els.threadButton.setAttribute("aria-expanded", "true");
+  setThreadView("files");
   els.filePreview.hidden = true;
   els.fileList.innerHTML = '<div class="remoteEvent">加载中...</div>';
   try {
     const data = await request(`/api/remote/files?dir=${encodeURIComponent(dir)}`);
     state.fileCwd = data.cwd || "";
-    state.fileCwdConnectorId = connectorId;
     els.filePath.textContent = displayProjectPath(data.cwd, data.absoluteCwd);
     els.fileList.innerHTML = "";
     if (data.cwd) {
@@ -2179,12 +2498,13 @@ async function openFiles(dir = "") {
     }
     for (const item of data.entries || []) {
       const row = document.createElement("div");
-      row.className = "fileItem sshFileItem";
+      row.className = "fileItem fileItemWithActions";
       row.role = "button";
       row.tabIndex = 0;
       row.dataset.type = item.type;
       row.dataset.path = item.path;
       row.dataset.name = item.name;
+      row.dataset.dotFolder = String(isDotFolder(item));
       row.innerHTML = '<span></span><div><strong></strong><small></small></div><div class="fileActions"></div>';
       row.querySelector("span").textContent = fileIcon(item);
       row.querySelector("strong").textContent = item.name;
@@ -2195,6 +2515,7 @@ async function openFiles(dir = "") {
       actions.append(fileActionButton("改名", "rename"), fileActionButton("删除", "delete", "danger"));
       els.fileList.appendChild(row);
     }
+    applyDotFolderFilter(els.fileList, els.projectDotFolderFilter, state.hideProjectDotFolders);
   } catch (error) {
     els.fileList.innerHTML = `<div class="remoteEvent">错误：${error.message}</div>`;
   }
@@ -2270,12 +2591,7 @@ async function deleteProjectItem(file = "", name = "", type = "") {
 }
 
 async function openNewSessionPicker(dir = undefined) {
-  const connectorId = state.selectedConnectorId || "";
-  if (state.newCwdConnectorId !== connectorId) {
-    state.newCwd = "";
-    state.newCwdConnectorId = connectorId;
-  }
-  const nextDir = dir === undefined ? (state.newCwd || (connectorId ? "" : (state.cwd || ""))) : dir;
+  const nextDir = dir === undefined ? (state.newCwd || state.cwd || "") : dir;
   state.newCwd = nextDir || "";
   els.threadPanel.hidden = false;
   setThreadView("new");
@@ -2304,26 +2620,24 @@ async function openNewSessionPicker(dir = undefined) {
       row.type = "button";
       row.dataset.type = item.type;
       row.dataset.path = item.path;
+      row.dataset.dotFolder = String(isDotFolder(item));
       row.innerHTML = '<span></span><strong></strong><small></small>';
       row.querySelector("span").textContent = "📁";
       row.querySelector("strong").textContent = item.name;
       row.querySelector("small").textContent = "文件夹";
       els.newList.appendChild(row);
     }
+    applyDotFolderFilter(els.newList, els.newDotFolderFilter, state.hideNewSessionDotFolders);
   } catch (error) {
     els.newList.innerHTML = `<div class="remoteEvent">错误：${error.message}</div>`;
   }
 }
 
 async function createSessionInSelectedFolder() {
-  if (state.running) return;
-  const connectorId = currentConnectorId();
   const data = await request("/api/remote/new", {
     method: "POST",
-    connectorId,
     body: JSON.stringify({ cwd: state.newCwd || "" })
   });
-  if (connectorId !== currentConnectorId()) return;
   renderState(data);
   els.threadPanel.hidden = true;
 }
@@ -2338,7 +2652,7 @@ async function previewFile(file) {
     } else {
       els.filePreview.innerHTML = `
         <div class="filePreviewTop"><strong>${escapeHtml(data.path)}</strong><div class="panelActions"><button type="button" data-save-project-file>保存</button><button type="button" data-download-project-file>下载</button></div></div>
-        <div class="sshEditor"><textarea id="projectEditorText" spellcheck="false">${escapeHtml(data.text)}</textarea></div>
+        <div class="projectEditor"><textarea id="projectEditorText" spellcheck="false">${escapeHtml(data.text)}</textarea></div>
       `;
       els.filePreview.querySelector("[data-save-project-file]").addEventListener("click", () => saveProjectFile(data.path));
     }
@@ -2363,424 +2677,26 @@ async function saveProjectFile(file) {
   await previewFile(file);
 }
 
-function updateSshStatus(data = {}) {
-  state.sshConnected = Boolean(data.connected);
-  state.sshLabel = data.label || state.sshLabel || "";
-  state.sshCwd = data.cwd || state.sshCwd || "";
-  els.sshStatus.textContent = state.sshConnected
-    ? `已连接并可运行 Codex：${state.sshLabel}${data.codexVersion ? ` · ${data.codexVersion}` : ""}`
-    : "未连接";
-}
-
-function setSshView(view = "config") {
-  const showFiles = view === "files";
-  els.sshConnectForm.hidden = showFiles;
-  els.sshFilesView.hidden = !showFiles;
-  els.sshPanelTitle.textContent = showFiles ? "ssh电脑" : "ssh连接";
-  els.toggleSshView.textContent = showFiles ? "ssh连接" : "ssh电脑";
-}
-
-async function loadSshStatus() {
-  const data = await request("/api/remote/ssh/status");
-  updateSshStatus(data);
-  return data;
-}
-
-async function openSshConnect() {
-  els.modelSettingsPanel.hidden = true;
-  els.usagePanel.hidden = true;
-  els.sshConnectPanel.hidden = false;
-  setSshView("config");
-  try {
-    updateSshStatus(await loadSshStatus());
-  } catch (error) {
-    els.sshStatus.textContent = `状态读取失败：${error.message}`;
-  }
-}
-
-async function connectSsh() {
-  const target = els.sshTarget.value.trim();
-  const password = els.sshPassword.value;
-  els.sshStatus.textContent = "连接中...";
-  const data = await request("/api/remote/ssh/connect", {
-    method: "POST",
-    body: JSON.stringify({ target, password })
-  });
-  els.sshPassword.value = "";
-  updateSshStatus(data);
-  await loadConnectors();
-  await request("/api/remote/connectors/select", {
-    method: "POST",
-    connectorId: data.connectorId,
-    body: JSON.stringify({ connectorId: data.connectorId })
-  });
-  await applyConnectorSelection(data.connectorId);
-  await openSshComputer(data.cwd || "");
-}
-
-async function disconnectSsh() {
-  const selectedWasSsh = selectedConnector()?.connectionType === "ssh";
-  await request("/api/remote/ssh/disconnect", { method: "POST" });
-  if (selectedWasSsh) {
-    await request("/api/remote/connectors/select", {
-      method: "POST",
-      connectorId: "",
-      body: JSON.stringify({ connectorId: "" })
-    });
-    await applyConnectorSelection("");
-  }
-  await loadConnectors();
-  updateSshStatus({ connected: false });
-  els.sshList.innerHTML = "";
-  els.sshPath.textContent = "";
-  els.sshPreview.hidden = true;
-}
-
-async function openSshComputer(dir = state.sshCwd || "") {
-  els.sshConnectPanel.hidden = false;
-  setSshView("files");
-  els.sshPreview.hidden = true;
-  els.sshList.innerHTML = '<div class="remoteEvent">加载中...</div>';
-  try {
-    const data = await request(`/api/remote/ssh/files?dir=${encodeURIComponent(dir || "")}`);
-    updateSshStatus(data);
-    state.sshCwd = data.cwd || "";
-    els.sshPath.textContent = `${data.label || state.sshLabel || "ssh"}:${data.cwd || "/"}`;
-    els.sshList.innerHTML = "";
-    if (data.cwd && data.cwd !== "/") {
-      const up = document.createElement("button");
-      up.className = "fileItem";
-      up.type = "button";
-      up.dataset.type = "dir";
-      up.dataset.path = data.parent || "/";
-      up.textContent = "↩ 上一级";
-      els.sshList.appendChild(up);
-    }
-    if (!data.entries?.length) {
-      els.sshList.innerHTML = '<div class="remoteEvent">没有文件或文件夹</div>';
-    }
-    for (const item of data.entries || []) {
-      const row = document.createElement("div");
-      row.className = "fileItem sshFileItem";
-      row.role = "button";
-      row.tabIndex = 0;
-      row.dataset.type = item.type;
-      row.dataset.path = item.path;
-      row.dataset.name = item.name;
-      row.innerHTML = '<span></span><div><strong></strong><small></small></div><div class="fileActions"></div>';
-      row.querySelector("span").textContent = fileIcon(item);
-      row.querySelector("strong").textContent = item.name;
-      row.querySelector("small").textContent = item.type === "dir" ? "文件夹" : `${formatSize(item.size)} · ${item.mtime ? new Date(item.mtime).toLocaleString() : ""}`;
-      const actions = row.querySelector(".fileActions");
-      if (item.type === "file") actions.append(sshActionButton("编辑", "edit"));
-      actions.append(sshActionButton("改名", "rename"), sshActionButton("删除", "delete", "danger"));
-      els.sshList.appendChild(row);
-    }
-  } catch (error) {
-    els.sshList.innerHTML = `<div class="remoteEvent">错误：${error.message}</div>`;
-    updateSshStatus({ connected: false });
-  }
-}
-
-function sshActionButton(text, action, extraClass = "") {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.dataset.sshAction = action;
-  button.className = extraClass;
-  button.textContent = text;
-  return button;
-}
-
-async function createSshFolderInCurrentDir() {
-  const name = prompt("请输入远程文件夹名称");
-  if (name === null) return;
-  const data = await request("/api/remote/ssh/folders", {
-    method: "POST",
-    body: JSON.stringify({ dir: state.sshCwd || "", name })
-  });
-  await openSshComputer(data.cwd || state.sshCwd);
-}
-
-async function createSshFileInCurrentDir() {
-  const name = prompt("请输入远程文件名");
-  if (name === null) return;
-  const content = prompt("请输入初始内容，可留空", "");
-  if (content === null) return;
-  const data = await request("/api/remote/ssh/files", {
-    method: "POST",
-    body: JSON.stringify({ dir: state.sshCwd || "", name, content })
-  });
-  await openSshComputer(data.cwd || state.sshCwd);
-}
-
-async function renameSshItem(file, oldName = "") {
-  const name = prompt("请输入新名称", oldName || "");
-  if (name === null) return;
-  const data = await request("/api/remote/ssh/rename", {
-    method: "POST",
-    body: JSON.stringify({ path: file, name })
-  });
-  await openSshComputer(data.cwd || state.sshCwd);
-}
-
-async function deleteSshItem(file, name = "") {
-  if (!confirm(`确定删除“${name || file}”吗？文件夹会递归删除。`)) return;
-  const data = await request("/api/remote/ssh/delete", {
-    method: "POST",
-    body: JSON.stringify({ path: file })
-  });
-  els.sshPreview.hidden = true;
-  await openSshComputer(data.cwd || state.sshCwd);
-}
-
-async function previewSshFile(file) {
-  els.sshPreview.hidden = false;
-  els.sshPreview.innerHTML = '<div class="remoteEvent">加载中...</div>';
-  try {
-    const data = await request(`/api/remote/ssh/file?path=${encodeURIComponent(file)}`);
-    els.sshPreview.innerHTML = `
-      <div class="filePreviewTop"><strong>${escapeHtml(data.path)}</strong><button type="button" data-save-ssh-file>保存</button></div>
-      <div class="sshEditor"><textarea id="sshEditorText" spellcheck="false">${escapeHtml(data.text)}</textarea></div>
-    `;
-    els.sshPreview.querySelector("[data-save-ssh-file]").addEventListener("click", () => saveSshFile(data.path));
-  } catch (error) {
-    els.sshPreview.innerHTML = `<div class="filePreviewTop"><strong>${escapeHtml(file)}</strong></div><div class="remoteEvent">${escapeHtml(error.message)}</div>`;
-  }
-}
-
-async function saveSshFile(file) {
-  const editor = els.sshPreview.querySelector("#sshEditorText");
-  if (!editor) return;
-  await request("/api/remote/ssh/file/write", {
-    method: "POST",
-    body: JSON.stringify({ path: file, content: editor.value })
-  });
-  await previewSshFile(file);
-}
-
-function connectorTime(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString();
-}
-
-function selectedConnector() {
-  return state.connectors.find((device) => device.id === state.selectedConnectorId) || null;
-}
-
-function currentConnectorLabel() {
-  if (!state.selectedConnectorId) {
-    const localRemark = connectorRemark("");
-    return localRemark || "本机";
-  }
-  const device = selectedConnector();
-  if (device) {
-    const remark = connectorRemark(device.id);
-    if (remark) return remark;
-  }
-  return device?.name || device?.hostname || state.selectedConnectorId;
-}
-
-function connectorRemark(id = "") {
-  if (!id) return state.localConnectorRemark || "";
-  const device = state.connectors.find((item) => item.id === id);
-  return device?.remark || "";
-}
-
-async function promptConnectorRemark(device) {
-  const current = connectorRemark(device.id);
-  const input = prompt(`为「${device.name || device.hostname || device.id}」设置备注名：`, current);
-  if (input === null) return;
-  const trimmed = input.trim();
-  const data = await request("/api/remote/connectors/remark", {
-    method: "POST",
-    body: JSON.stringify({ connectorId: device.id || "", remark: trimmed })
-  });
-  if (device.id) {
-    const target = state.connectors.find((item) => item.id === device.id);
-    if (target) target.remark = data.remark || "";
-  } else {
-    state.localConnectorRemark = data.remark || "";
-  }
-  renderConnectors();
-  updateMeta();
-}
-
-function connectorSubtitle(device) {
-  return [device.hostname, device.platform, device.arch].filter(Boolean).join(" · ");
-}
-
-function connectorStatusText(device) {
-  return `${device.online ? "在线" : "离线"}${device.tunnelConnected ? " · 已连接" : ""}${device.lastSeen ? ` · ${connectorTime(device.lastSeen)}` : ""}`;
-}
-
-function appendConnectorRow(device) {
-  const row = document.createElement("div");
-  row.className = "connectorRow";
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = `connectorItem${device.id === state.selectedConnectorId ? " active" : ""}${device.online ? " online" : ""}`;
-  button.dataset.connectorId = device.id;
-  button.innerHTML = '<span class="connectorDot"></span><strong></strong><small></small><small></small>';
-  const remark = connectorRemark(device.id);
-  button.querySelector("strong").textContent = remark || device.name || device.hostname || device.id;
-  button.querySelectorAll("small")[0].textContent = connectorSubtitle(device);
-  button.querySelectorAll("small")[1].textContent = connectorStatusText(device);
-  row.appendChild(button);
-
-  const remarkBtn = document.createElement("button");
-  remarkBtn.type = "button";
-  remarkBtn.className = "connectorRemarkBtn";
-  remarkBtn.title = "设置备注名";
-  remarkBtn.textContent = "备注";
-  remarkBtn.dataset.connectorId = device.id;
-  remarkBtn.addEventListener("click", (event) => {
-    event.stopPropagation();
-    event.preventDefault();
-    promptConnectorRemark(device).catch((error) => upsertAssistantMessage(`备注保存失败：${error.message}`, true));
-  });
-  row.appendChild(remarkBtn);
-  els.connectorList.appendChild(row);
-}
-
-function renderConnectors() {
-  if (!els.connectorList) return;
-  els.connectorList.innerHTML = "";
-  if (!state.disableLocal) {
-    appendConnectorRow({
-      id: "",
-      name: "本机",
-      hostname: "local",
-      platform: "Codex",
-      arch: "",
-      online: true
-    });
-  }
-  if (!state.connectors.length) {
-    const hint = document.createElement("div");
-    hint.className = "remoteEvent";
-    hint.textContent = state.disableLocal ? "还没有接入被控电脑。请在一台电脑上安装被控端（codex-remote-connector）后刷新。" : "还没有接入被控电脑。";
-    els.connectorList.appendChild(hint);
-  } else {
-    for (const device of state.connectors) {
-      appendConnectorRow(device);
-    }
-  }
-}
-
-async function loadConnectors() {
-  if (!els.connectorPanel) return;
-  const data = await request("/api/remote/connectors");
-  state.connectors = Array.isArray(data.devices) ? data.devices : [];
-  if (data.selectedConnectorId !== undefined) state.selectedConnectorId = data.selectedConnectorId || "";
-  state.localConnectorRemark = data.localRemark || "";
-  renderConnectors();
-  updateMeta();
-}
-
-async function openConnectors() {
-  els.modelSettingsPanel.hidden = true;
-  els.usagePanel.hidden = true;
-  els.connectorPanel.hidden = false;
-  els.filePanel.hidden = true;
-  els.threadPanel.hidden = true;
-  els.sshConnectPanel.hidden = true;
-  await loadConnectors();
-}
-
-async function switchConnector(id = "") {
-  const device = state.connectors.find((item) => item.id === id);
-  if (device?.connectionType === "ssh" && !device.online) {
-    els.connectorPanel.hidden = true;
-    await openSshConnect();
-    els.sshStatus.textContent = "此 SSH 设备当前离线，请输入密码重新连接。";
-    return;
-  }
-  if (state.selectedConnectorId === id) {
-    els.connectorPanel.hidden = true;
-    return;
-  }
-  await request("/api/remote/connectors/select", {
-    method: "POST",
-    connectorId: id,
-    body: JSON.stringify({ connectorId: id })
-  });
-  await applyConnectorSelection(id, { closePanel: true });
-}
-
-async function applyConnectorSelection(id = "", options = {}) {
-  state.selectedConnectorId = id;
-  state.externalRunning = false;
-  state.liveVoiceRunning = false;
-  state.liveVoiceConnected = false;
-  state.liveVoiceTaskRunning = false;
-  state.externalTaskStartedAt = "";
-  state.threadId = "";
-  state.threadName = "";
-  state.cwd = "";
-  state.absoluteCwd = "";
-  state.model = "";
-  state.reasoningEffort = "";
-  state.modelSettingsUpdatedAt = "";
-  state.modelOptions = [];
-  state.fileCwd = "";
-  state.fileCwdConnectorId = id;
-  state.newCwd = "";
-  state.newCwdConnectorId = id;
-  state.messages = [];
-  state.activeAssistant = null;
-  state.assistantBubbles.clear();
-  state.replyDone = false;
-  els.log.innerHTML = "";
-  els.modelSettingsPanel.hidden = true;
-  els.usagePanel.hidden = true;
-  if (options.closePanel) els.connectorPanel.hidden = true;
-  updateMeta();
-  await loadState(id).catch((error) => upsertAssistantMessage(`切换失败：${error.message}`, true));
-  if (!els.filePanel.hidden) loadFiles().catch(() => {});
-  if (!els.threadPanel.hidden) openThreads().catch(() => {});
-  if (!els.connectorPanel.hidden) renderConnectors();
-}
-
 let threadListRequestGeneration = 0;
-let threadListRefreshTimer = null;
 
-function runningThreadsSignature(rows = []) {
-  return (Array.isArray(rows) ? rows : [])
-    .map((item) => [
-      item.connectorId || "",
-      item.threadId || item.runnerKey || "",
-      item.externalRunning ? 1 : 0,
-      item.liveVoiceRunning ? 1 : 0,
-      item.liveVoiceConnected ? 1 : 0,
-      item.liveVoiceTaskRunning ? 1 : 0
-    ].join(":"))
-    .sort()
-    .join("|");
-}
-
-function scheduleThreadListRefresh(delay = 150) {
-  if (els.threadPanel.hidden || els.threadExistingView.hidden) return;
-  clearTimeout(threadListRefreshTimer);
-  threadListRefreshTimer = setTimeout(() => {
-    threadListRefreshTimer = null;
-    if (els.threadPanel.hidden || els.threadExistingView.hidden) return;
-    openThreads().catch((error) => console.warn("会话列表刷新失败", error));
-  }, Math.max(0, Number(delay) || 0));
-}
-
-async function openThreads() {
+async function openThreads({ load = true } = {}) {
   els.modelSettingsPanel.hidden = true;
-  els.usagePanel.hidden = true;
-  const connectorId = currentConnectorId();
   const requestGeneration = ++threadListRequestGeneration;
   els.threadPanel.hidden = false;
   setThreadView("existing");
-  els.threadList.innerHTML = '<div class="remoteEvent">加载中...</div>';
+  if (load) {
+    els.threadList.innerHTML = '<div class="remoteEvent">加载中...</div>';
+  }
   try {
-    const data = await request("/api/remote/threads", { connectorId });
-    if (connectorId !== currentConnectorId() || requestGeneration !== threadListRequestGeneration) return;
+    const data = load ? await request("/api/remote/threads") : state.threadListCache;
+    if (requestGeneration !== threadListRequestGeneration) return;
+    if (!data) return;
+    if (load) {
+      state.threadListCache = data;
+      try {
+        localStorage.setItem("codex-remote-thread-list-cache", JSON.stringify(data));
+      } catch {}
+    }
     els.threadList.innerHTML = "";
     if (!data.threads?.length) {
       els.threadList.innerHTML = '<div class="remoteEvent">没有找到会话</div>';
@@ -2822,18 +2738,42 @@ async function openThreads() {
       els.threadList.appendChild(row);
     }
   } catch (error) {
-    if (connectorId !== currentConnectorId() || requestGeneration !== threadListRequestGeneration) return;
+    if (requestGeneration !== threadListRequestGeneration) return;
     els.threadList.innerHTML = "";
     els.threadList.innerHTML = `<div class="remoteEvent">错误：${error.message}</div>`;
   }
 }
 
+function toggleThreadPanel(event) {
+  event?.preventDefault();
+  event?.stopPropagation();
+  if (!els.threadPanel.hidden) {
+    els.threadPanel.hidden = true;
+    els.threadButton.setAttribute("aria-expanded", "false");
+    return;
+  }
+  // Reveal the panel synchronously so mobile WebViews cannot close it again
+  // while the same SVG-button click is still bubbling to the document.
+  els.threadPanel.hidden = false;
+  els.threadButton.setAttribute("aria-expanded", "true");
+  openThreads({ load: false }).catch((error) => {
+    els.threadList.innerHTML = `<div class="remoteEvent">错误：${escapeHtml(error.message || "无法读取会话")}</div>`;
+  });
+}
+
 function setThreadView(view = "existing") {
   const showNew = view === "new";
-  els.threadExistingView.hidden = showNew;
+  const showFiles = view === "files";
+  els.threadExistingView.hidden = showNew || showFiles;
   els.threadNewView.hidden = !showNew;
-  els.threadPanelTitle.textContent = showNew ? "新建会话" : "选择已有会话";
+  els.threadFilesView.hidden = !showFiles;
+  els.threadPanel.classList.toggle("filesView", showFiles);
+  els.threadPanelTitle.textContent = showFiles ? "项目文件夹" : (showNew ? "新建会话" : "选择已有会话");
+  els.refreshThreads.hidden = showNew || showFiles;
   els.toggleThreadView.textContent = showNew ? "选择已有会话" : "新建会话";
+  els.threadFilesToggle.textContent = showFiles ? "选择已有会话" : "项目文件夹";
+  els.threadFilesToggle.setAttribute("aria-pressed", String(showFiles));
+  if (!showFiles) closeProjectUploadMenu();
 }
 
 async function renameThread(thread) {
@@ -2847,7 +2787,15 @@ async function renameThread(thread) {
     state.threadName = data.name || "";
     updateMeta();
   }
-  openThreads();
+  if (state.threadListCache?.threads) {
+    const cached = state.threadListCache.threads.find((item) => item.threadId === thread.threadId);
+    if (cached) {
+      cached.name = data.name || "";
+      cached.title = data.title || cached.title;
+    }
+    try { localStorage.setItem("codex-remote-thread-list-cache", JSON.stringify(state.threadListCache)); } catch {}
+    openThreads({ load: false });
+  }
 }
 
 async function deleteThread(thread) {
@@ -2860,29 +2808,30 @@ async function deleteThread(thread) {
   if (thread.threadId === state.threadId) {
     renderState({ threadId: "", threadName: "", messages: [], running: false });
   }
-  openThreads();
+  if (state.threadListCache?.threads) {
+    state.threadListCache.threads = state.threadListCache.threads.filter((item) => item.threadId !== thread.threadId);
+    try { localStorage.setItem("codex-remote-thread-list-cache", JSON.stringify(state.threadListCache)); } catch {}
+    openThreads({ load: false });
+  }
 }
 
 async function selectThread(threadId) {
-  const connectorId = currentConnectorId();
   const data = await request("/api/remote/select", {
     method: "POST",
-    connectorId,
     body: JSON.stringify({ threadId })
   });
-  if (connectorId !== currentConnectorId()) return;
   state.completedUnreadThreads.delete(threadId);
-  if (state.showFullReplies) await loadState(connectorId);
+  if (state.showFullReplies) await loadState();
   else renderState(data);
   els.threadPanel.hidden = true;
 }
 
 let externalSessionRefreshTimer = null;
 
-function scheduleExternalSessionRefresh(connectorId = currentConnectorId()) {
+function scheduleExternalSessionRefresh() {
   clearTimeout(externalSessionRefreshTimer);
   externalSessionRefreshTimer = setTimeout(() => {
-    loadState(connectorId).catch((error) => console.warn("外部 Codex 会话刷新失败", error));
+    loadState().catch((error) => console.warn("外部 Codex 会话刷新失败", error));
   }, 150);
 }
 
@@ -2896,7 +2845,7 @@ function applyIncomingModelSettings(data = {}, running = state.running) {
   if (Object.prototype.hasOwnProperty.call(data, "model")) state.model = data.model || "";
   if (Object.prototype.hasOwnProperty.call(data, "reasoningEffort")) state.reasoningEffort = data.reasoningEffort || "";
   if (nextUpdatedAt) state.modelSettingsUpdatedAt = nextUpdatedAt;
-  if (settingsChanged && !els.modelSettingsPanel.hidden) {
+  if (settingsChanged && !els.modelSettingsPanel.hidden && !els.modelSettingsView.hidden) {
     renderModelSettings({
       threadId: state.threadId,
       model: state.model,
@@ -2940,22 +2889,410 @@ function processRemoteEvents(events = [], floorSequence = 0) {
   }
 }
 
+function approvalKindLabel(kind = "") {
+  return ({
+    command: "命令",
+    file: "文件",
+    permission: "权限",
+    input: "输入",
+    elicitation: "表单",
+    tool: "工具",
+    guardian: "安全",
+    approval: "确认"
+  })[kind] || "确认";
+}
+
+function approvalRequestKey(request = {}) {
+  return `${request.approvalScope || ""}:${request.requestId || ""}`;
+}
+
+function syncApprovalRequests(requests = []) {
+  const snapshot = new Map(
+    requests
+      .filter((request) => request?.requestId)
+      .map((request) => [approvalRequestKey(request), request])
+  );
+  // A state request can briefly see no app-server approvals while Android is
+  // restoring the page or the shared app-server transport is reconnecting.
+  // Treat snapshots as recovery/update data, not as resolution tombstones.
+  // Only an explicit approval_resolved event, a successful submission, or a
+  // server 404 is allowed to dismiss a popup the user has not acted on.
+  state.pendingApprovalQueue = state.pendingApprovalQueue
+    .map((request) => snapshot.get(approvalRequestKey(request)) || request);
+  if (state.pendingApproval) {
+    const currentKey = approvalRequestKey(state.pendingApproval);
+    if (snapshot.has(currentKey)) {
+      state.pendingApproval = snapshot.get(currentKey);
+      renderApprovalModal(state.pendingApproval);
+    }
+  }
+  for (const request of snapshot.values()) queueApprovalRequest(request);
+  showNextApproval();
+}
+
+function queueApprovalRequest(request = {}) {
+  if (!request?.requestId) return;
+  const key = approvalRequestKey(request);
+  const alreadyQueued = state.pendingApprovalQueue.some((item) => approvalRequestKey(item) === key)
+    || (state.pendingApproval && approvalRequestKey(state.pendingApproval) === key);
+  if (alreadyQueued) return;
+  state.pendingApprovalQueue.push(request);
+  showNextApproval();
+}
+
+function automaticElicitationContent(request = {}) {
+  const schema = request.schema && typeof request.schema === "object" ? request.schema : {};
+  const properties = schema.properties && typeof schema.properties === "object" ? schema.properties : {};
+  const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+  const content = {};
+  for (const [name, propValue] of Object.entries(properties)) {
+    const prop = propValue && typeof propValue === "object" ? propValue : {};
+    if (Object.prototype.hasOwnProperty.call(prop, "default")) {
+      content[name] = prop.default;
+    } else if (prop.type === "boolean") {
+      content[name] = false;
+    } else if (Array.isArray(prop.enum) && prop.enum.length) {
+      content[name] = prop.enum[0];
+    } else if (required.has(name)) {
+      return null;
+    }
+  }
+  return content;
+}
+
+function automaticApprovalSubmission(request = {}) {
+  if (request.kind === "input") return null;
+  if (request.kind === "elicitation") {
+    const content = automaticElicitationContent(request);
+    return content === null ? null : { decision: "accept", payload: { content } };
+  }
+  return {
+    decision: request.kind === "tool" ? "allow" : "accept",
+    payload: {}
+  };
+}
+
+function autoApprovalDetail() {
+  return state.autoApprove
+    ? "已开启：自动允许审核及可使用默认值的 MCP 表单，并暂停发送审核通知；缺少必填内容时仍会弹窗"
+    : "已关闭。点击开启后将自动允许审核请求和可安全补全的 MCP 表单（高风险）";
+}
+
+async function syncAutoApprovalNotificationPreference() {
+  return await request("/api/remote/notifications/approval-preference", {
+    method: "POST",
+    body: JSON.stringify({ autoApprove: state.autoApprove })
+  });
+}
+
+function toggleAutoApproval() {
+  state.autoApprove = !state.autoApprove;
+  localStorage.setItem("codex-remote-auto-approve", state.autoApprove ? "1" : "0");
+  closeCommandMenu();
+  appendEvent(state.autoApprove ? "自动确认审核已开启" : "自动确认审核已关闭");
+  renderCommandList();
+  syncAutoApprovalNotificationPreference().catch((error) => {
+    appendEvent(`同步审核通知设置失败：${error.message}`);
+  });
+  if (!state.autoApprove || !state.pendingApproval || state.pendingApprovalSubmitting) return;
+  const submission = automaticApprovalSubmission(state.pendingApproval);
+  if (!submission) return;
+  if (els.approvalModal) els.approvalModal.hidden = true;
+  submitApproval(submission.decision, submission.payload, { automatic: true });
+}
+
+function showNextApproval() {
+  if (state.pendingApproval || state.pendingApprovalSubmitting || !els.approvalModal) return;
+  const next = state.pendingApprovalQueue.shift();
+  if (!next) return;
+  state.pendingApproval = next;
+  updateTaskExecutionDetail(approvalTaskDetail(next), "approval");
+  renderTaskExecutionStatus();
+  const automaticSubmission = state.autoApprove ? automaticApprovalSubmission(next) : null;
+  if (automaticSubmission) {
+    if (els.approvalModal) els.approvalModal.hidden = true;
+    submitApproval(automaticSubmission.decision, automaticSubmission.payload, { automatic: true });
+    return;
+  }
+  renderApprovalModal(next);
+  els.approvalModal.hidden = false;
+  requestAnimationFrame(() => {
+    const primary = els.approvalActions.querySelector(".approvalPrimary");
+    primary?.focus();
+  });
+}
+
+function clearApprovalModal() {
+  state.pendingApproval = null;
+  state.pendingApprovalSubmitting = false;
+  if (els.approvalModal) els.approvalModal.hidden = true;
+  renderTaskExecutionStatus();
+}
+
+function resolveApprovalRequest(requestId = "", approvalScope = "") {
+  const key = approvalRequestKey({ requestId, approvalScope });
+  state.pendingApprovalQueue = state.pendingApprovalQueue.filter((item) => approvalRequestKey(item) !== key);
+  if (state.pendingApproval && approvalRequestKey(state.pendingApproval) === key) {
+    clearApprovalModal();
+  }
+  showNextApproval();
+}
+
+function approvalBodyHtml(request = {}) {
+  const sections = [];
+  const addSection = (label, html) => {
+    sections.push(`<section class="approvalSection"><div class="approvalLabel">${escapeHtml(label)}</div>${html}</section>`);
+  };
+  if (request.summary) addSection("请求内容", `<div class="approvalSummary">${escapeHtml(request.summary)}</div>`);
+  if (request.reason) addSection("原因", `<div class="approvalSummary">${escapeHtml(request.reason)}</div>`);
+  if (request.cwd) addSection("目录", `<div class="approvalSummary">${escapeHtml(request.cwd)}</div>`);
+  if (request.command) addSection("命令", `<pre class="approvalCode">${escapeHtml(request.command)}</pre>`);
+  if (Array.isArray(request.files) && request.files.length) {
+    addSection("文件", request.files.map((file) => `
+      <div class="approvalFile">
+        <strong title="${escapeHtml(file.path || "")}">${escapeHtml(file.path || "")}</strong>
+        <small>${escapeHtml(file.type || "")}</small>
+        ${file.detail ? `<pre class="approvalDiff">${escapeHtml(file.detail)}</pre>` : ""}
+      </div>
+    `).join(""));
+  }
+  if (request.permissions) addSection("权限", permissionSummaryHtml(request.permissions));
+  if (Array.isArray(request.questions) && request.questions.length) {
+    addSection("问题", request.questions.map((question, index) => approvalQuestionHtml(question, index)).join(""));
+  }
+  if (request.message) addSection("消息", `<div class="approvalSummary">${escapeHtml(request.message)}</div>`);
+  if (request.schema && typeof request.schema === "object") {
+    addSection("表单", elicitationFieldsHtml(request.schema));
+  }
+  if (request.tool) addSection("工具", `<div class="approvalSummary">${escapeHtml(request.tool)}</div>`);
+  if (request.arguments !== null && request.arguments !== undefined) {
+    addSection("参数", `<pre class="approvalJson">${escapeHtml(JSON.stringify(request.arguments, null, 2))}</pre>`);
+  }
+  if (request.event) addSection("拦截详情", `<pre class="approvalJson">${escapeHtml(JSON.stringify(request.event, null, 2))}</pre>`);
+  return sections.join("");
+}
+
+function permissionSummaryHtml(permissions = {}) {
+  const rows = [];
+  const fileSystem = permissions.fileSystem;
+  if (fileSystem) {
+    const entries = Array.isArray(fileSystem.entries) ? fileSystem.entries : [];
+    const read = Array.isArray(fileSystem.read) ? fileSystem.read : [];
+    const write = Array.isArray(fileSystem.write) ? fileSystem.write : [];
+    const parts = [];
+    for (const entry of entries) parts.push(`${entry.access || ""} ${pathPermissionLabel(entry.path || "")}`);
+    for (const item of read) parts.push(`读 ${item}`);
+    for (const item of write) parts.push(`写 ${item}`);
+    rows.push(`<div>文件系统：${escapeHtml(parts.join("，") || "请求文件系统权限")}</div>`);
+  }
+  if (permissions.network) {
+    rows.push(`<div>网络：${escapeHtml(permissions.network.enabled ? "启用网络" : "受限网络")}</div>`);
+  }
+  return rows.join("") || "<div>未请求额外权限</div>";
+}
+
+function pathPermissionLabel(value = "") {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") return value.path || value.pattern || value.value || "";
+  return "";
+}
+
+function approvalQuestionHtml(question = {}, index = 0) {
+  const questionId = question.id || `question-${index}`;
+  const options = Array.isArray(question.options) ? question.options : [];
+  const optionName = `approval-question-${questionId}`;
+  const optionsHtml = options.map((option, optionIndex) => `
+    <label class="approvalOption">
+      <input type="${question.isOther ? "checkbox" : "radio"}" name="${escapeHtml(optionName)}" value="${escapeHtml(option.label || option.description || String(optionIndex))}" ${optionIndex === 0 && !question.isOther ? "checked" : ""}>
+      <span>${escapeHtml(option.label || "")}${option.description ? ` <small>${escapeHtml(option.description)}</small>` : ""}</span>
+    </label>
+  `).join("");
+  const inputHtml = question.isSecret
+    ? `<input class="approvalInput" data-approval-question="${escapeHtml(questionId)}" type="password" placeholder="输入回答">`
+    : `<textarea class="approvalTextarea" data-approval-question="${escapeHtml(questionId)}" placeholder="输入回答"></textarea>`;
+  return `
+    <div class="approvalQuestion" data-question-id="${escapeHtml(questionId)}">
+      <strong>${escapeHtml(question.header || question.question || `问题 ${index + 1}`)}</strong>
+      ${question.question ? `<p>${escapeHtml(question.question)}</p>` : ""}
+      ${optionsHtml || inputHtml}
+    </div>
+  `;
+}
+
+function elicitationFieldsHtml(schema = {}) {
+  const properties = schema.properties || {};
+  return Object.entries(properties).map(([name, prop]) => {
+    const label = prop?.title || name;
+    const description = prop?.description || "";
+    let control = "";
+    if (prop?.type === "boolean") {
+      control = `<label class="approvalOption"><input class="approvalInput" data-elicitation-field="${escapeHtml(name)}" type="checkbox" ${prop.default ? "checked" : ""}><span>${escapeHtml(prop.default ? "默认开启" : "默认关闭")}</span></label>`;
+    } else if (Array.isArray(prop?.enum)) {
+      control = `<select class="approvalSelect" data-elicitation-field="${escapeHtml(name)}">${prop.enum.map((option) => `<option value="${escapeHtml(option)}" ${prop.default === option ? "selected" : ""}>${escapeHtml(option)}</option>`).join("")}</select>`;
+    } else {
+      control = `<input class="approvalInput" data-elicitation-field="${escapeHtml(name)}" value="${escapeHtml(prop?.default ?? "")}" placeholder="${escapeHtml(prop?.format || "")}">`;
+    }
+    return `<div class="approvalQuestion"><strong>${escapeHtml(label)}</strong>${description ? `<p>${escapeHtml(description)}</p>` : ""}${control}</div>`;
+  }).join("");
+}
+
+function renderApprovalModal(request = {}) {
+  if (!els.approvalKind || !els.approvalTitle) return;
+  const kindLabel = approvalKindLabel(request.kind);
+  els.approvalKind.textContent = kindLabel;
+  els.approvalTitle.textContent = request.title || `${kindLabel}确认`;
+  els.approvalMeta.textContent = [request.threadId, request.turnId, request.method].filter(Boolean).join(" · ");
+  els.approvalBody.innerHTML = approvalBodyHtml(request);
+  renderApprovalActions(request);
+  els.approvalStatus.textContent = "";
+}
+
+function approvalButton(label = "", decision = "", options = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  if (options.primary) button.classList.add("approvalPrimary", "primary");
+  if (options.danger) button.classList.add("danger");
+  if (options.wide) button.classList.add("approvalActionWide");
+  button.addEventListener("click", () => {
+    if (decision === "submit") submitApprovalFromModal();
+    else submitApproval(decision);
+  });
+  return button;
+}
+
+function renderApprovalActions(request = {}) {
+  if (!els.approvalActions) return;
+  els.approvalActions.innerHTML = "";
+  const actions = [];
+  if (request.kind === "command" || request.kind === "file") {
+    actions.push(approvalButton("允许", "accept", { primary: true }));
+    if (request.canAcceptForSession !== false) actions.push(approvalButton("本次会话允许", "acceptForSession"));
+    actions.push(approvalButton("拒绝继续", "decline", { danger: true }));
+    actions.push(approvalButton("拒绝并中断", "cancel", { danger: true, wide: true }));
+  } else if (request.kind === "permission") {
+    actions.push(approvalButton("允许本次", "accept", { primary: true }));
+    actions.push(approvalButton("本次会话允许", "acceptForSession"));
+    actions.push(approvalButton("拒绝", "decline", { danger: true }));
+  } else if (request.kind === "input") {
+    actions.push(approvalButton("提交回答", "submit", { primary: true }));
+    actions.push(approvalButton("取消", "cancel", { danger: true }));
+  } else if (request.kind === "elicitation") {
+    actions.push(approvalButton("接受", "submit", { primary: true }));
+    actions.push(approvalButton("拒绝", "decline", { danger: true }));
+    actions.push(approvalButton("取消", "cancel", { danger: true }));
+  } else if (request.kind === "tool") {
+    actions.push(approvalButton("允许调用", "allow", { primary: true }));
+    actions.push(approvalButton("拒绝", "decline", { danger: true }));
+    actions.push(approvalButton("取消", "cancel", { danger: true, wide: true }));
+  } else if (request.kind === "guardian") {
+    actions.push(approvalButton("批准操作", "accept", { primary: true }));
+    actions.push(approvalButton("拒绝", "decline", { danger: true }));
+  } else {
+    actions.push(approvalButton("允许", "accept", { primary: true }));
+    actions.push(approvalButton("拒绝", "decline", { danger: true }));
+  }
+  for (const action of actions) els.approvalActions.appendChild(action);
+}
+
+function setApprovalStatus(message = "") {
+  if (els.approvalStatus) els.approvalStatus.textContent = message;
+}
+
+function setApprovalButtonsDisabled(disabled = false) {
+  for (const button of els.approvalActions?.querySelectorAll("button") || []) {
+    button.disabled = disabled;
+  }
+}
+
+async function submitApproval(decision = "", payload = {}, options = {}) {
+  if (!state.pendingApproval || state.pendingApprovalSubmitting) return;
+  state.pendingApprovalSubmitting = true;
+  setApprovalStatus(options.automatic ? "正在自动确认..." : "正在提交确认...");
+  setApprovalButtonsDisabled(true);
+  try {
+    await request("/api/remote/approval/respond", {
+      method: "POST",
+      body: JSON.stringify({
+        requestId: state.pendingApproval.requestId,
+        approvalScope: state.pendingApproval.approvalScope || "",
+        threadId: state.pendingApproval.threadId || "",
+        turnId: state.pendingApproval.turnId || "",
+        method: state.pendingApproval.method || "",
+        decision,
+        ...payload
+      })
+    });
+    const completedApproval = state.pendingApproval;
+    state.pendingApprovalQueue = state.pendingApprovalQueue.filter((item) => approvalRequestKey(item) !== approvalRequestKey(completedApproval));
+    clearApprovalModal();
+    showNextApproval();
+  } catch (error) {
+    if (/审批请求不存在或已处理/.test(String(error?.message || ""))) {
+      const expiredApproval = state.pendingApproval;
+      resolveApprovalRequest(expiredApproval?.requestId, expiredApproval?.approvalScope);
+      loadState("").catch(() => {});
+      return;
+    }
+    state.pendingApprovalSubmitting = false;
+    if (options.automatic && els.approvalModal) {
+      renderApprovalModal(state.pendingApproval);
+      els.approvalModal.hidden = false;
+    }
+    setApprovalStatus(options.automatic ? `自动确认失败：${error.message || "请手动处理。"}` : (error.message || "提交失败。"));
+    setApprovalButtonsDisabled(false);
+  }
+}
+
+function submitApprovalFromModal() {
+  const request = state.pendingApproval;
+  if (!request) return;
+  const payload = {};
+  if (request.kind === "input") {
+    const answers = {};
+    for (const root of els.approvalBody.querySelectorAll("[data-question-id]")) {
+      const questionId = root.dataset.questionId;
+      const selected = [...root.querySelectorAll(`input[name="${CSS.escape(`approval-question-${questionId}`)}"]:checked`)].map((input) => input.value);
+      if (selected.length) {
+        answers[questionId] = { answers: selected };
+        continue;
+      }
+      const field = root.querySelector("[data-approval-question]");
+      if (field && String(field.value || "").trim()) {
+        answers[questionId] = { answers: [field.value.trim()] };
+      }
+    }
+    payload.answers = answers;
+    if (!Object.keys(answers).length) {
+      setApprovalStatus("请至少填写一个回答。");
+      return;
+    }
+  }
+  if (request.kind === "elicitation") {
+    const content = {};
+    for (const field of els.approvalBody.querySelectorAll("[data-elicitation-field]")) {
+      const name = field.dataset.elicitationField;
+      if (field.type === "checkbox") content[name] = field.checked;
+      else content[name] = field.value;
+    }
+    payload.content = content;
+    const required = Array.isArray(request.schema?.required) ? request.schema.required : [];
+    const missing = required.filter((name) => {
+      const value = content[name];
+      return value === undefined || value === null || String(value).trim() === "";
+    });
+    if (missing.length) {
+      setApprovalStatus(`请填写必填项：${missing.join("、")}`);
+      return;
+    }
+  }
+  submitApproval("accept", payload);
+}
+
 function handleRemoteEvent(data) {
   if (!rememberRemoteEvent(data)) return;
-  if (data.type === "connectors_changed") { loadConnectors().catch(() => {}); return; }
-  if (data.type === "connector_selected") {
-    const nextId = data.selectedConnectorId || "";
-    if (nextId !== state.selectedConnectorId) {
-      applyConnectorSelection(nextId).catch((error) => upsertAssistantMessage(`同步被控电脑失败：${error.message}`, true));
-    } else {
-      renderConnectors();
-    }
-    return;
-  }
-  if (data.connectorId !== undefined && data.connectorId !== (state.selectedConnectorId || "")) {
-    if (data.type === "runner_status") state.runningThreads = Array.isArray(data.runningThreads) ? data.runningThreads : state.runningThreads;
-    return;
-  }
+  if (data.type === "approval_request") { queueApprovalRequest(data); return; }
+  if (data.type === "approval_resolved") { resolveApprovalRequest(data.requestId, data.approvalScope); return; }
   if (data.type === "model_settings_update") {
     if (data.threadId !== state.threadId) return;
     applyIncomingModelSettings(data);
@@ -2980,8 +3317,7 @@ function handleRemoteEvent(data) {
       false,
       false
     );
-    scheduleExternalSessionRefresh(currentConnectorId());
-    scheduleThreadListRefresh();
+    scheduleExternalSessionRefresh("");
     return;
   }
   if (data.type === "status") {
@@ -3003,16 +3339,21 @@ function handleRemoteEvent(data) {
   }
   if (data.type === "reconnecting") {
     state.reconnecting = Boolean(data.reconnecting);
+    if (data.reconnecting) {
+      updateTaskExecutionDetail(`连接异常：${compactTaskDetail(data.message || "等待 Codex 重新连接", 140)}`, "reconnecting");
+    }
     updateMeta();
     updateStatusIcon();
+    renderTaskExecutionStatus();
   }
   if (data.type === "runner_status") {
-    const previousSignature = runningThreadsSignature(state.runningThreads);
     state.runningThreads = Array.isArray(data.runningThreads) ? data.runningThreads : [];
-    if (previousSignature !== runningThreadsSignature(state.runningThreads)) scheduleThreadListRefresh();
   }
   if (data.type === "message") {
     if (data.role === "assistant" && (data.transient || data.final)) {
+      if (state.running && (data.transient || !/^✅\s/u.test(data.content || ""))) {
+        updateTaskExecutionDetail(`正在分析：${compactTaskDetail(data.content || "", 150)}`, "reasoning");
+      }
       if (data.final && /^✅\s/.test(data.content || "") && data.taskDurationMs === undefined && state.currentTaskStartedAtMs) {
         data.taskDurationMs = Math.max(0, Date.now() - state.currentTaskStartedAtMs);
       }
@@ -3031,6 +3372,10 @@ function handleRemoteEvent(data) {
     }
   }
   if (data.type === "cli_message") {
+    if (state.running && data.role === "assistant") {
+      const activity = cliTaskDetail(data);
+      if (activity.detail) updateTaskExecutionDetail(activity.detail, activity.kind);
+    }
     if (state.showFullReplies && data.role === "assistant") {
       upsertAssistantMessage(data.content, data.final, data.messageId || "cli-message", data);
     }
@@ -3047,12 +3392,10 @@ function handleRemoteEvent(data) {
     // with a lagging thread snapshot, making a short reply such as "ok"
     // disappear until the conversation is reopened. The following status
     // event updates the running state without touching the rendered messages.
-    scheduleThreadListRefresh(250);
   }
   if (data.type === "thread_completion" && data.threadId) {
     if (data.completedUnread) state.completedUnreadThreads.add(data.threadId);
     else state.completedUnreadThreads.delete(data.threadId);
-    scheduleThreadListRefresh();
   }
   if (data.type === "error") {
     upsertAssistantMessage(`错误：${data.text}`, true, data.messageId || "error");
@@ -3067,7 +3410,7 @@ function handleRemoteEvent(data) {
   }
   if (data.type === "state") {
     if (state.showFullReplies && data.threadId && !Array.isArray(data.fullMessages)) {
-      loadState(currentConnectorId()).catch((error) => console.warn("读取 Codex 完整回复失败", error));
+      loadState("").catch((error) => console.warn("读取 Codex 完整回复失败", error));
     } else {
       renderState(data);
     }
@@ -3162,13 +3505,8 @@ async function refreshNativeNotificationStatus() {
 
 async function sendMessage(mode = "steer") {
   cancelPendingAndroidImeEnter();
-  const connectorId = currentConnectorId();
   const message = composerText().trim();
   if (!message && !state.uploads.length) return;
-  if (state.disableLocal && !connectorId) {
-    upsertAssistantMessage("当前为纯控制中心模式，请先在「PC 被控电脑」面板添加并切换到一台被控电脑。", true);
-    return;
-  }
   const outgoingMessage = messageWithUploads(message);
   const sendMode = mode === "steer" ? "steer" : "queue";
   const stateBeforeSend = {
@@ -3185,15 +3523,15 @@ async function sendMessage(mode = "steer") {
   scheduleAndroidImeProbe();
   state.replyDone = false;
   state.currentTaskStartedAtMs = Date.now();
+  clearTaskExecutionDetail();
+  updateTaskExecutionDetail("正在将任务发送给 Codex", "connecting");
   const followMatch = outgoingMessage.trim().toLowerCase().match(/^\/follow\s+(queue|steer)$/);
   setRunning(true, state.queueLength, state.queueMessages, followMatch ? followMatch[1] : state.followMode, state.steerLength, state.steerMessages, state.contextUsage, state.runningThreads, false, state.externalRunning);
   try {
     const result = await request("/api/remote/send", {
       method: "POST",
-      connectorId,
       body: JSON.stringify({ message: outgoingMessage, followMode: sendMode })
     });
-    if (connectorId !== currentConnectorId()) return;
     state.uploads = [];
     renderUploadList();
     if (result?.local || result?.liveVoice) {
@@ -3233,6 +3571,40 @@ async function sendMessage(mode = "steer") {
       stateBeforeSend.liveVoiceConnected,
       stateBeforeSend.liveVoiceTaskRunning
     );
+  }
+}
+
+async function interruptCurrentTask() {
+  if (!taskExecutionCanInterrupt() || taskInterruptPending) return false;
+  taskInterruptPending = true;
+  renderTaskExecutionStatus();
+  try {
+    const result = await request("/api/remote/send", {
+      method: "POST",
+      body: JSON.stringify({ message: "/stop", followMode: "steer" })
+    });
+    setRunning(
+      result.running,
+      result.queueLength,
+      result.queueMessages,
+      result.followMode,
+      result.steerLength,
+      result.steerMessages,
+      result.contextUsage,
+      result.runningThreads,
+      result.reconnecting,
+      result.externalRunning,
+      Boolean(result.liveVoiceRunning),
+      Boolean(result.liveVoiceConnected),
+      Boolean(result.liveVoiceTaskRunning)
+    );
+    return true;
+  } catch (error) {
+    upsertAssistantMessage(`中断失败：${error.message}`, true, `interrupt-error-${Date.now()}`);
+    return false;
+  } finally {
+    taskInterruptPending = false;
+    renderTaskExecutionStatus();
   }
 }
 
@@ -3396,6 +3768,31 @@ els.input.addEventListener("paste", (event) => {
   event.preventDefault();
   uploadFiles(files);
 });
+els.input.addEventListener("dragover", (event) => {
+  const transfer = event.dataTransfer;
+  if (!transfer) return;
+  const types = [...(transfer.types || [])];
+  if (!types.includes("Files")
+    && !types.includes(pichomeDownloadDragType)
+    && !types.includes("text/uri-list")
+    && !types.includes("text/html")) return;
+  event.preventDefault();
+  transfer.dropEffect = "copy";
+});
+els.input.addEventListener("drop", (event) => {
+  const transfer = event.dataTransfer;
+  if (!transfer) return;
+  const payload = pichomeDropPayload(transfer);
+  if (payload) {
+    event.preventDefault();
+    uploadPichomeDrop(payload);
+    return;
+  }
+  const files = [...transfer.files];
+  if (!files.length) return;
+  event.preventDefault();
+  uploadFiles(files);
+});
 els.uploadButton.addEventListener("click", () => els.fileInput.click());
 els.fileInput.addEventListener("change", () => uploadFiles([...els.fileInput.files]));
 
@@ -3425,53 +3822,29 @@ document.addEventListener("click", (event) => {
     els.threadPanel.hidden = true;
   }
   if (
-    !els.usagePanel.hidden &&
-    !event.target.closest("#usagePanel") &&
-    !event.target.closest("#usageRemote")
-  ) {
-    els.usagePanel.hidden = true;
-  }
-  if (
     !els.modelSettingsPanel.hidden &&
     !event.target.closest("#modelSettingsPanel") &&
     !event.target.closest("#modelSettingsRemote")
   ) {
     els.modelSettingsPanel.hidden = true;
-    els.usagePanel.hidden = true;
-  }
-  if (
-    !els.filePanel.hidden &&
-    !event.target.closest("#filePanel") &&
-    !event.target.closest("#filesRemote")
-  ) {
-    els.filePanel.hidden = true;
-  }
-  if (
-    !els.sshConnectPanel.hidden &&
-    !event.target.closest("#sshConnectPanel") &&
-    !event.target.closest("#sshConnectRemote")
-  ) {
-    els.sshConnectPanel.hidden = true;
-  }
-  if (
-    !els.connectorPanel.hidden &&
-    !event.target.closest("#connectorPanel") &&
-    !event.target.closest("#connectorsRemote")
-  ) {
-    els.connectorPanel.hidden = true;
   }
 });
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    const dismissedOverlay = !els.threadPanel.hidden
+      || !els.modelSettingsPanel.hidden
+      || !els.queuePanel.hidden
+      || !els.commandMenu.hidden;
     closeCommandMenu();
     closeProjectUploadMenu();
     els.threadPanel.hidden = true;
-    els.filePanel.hidden = true;
-    els.sshConnectPanel.hidden = true;
-    els.connectorPanel.hidden = true;
     els.modelSettingsPanel.hidden = true;
     els.queuePanel.hidden = true;
+    if (!dismissedOverlay && taskExecutionCanInterrupt()) {
+      event.preventDefault();
+      interruptCurrentTask();
+    }
   }
 });
 
@@ -3481,17 +3854,19 @@ if (window.visualViewport) {
   updateVisualViewport();
 }
 
-els.filesButton.addEventListener("click", () => openFiles());
-els.usageButton.addEventListener("click", () => {
-  openUsagePanel().catch((error) => {
-    els.usageContent.innerHTML = "";
-    els.usageStatus.textContent = `读取失败：${error.message}`;
+els.modelSettingsButton.addEventListener("click", () => {
+  openModelSettings().catch((error) => {
+    els.modelSettingsStatus.textContent = `读取失败：${error.message}`;
   });
 });
-els.closeUsage.addEventListener("click", () => {
-  els.usagePanel.hidden = true;
-});
-els.modelSettingsButton.addEventListener("click", () => {
+els.modelUsageToggle.addEventListener("click", () => {
+  if (els.modelUsageView.hidden) {
+    openUsageInModelSettings().catch((error) => {
+      els.usageContent.innerHTML = "";
+      els.usageStatus.textContent = `读取失败：${error.message}`;
+    });
+    return;
+  }
   openModelSettings().catch((error) => {
     els.modelSettingsStatus.textContent = `读取失败：${error.message}`;
   });
@@ -3499,71 +3874,15 @@ els.modelSettingsButton.addEventListener("click", () => {
 els.closeModelSettings.addEventListener("click", () => {
   els.modelSettingsPanel.hidden = true;
 });
-els.connectorsButton?.addEventListener("click", () => {
-  openConnectors().catch((error) => upsertAssistantMessage(`被控电脑错误： ${error.message}`, true));
-});
-els.closeConnectors?.addEventListener("click", () => {
-  els.connectorPanel.hidden = true;
-});
-els.refreshConnectors?.addEventListener("click", () => {
-  loadConnectors().catch((error) => upsertAssistantMessage(`被控电脑错误： ${error.message}`, true));
-});
-els.connectorList?.addEventListener("click", (event) => {
-  const row = event.target.closest(".connectorItem");
-  if (!row) return;
-  const id = row.dataset.connectorId || "";
-  switchConnector(id).catch((error) => upsertAssistantMessage(`切换失败：${error.message}`, true));
-});
-els.sshConnectButton.addEventListener("click", () => openSshConnect());
-els.closeSshConnect.addEventListener("click", () => {
-  els.sshConnectPanel.hidden = true;
-});
-els.toggleSshView.addEventListener("click", () => {
-  if (els.sshFilesView.hidden) openSshComputer().catch((error) => {
-    els.sshList.innerHTML = `<div class="remoteEvent">错误：${error.message}</div>`;
-  });
-  else setSshView("config");
-});
-els.sshConnectForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  connectSsh().catch((error) => {
-    els.sshStatus.textContent = `连接失败：${error.message}`;
-  });
-});
-els.sshDisconnect.addEventListener("click", () => {
-  disconnectSsh().catch((error) => {
-    els.sshStatus.textContent = `断开失败：${error.message}`;
-  });
-});
-els.createSshFolder.addEventListener("click", () => {
-  createSshFolderInCurrentDir().catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
-});
-els.createSshFile.addEventListener("click", () => {
-  createSshFileInCurrentDir().catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
-});
-els.sshList.addEventListener("click", (event) => {
-  event.stopPropagation();
-  const actionButton = event.target.closest("[data-ssh-action]");
-  const row = event.target.closest(".fileItem");
-  if (!row) return;
-  const file = row.dataset.path || "";
-  const name = row.dataset.name || "";
-  if (actionButton) {
-    const action = actionButton.dataset.sshAction;
-    if (action === "edit") previewSshFile(file);
-    if (action === "rename") renameSshItem(file, name).catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
-    if (action === "delete") deleteSshItem(file, name).catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
-    return;
-  }
-  if (row.dataset.type === "dir") openSshComputer(file);
-  else previewSshFile(file);
-});
-
 els.createFolder.addEventListener("click", () => {
   createFolderInCurrentFilePanel().catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
 });
 els.createFile.addEventListener("click", () => {
   createFileInCurrentFilePanel().catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
+});
+els.projectDotFolderFilter.addEventListener("click", () => {
+  state.hideProjectDotFolders = !state.hideProjectDotFolders;
+  applyDotFolderFilter(els.fileList, els.projectDotFolderFilter, state.hideProjectDotFolders);
 });
 els.projectUploadButton.addEventListener("click", toggleProjectUploadMenu);
 els.projectFilesButton.addEventListener("click", () => {
@@ -3581,11 +3900,6 @@ els.projectFilesInput.addEventListener("change", () => {
 });
 els.projectFolderInput.addEventListener("change", () => {
   uploadProjectItems([...els.projectFolderInput.files], "folder");
-});
-
-els.closeFiles.addEventListener("click", () => {
-  closeProjectUploadMenu();
-  els.filePanel.hidden = true;
 });
 
 els.fileList.addEventListener("click", (event) => {
@@ -3617,21 +3931,41 @@ els.newList.addEventListener("click", (event) => {
   if (!row) return;
   openNewSessionPicker(row.dataset.path || "");
 });
+els.newDotFolderFilter.addEventListener("click", () => {
+  state.hideNewSessionDotFolders = !state.hideNewSessionDotFolders;
+  applyDotFolderFilter(els.newList, els.newDotFolderFilter, state.hideNewSessionDotFolders);
+});
 
 els.createSession.addEventListener("click", () => {
   createSessionInSelectedFolder().catch((error) => upsertAssistantMessage(`错误：${error.message}`, true));
 });
 
-els.threadButton.addEventListener("click", () => {
-  openThreads();
+els.threadButton.addEventListener("click", toggleThreadPanel);
+
+els.refreshThreads.addEventListener("click", () => {
+  if (els.refreshThreads.disabled) return;
+  els.refreshThreads.disabled = true;
+  els.refreshThreads.textContent = "刷新中...";
+  openThreads().finally(() => {
+    els.refreshThreads.disabled = false;
+    els.refreshThreads.textContent = "刷新";
+  });
 });
 
 els.closeThreads.addEventListener("click", () => {
   els.threadPanel.hidden = true;
+  els.threadButton.setAttribute("aria-expanded", "false");
 });
 els.toggleThreadView.addEventListener("click", () => {
   if (els.threadNewView.hidden) openNewSessionPicker();
-  else openThreads();
+  else openThreads({ load: false });
+});
+els.threadFilesToggle.addEventListener("click", () => {
+  if (els.threadFilesView.hidden) {
+    openFiles(state.fileCwd || "");
+    return;
+  }
+  openThreads({ load: false });
 });
 
 els.loadMore.addEventListener("click", () => {
@@ -3660,15 +3994,17 @@ window.addEventListener("focus", resyncWhenActive);
 window.addEventListener("online", resyncWhenActive);
 
 els.newChat?.addEventListener("click", () => {
-  if (state.running) return;
   openNewSessionPicker();
 });
 
 renderCommandList();
-loadSshStatus().catch(() => updateSshStatus({ connected: false }));
-loadState().then(connectEvents).catch((error) => {
-  els.meta.textContent = error.message;
-});
+(state.autoApprove ? syncAutoApprovalNotificationPreference() : Promise.resolve())
+  .catch(() => null)
+  .then(loadState)
+  .then(connectEvents)
+  .catch((error) => {
+    els.meta.textContent = error.message;
+  });
 restorePushSubscription();
 refreshNativeNotificationStatus().catch(() => {});
 autosizeInput();

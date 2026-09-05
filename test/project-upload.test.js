@@ -128,5 +128,4 @@ test("project panel exposes file and whole-folder upload choices before new fold
   assert.match(source, /正在上传[\s\S]*?percent/);
   assert.match(styles, /\.projectUploadMenu\s*\{[\s\S]*?position:\s*absolute/);
   assert.match(router, /saveProjectUploads\(req, url\.searchParams\.get\("dir"\) \|\| ""\)/);
-  assert.match(router, /被控电脑文件上传暂不支持/);
 });

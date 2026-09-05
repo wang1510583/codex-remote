@@ -18,6 +18,7 @@ import {
 } from "../src/live-voice/leases.js";
 import { CodexLiveVoiceRuntime } from "../src/live-voice/runtime.js";
 import { CodexRemoteThreadAdapter } from "../src/live-voice/thread-adapter.js";
+import { mergePersistentLiveVoiceMessages } from "../src/runner.js";
 import { LiveVoiceTicketStore } from "../src/live-voice/tickets.js";
 import {
   codexLiveVoiceOrDefault,
@@ -213,6 +214,33 @@ test("thread adapter restores completed bubbles from the web-selected Codex thre
   ]);
 });
 
+test("thread selection restores persistent Live Voice bubbles without duplicates", () => {
+  const voiceMessage = {
+    role: "assistant",
+    content: "语音对话：已经完成。",
+    at: "2026-08-02T11:00:02.000Z",
+    liveVoiceTranscript: true
+  };
+  const messages = mergePersistentLiveVoiceMessages([
+    { role: "user", content: "普通消息", at: "2026-08-02T11:00:01.000Z" },
+    voiceMessage
+  ], [
+    voiceMessage,
+    {
+      role: "user",
+      content: "切回来还能看到吗",
+      at: "2026-08-02T11:00:03.000Z",
+      liveVoiceTranscript: true
+    }
+  ]);
+
+  assert.deepEqual(messages.map((message) => message.content), [
+    "普通消息",
+    "语音对话：已经完成。",
+    "语音对话：切回来还能看到吗"
+  ]);
+});
+
 test("voice transcripts persist with their originating thread after the web switches away", async () => {
   let state = {
     threadId: "thread-other",
@@ -268,10 +296,8 @@ test("an active Live Voice session can obtain a reconnect ticket after the web s
       messages: [],
       inflight: null
     }),
-    readViewStateFn: async () => ({ selectedConnectorId: "remote-device" }),
     runningThreadsFn: () => [],
-    broadcastFn: () => {},
-    localDisabled: false
+    broadcastFn: () => {}
   });
 
   assert.equal(
@@ -284,7 +310,7 @@ test("an active Live Voice session can obtain a reconnect ticket after the web s
   );
   await assert.rejects(
     () => adapter.getSession("thread-unknown"),
-    /当前网页选择的是被控端/
+    /不是网页当前选择的会话/
   );
   lease.release();
 });

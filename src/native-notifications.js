@@ -47,7 +47,7 @@ function safeDeviceId(value = "") {
 }
 
 function emptyDeliveryStore() {
-  return { version: 1, notifications: [], acknowledgements: {} };
+  return { version: 2, approvalNotificationsSuppressed: false, notifications: [], acknowledgements: {} };
 }
 
 function normalizeDeliveryStore(value) {
@@ -57,7 +57,8 @@ function normalizeDeliveryStore(value) {
       id: cleanText(String(item?.id || ""), 160),
       title: cleanText(String(item?.title || "服务器Codex"), 120) || "服务器Codex",
       body: notificationBody(item?.body),
-      ts: Number(item?.ts) || 0
+      ts: Number(item?.ts) || 0,
+      kind: item?.kind === "approval" || item?.title === "Codex等待审核" ? "approval" : "task"
     }))
     .filter((item) => item.id && item.ts > 0);
   const acknowledgements = {};
@@ -72,7 +73,12 @@ function normalizeDeliveryStore(value) {
       .filter(Boolean))]
       .slice(-MAX_ACKNOWLEDGEMENTS_PER_DEVICE);
   }
-  return { version: 1, notifications, acknowledgements };
+  return {
+    version: 2,
+    approvalNotificationsSuppressed: Boolean(source.approvalNotificationsSuppressed),
+    notifications,
+    acknowledgements
+  };
 }
 
 function readDeliveryStore(file, logger) {
@@ -85,6 +91,31 @@ function readDeliveryStore(file, logger) {
   }
 }
 
+function readApprovalNotificationPreference(file, logger) {
+  if (!file || !existsSync(file)) return null;
+  try {
+    const value = JSON.parse(readFileSync(file, "utf8"));
+    return typeof value?.approvalNotificationsSuppressed === "boolean"
+      ? value.approvalNotificationsSuppressed
+      : null;
+  } catch (error) {
+    logger.error("failed to read approval notification preference", error?.message || error);
+    return null;
+  }
+}
+
+function writeApprovalNotificationPreference(file, suppressed, logger) {
+  if (!file) return;
+  try {
+    mkdirSync(path.dirname(file), { recursive: true });
+    const temporaryPath = `${file}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(temporaryPath, `${JSON.stringify({ approvalNotificationsSuppressed: Boolean(suppressed) }, null, 2)}\n`, { mode: 0o600 });
+    renameSync(temporaryPath, file);
+  } catch (error) {
+    logger.error("failed to persist approval notification preference", error?.message || error);
+  }
+}
+
 function websocketReason(reason) {
   return cleanText(Buffer.isBuffer(reason) ? reason.toString("utf8") : String(reason || ""), 120);
 }
@@ -93,8 +124,22 @@ export function createNativeNotificationHub(options = {}) {
   const token = String(options.token ?? nativeNotificationToken ?? "");
   const logger = options.logger || console;
   const queuePath = options.queuePath ?? nativeNotificationQueuePath;
+  const preferencePath = options.preferencePath ?? `${queuePath}.approval-preference`;
   const clients = new Set();
   let deliveryStore = readDeliveryStore(queuePath, logger);
+  const persistedPreference = readApprovalNotificationPreference(preferencePath, logger);
+  let approvalNotificationsSuppressed = Object.prototype.hasOwnProperty.call(options, "approvalNotificationsSuppressed")
+    ? Boolean(options.approvalNotificationsSuppressed)
+    : persistedPreference ?? Boolean(deliveryStore.approvalNotificationsSuppressed);
+  let startupStoreChanged = deliveryStore.approvalNotificationsSuppressed !== approvalNotificationsSuppressed;
+  deliveryStore.approvalNotificationsSuppressed = approvalNotificationsSuppressed;
+  if (approvalNotificationsSuppressed) {
+    const previousCount = deliveryStore.notifications.length;
+    deliveryStore.notifications = deliveryStore.notifications.filter(
+      (item) => item.kind !== "approval" && item.title !== "Codex等待审核"
+    );
+    startupStoreChanged ||= deliveryStore.notifications.length !== previousCount;
+  }
   let wss = null;
   let attachedServer = null;
 
@@ -123,6 +168,8 @@ export function createNativeNotificationHub(options = {}) {
       logger.error("failed to persist native notification queue", error?.message || error);
     }
   }
+
+  if (startupStoreChanged) persistDeliveryStore();
 
   function notificationPayload(notification) {
     return JSON.stringify({
@@ -256,12 +303,13 @@ export function createNativeNotificationHub(options = {}) {
     return wss;
   }
 
-  function sendNotification({ title = "服务器Codex", body = "" } = {}) {
+  function sendNotification({ title = "服务器Codex", body = "", kind = "task" } = {}) {
     const notification = {
       id: randomUUID(),
       title: String(title || "服务器Codex").slice(0, 120),
       body: notificationBody(body),
-      ts: Date.now()
+      ts: Date.now(),
+      kind: kind === "approval" ? "approval" : "task"
     };
     deliveryStore.notifications.push(notification);
     persistDeliveryStore();
@@ -283,11 +331,55 @@ export function createNativeNotificationHub(options = {}) {
     return sendNotification({ title: taskNotificationTitle(text), body: text });
   }
 
-  return { attach, sendNotification, sendTaskDone, status };
+  function sendApprovalRequired(request = {}) {
+    if (approvalNotificationsSuppressed) {
+      return { configured: Boolean(token), sent: 0, total: clients.size, suppressed: true };
+    }
+    const requestTitle = cleanText(String(request.title || "Codex 请求确认"), 120) || "Codex 请求确认";
+    const summary = cleanText(String(request.summary || request.reason || ""), 240).trim();
+    const detail = summary && summary !== requestTitle ? `：${summary}` : "";
+    return sendNotification({
+      title: "Codex等待审核",
+      body: `⚠️ ${requestTitle}${detail}。请打开 Codex 网页手动确认。`,
+      kind: "approval"
+    });
+  }
+
+  function setApprovalNotificationsSuppressed(suppressed = false) {
+    approvalNotificationsSuppressed = Boolean(suppressed);
+    deliveryStore.approvalNotificationsSuppressed = approvalNotificationsSuppressed;
+    writeApprovalNotificationPreference(preferencePath, approvalNotificationsSuppressed, logger);
+    const previousCount = deliveryStore.notifications.length;
+    if (approvalNotificationsSuppressed) {
+      deliveryStore.notifications = deliveryStore.notifications.filter((item) => item.kind !== "approval" && item.title !== "Codex等待审核");
+    }
+    persistDeliveryStore();
+    return {
+      approvalNotificationsSuppressed,
+      purgedApprovalNotifications: previousCount - deliveryStore.notifications.length
+    };
+  }
+
+  function approvalNotificationPreference() {
+    return { approvalNotificationsSuppressed };
+  }
+
+  return {
+    attach,
+    sendNotification,
+    sendTaskDone,
+    sendApprovalRequired,
+    setApprovalNotificationsSuppressed,
+    approvalNotificationPreference,
+    status
+  };
 }
 
 const nativeNotificationHub = createNativeNotificationHub();
 
 export const attachNativeNotificationWebSocket = (server) => nativeNotificationHub.attach(server);
 export const sendNativeTaskDone = (text) => nativeNotificationHub.sendTaskDone(text);
+export const sendNativeApprovalRequired = (request) => nativeNotificationHub.sendApprovalRequired(request);
+export const setApprovalNotificationsSuppressed = (suppressed) => nativeNotificationHub.setApprovalNotificationsSuppressed(suppressed);
+export const approvalNotificationPreference = () => nativeNotificationHub.approvalNotificationPreference();
 export const nativeNotificationStatus = () => nativeNotificationHub.status();

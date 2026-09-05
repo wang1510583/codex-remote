@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { CodexAppServer } from "../src/codex-server.js";
-import { externalSnapshotFromThread, isExternalTaskRunning } from "../src/external-sessions.js";
+import {
+  applyExternalRuntimeStatus, externalSnapshotFromThread, isExternalTaskRunning
+} from "../src/external-sessions.js";
 import { parseSessionFile } from "../src/threads.js";
 
 function jsonl(rows) {
@@ -28,6 +30,24 @@ test("session JSONL exposes external task lifecycle and final duration", () => {
   assert.equal(parsed.taskCompletedAt, "2026-07-13T01:00:05.000Z");
   assert.deepEqual(parsed.messages.map((message) => message.content), ["🤔 正在检查", "✅ 已完成"]);
   assert.equal(parsed.messages[1].taskDurationMs, 4000);
+});
+
+test("Live Voice realtime delegation envelopes stay hidden from thread history", () => {
+  const threadId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const delegated = [
+    "<realtime_delegation>",
+    "  <input>帮我执行任务，我先挂断。</input>",
+    "  <transcript_delta>user: 帮我执行任务</transcript_delta>",
+    "</realtime_delegation>"
+  ].join("\n");
+  const parsed = parseSessionFile(jsonl([
+    { timestamp: "2026-08-02T12:00:00.000Z", type: "session_meta", payload: { id: threadId, cwd: "/workspace" } },
+    { timestamp: "2026-08-02T12:00:01.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: delegated }] } },
+    { timestamp: "2026-08-02T12:00:02.000Z", type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "任务完成" }] } }
+  ]), `/tmp/rollout-test-${threadId}.jsonl`);
+
+  assert.deepEqual(parsed.messages.map((message) => message.content), ["✅ 任务完成"]);
+  assert.equal(parsed.fullMessages.some((message) => message.content?.includes("realtime_delegation")), false);
 });
 
 test("an unmatched recent task_started is externally running", () => {
@@ -86,9 +106,43 @@ test("an abandoned task_started becomes idle after the stale window", () => {
   assert.equal(isExternalTaskRunning({ taskRunning: false }, Date.now()), false);
 });
 
-test("external session monitor supports local and connector session providers", async () => {
+test("an authoritative idle runtime clears a recent stale JSONL running state", async () => {
+  const snapshot = externalSnapshotFromThread({
+    threadId: "99999999-9999-4999-8999-999999999999",
+    taskRunning: true,
+    activeTurnId: "aaaaaaaa-9999-4999-8999-999999999999",
+    mtimeMs: Date.now()
+  });
+  const reconciled = await applyExternalRuntimeStatus(snapshot, async (current) => ({
+    ...current,
+    running: false,
+    externalRunning: false,
+    runtimeStatus: { type: "idle" }
+  }));
+
+  assert.equal(reconciled.running, false);
+  assert.equal(reconciled.externalRunning, false);
+  assert.equal(isExternalTaskRunning(reconciled, reconciled.mtimeMs), false);
+});
+
+test("runtime reconciliation failures keep a recent external task running", async () => {
+  const snapshot = externalSnapshotFromThread({
+    threadId: "bbbbbbbb-9999-4999-8999-999999999999",
+    taskRunning: true,
+    mtimeMs: Date.now()
+  });
+  const reconciled = await applyExternalRuntimeStatus(snapshot, async () => {
+    throw new Error("shared app-server unavailable");
+  });
+
+  assert.equal(reconciled.running, true);
+  assert.equal(reconciled.externalRunning, true);
+});
+
+test("external session monitor uses the local session provider", async () => {
   const source = await readFile(new URL("../src/external-sessions.js", import.meta.url), "utf8");
-  assert.match(source, /connectorId\s*\?\s*remoteSessionProvider\(connectorId\)\s*:\s*localSessionProvider/);
+  assert.match(source, /return localSessionProvider/);
+  assert.doesNotMatch(source, /remoteSessionProvider/);
   assert.match(source, /provider\.listFiles\(\)/);
   assert.match(source, /provider\.readFile\(hit\.file\)/);
 });
