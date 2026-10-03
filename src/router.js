@@ -44,6 +44,7 @@ import {
 } from "./external-sessions.js";
 import { handleLiveVoiceHttp } from "./live-voice/index.js";
 import { requestCliApproval } from "./cli-approvals.js";
+import { handleRemoteHostHttp } from "./remote-host-routes.js";
 import {
   isLiveVoiceThreadActive,
   liveVoiceThreadSnapshot
@@ -254,6 +255,8 @@ export async function handle(req, res) {
       if (req.method === "GET" || req.method === "HEAD") return redirectToLogin(res, basePath);
       return json(res, 401, { error: "请先登录。" });
     }
+
+    if (await handleRemoteHostHttp(req, res, url)) return;
 
     if (isAuthenticated(req) && req.method === "GET" && url.pathname === "/login.html") {
       res.writeHead(302, { Location: `${basePath}/` });

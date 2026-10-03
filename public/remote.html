@@ -76,6 +76,21 @@
             <button id="closeThreads" type="button" hidden>关闭</button>
           </div>
         </div>
+        <div class="hostControls">
+          <label for="hostSelect">电脑</label>
+          <select id="hostSelect"><option value="">本机</option></select>
+          <button id="hostManage" type="button" aria-expanded="false">管理电脑</button>
+        </div>
+        <div id="hostSettings" class="hostSettings" hidden>
+          <p>连接其他电脑的 Codex。SSH 使用服务器已有的密钥和配置；也支持安全 WebSocket 连接。</p>
+          <form id="hostForm">
+            <label>电脑名称<input id="hostName" required maxlength="80" placeholder="例如：办公室电脑" /></label>
+            <label>连接地址<input id="hostUrl" required placeholder="ssh://用户名@电脑地址 或 wss://电脑地址" autocomplete="off" /></label>
+            <label>WebSocket 认证令牌（SSH 无需填写）<input id="hostToken" type="password" autocomplete="new-password" /></label>
+            <div class="panelActions"><button type="submit">添加电脑</button><button id="hostRemove" type="button">移除所选电脑</button></div>
+          </form>
+          <div id="hostStatus" role="status" aria-live="polite"></div>
+        </div>
         <div id="threadExistingView">
           <div id="threadList" class="threadList"><div class="remoteEvent">点击刷新加载会话</div></div>
         </div>

@@ -2208,3 +2208,9 @@ textarea:focus {
     grid-column: 1 / -1;
   }
 }
+:root .hostControls { display: flex; align-items: center; gap: 8px; padding: 10px 12px; flex-wrap: wrap; }
+:root .hostControls select { flex: 1; min-width: 120px; max-width: 100%; padding: 8px; color: inherit; background: var(--panel, #202124); border: 1px solid #6666; border-radius: 8px; }
+:root .hostSettings { padding: 0 12px 12px; font-size: 13px; }
+:root .hostSettings label { display: grid; gap: 5px; margin: 10px 0; }
+:root .hostSettings input { box-sizing: border-box; width: 100%; padding: 9px; border-radius: 8px; border: 1px solid #6666; color: inherit; background: transparent; }
+:root #hostStatus { margin-top: 8px; overflow-wrap: anywhere; }

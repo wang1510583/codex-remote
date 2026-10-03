@@ -19,6 +19,21 @@ Android 语音 App <--HTTP+WS--> Live Voice 兼容层 <--WebRTC信令--> 专用 
 - 模块化：`server.js` 入口 + `src/` 下按职责拆分的模块（router/runner/codex-server/store/live-voice/transport 等）
 - 本机会话可并行执行：不同会话各用独立 app-server 客户端；同一会话的新消息仍按 `queue` / `steer` 设置处理。
 
+## 其他电脑的会话
+
+打开网页的会话面板，在「电脑 → 管理电脑」中添加连接，再选择该电脑查看线程。每台电脑的选择、草稿和实时事件独立；远端连接失败会显示错误，不会回退到本机执行。
+
+连接方式：
+
+- **SSH**：输入 `ssh://SSH别名`、`ssh://用户名@电脑地址` 或 `ssh://用户名@电脑地址:端口`。后端使用运行网页服务的系统用户的 SSH 配置和密钥；省略端口会沿用 SSH 配置。需要事先配置免密登录并验证主机密钥。远端 SSH 会话的 PATH 中必须能运行 `codex`；后端通过 SSH 启动 `codex app-server --listen stdio://`。
+- **WebSocket**：输入 `wss://电脑地址:端口`，以及远端要求的 Bearer 令牌。已建立的 SSH 隧道也可填写 `ws://127.0.0.1:本地端口`。端点必须是 Codex app-server，不是本项目的网页地址。
+
+例如，在 Windows 开启并配置 OpenSSH Server 后，先从网页服务器验证 `ssh Windows用户名@Tailscale地址` 能免密登录，再添加对应 `ssh://` 地址。Tailscale 提供网络连通性，不会自动开放 SSH 或 Codex 接口。桌面端保存的连接也不会自动导入。
+
+支持远端会话列表、历史与工具输出、新建、继续对话、运行中的引导、`/stop`、网页发起任务的审批、重命名和删除。列表最多读取 10 页 / 1000 条；不会加载归档会话。SSH 启动的独立 app-server 对其他客户端正在执行的任务的可见性取决于远端 Codex 版本与共享运行时；需要完整共享状态时应连接远端共享 app-server 的 WebSocket 入口。
+
+远端文件管理、附件上传、后台排队和修改模型设置暂未接入；模型设置可查看。Windows 本地图片在历史中显示为图片占位，不会误读网页服务器上同名路径。连接配置保存在 `data/remote-hosts.json`（权限 `0600`，认证令牌仅留在服务端）；选择和草稿保存在 `data/remote-host-state.json`。移除连接不删除远端会话。
+
 ## 要求
 
 - Node.js 18+

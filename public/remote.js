@@ -1,4 +1,6 @@
 const state = {
+  connectorId: localStorage.getItem("codex-remote-host") || "",
+  hosts: [],
   running: false,
   reconnecting: false,
   externalRunning: false,
@@ -617,8 +619,9 @@ function updateMeta() {
               ? "Live Voice 已断线 · 后台任务继续执行 · 等待重连"
               : "Live Voice 已断线 · 等待安卓自动重连"))
       : (state.reconnecting ? "Codex 正在重新连接 · 任务继续等待" : normalModeText);
-  els.meta.textContent = title;
-  els.meta.title = title;
+  const hostName = state.hosts.find((host) => host.id === state.connectorId)?.name;
+  els.meta.textContent = hostName ? `${hostName} · ${title}` : title;
+  els.meta.title = els.meta.textContent;
   els.mode.textContent = modeText;
   els.mode.title = modeText;
 }
@@ -823,7 +826,7 @@ function updateVisualViewport() {
 }
 
 function draftKeyFor(threadId = state.threadId, cwd = state.cwd) {
-  return `${draftPrefix}${threadId || `new:${cwd || "root"}`}`;
+  return `${draftPrefix}${state.connectorId ? `${state.connectorId}:` : ""}${threadId || `new:${cwd || "root"}`}`;
 }
 
 function saveDraft() {
@@ -852,13 +855,15 @@ function restoreDraftForCurrentState(serverDraft) {
 
 function scheduleServerDraft(text, threadId, cwd) {
   clearTimeout(draftTimer);
-  draftTimer = setTimeout(() => saveServerDraft(text, threadId, cwd), 400);
+  const connectorId = state.connectorId;
+  draftTimer = setTimeout(() => saveServerDraft(text, threadId, cwd, connectorId), 400);
 }
 
-async function saveServerDraft(text, threadId, cwd) {
+async function saveServerDraft(text, threadId, cwd, connectorId = state.connectorId) {
   clearTimeout(draftTimer);
   try {
     await request("/api/remote/draft", {
+      connectorId,
       method: "POST",
       body: JSON.stringify({ text, threadId, cwd })
     });
@@ -928,6 +933,7 @@ function isImageFile(file) {
 }
 
 function renderFileLink(file, label = file) {
+  if (state.connectorId) return `<code>${escapeHtml(label)}</code>`;
   const href = downloadUrl(file);
   if (isImageFile(file)) {
     return `<a class="imageLink" href="${href}" target="_blank" rel="noopener noreferrer" download title="打开或保存图片"><img class="messageImage" src="${inlineUrl(file)}" alt="${escapeHtml(label)}"></a>`;
@@ -1076,6 +1082,7 @@ function renderUploadList() {
 }
 
 async function uploadFiles(files) {
+  if (state.connectorId) { appendEvent("远端会话暂不支持上传附件。"); return; }
   if (!files.length) return;
   const form = new FormData();
   for (const [index, file] of files.entries()) {
@@ -1183,6 +1190,7 @@ function filenameFromContentDisposition(value = "") {
 }
 
 async function uploadPichomeAttachment(file) {
+  if (state.connectorId) throw new Error("远端会话暂不支持上传附件。");
   if (file.size <= 49 * 1024 * 1024) {
     await uploadFiles([file]);
     return;
@@ -1743,6 +1751,7 @@ function shouldPersistLocalAssistantBubble(final, meta = {}) {
 
 function persistAssistantNotice(text, messageId) {
   rememberLocalNotice(text, messageId);
+  if (state.connectorId) return;
   request("/api/remote/notice", {
     method: "POST",
     body: JSON.stringify({ message: text, messageId })
@@ -1912,11 +1921,16 @@ function renderCommandList() {
 }
 
 async function request(url, options = {}) {
-  const finalOptions = { ...options };
+  const { connectorId = state.connectorId, ...finalOptions } = options;
+  const path = url.split("?")[0];
+  const globalRequest = ["/api/remote/hosts", "/api/remote/changes"].includes(path)
+    || path.startsWith("/api/remote/push/") || path.startsWith("/api/remote/notifications/");
+  if (connectorId && !globalRequest) url += `${url.includes("?") ? "&" : "?"}connectorId=${encodeURIComponent(connectorId)}`;
   const response = await fetch(`${basePath}${url}`, {
     headers: { "Content-Type": "application/json" },
     ...finalOptions
   });
+  if (!globalRequest && connectorId !== state.connectorId) throw new Error("电脑已切换，已忽略旧电脑的响应。");
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     if (response.status === 401) location.href = `${basePath}/login.html`;
@@ -1924,6 +1938,51 @@ async function request(url, options = {}) {
   }
   if (response.status === 204) return null;
   return response.json();
+}
+
+async function loadHosts() {
+  const data = await request("/api/remote/hosts");
+  state.hosts = data.hosts || [];
+  const select = document.querySelector("#hostSelect");
+  select.replaceChildren(new Option("本机", ""), ...state.hosts.map((host) => new Option(host.name, host.id)));
+  if (state.connectorId && !state.hosts.some((host) => host.id === state.connectorId)) {
+    // Do not silently route an open remote conversation to the local machine.
+    select.add(new Option("已移除的电脑（请选择）", state.connectorId));
+  }
+  select.value = state.connectorId;
+  document.querySelector("#hostRemove").disabled = !state.connectorId;
+  updateHostControls();
+}
+
+function updateHostControls() {
+  els.threadFilesToggle.hidden = Boolean(state.connectorId);
+  els.uploadButton.disabled = Boolean(state.connectorId);
+  updateMeta();
+}
+
+async function switchHost(id) {
+  saveDraft();
+  clearTimeout(draftTimer);
+  saveServerDraft(composerText(), state.threadId, state.cwd);
+  state.connectorId = id;
+  localStorage.setItem("codex-remote-host", id);
+  stateLoadGeneration += 1;
+  threadListRequestGeneration += 1;
+  state.threadListCache = null;
+  state.localNotices = [];
+  state.uploads = [];
+  state.modelOptions = [];
+  state.completedUnreadThreads.clear();
+  state.draftKey = "";
+  state.threadId = "";
+  state.cwd = "";
+  els.input.value = "";
+  renderUploadList();
+  renderState({ threadId: "", messages: [], running: false, pendingApprovals: [], fileLinkRoots: [], model: "", reasoningEffort: "", contextUsage: null });
+  updateHostControls();
+  document.querySelector("#hostRemove").disabled = !id;
+  document.querySelector("#hostSelect").value = id;
+  await Promise.all([loadState(), openThreads()]);
 }
 
 function isCurrentStateSnapshot(generation, snapshotEventSeq) {
@@ -2078,7 +2137,7 @@ function renderModelSettings(data = {}) {
     button.className = `modelOption${active ? " active" : ""}`;
     button.type = "button";
     button.dataset.model = item.model || item.id || "";
-    button.disabled = Boolean(data.running || active);
+    button.disabled = Boolean(state.connectorId || data.running || active);
     button.innerHTML = "<strong></strong><small></small>";
     button.querySelector("strong").textContent = item.displayName || item.model || item.id;
     button.querySelector("small").textContent = item.description || item.model || item.id;
@@ -2093,13 +2152,13 @@ function renderModelSettings(data = {}) {
     button.className = `effortOption${active ? " active" : ""}`;
     button.type = "button";
     button.dataset.effort = option.reasoningEffort || "";
-    button.disabled = Boolean(data.running || active);
+    button.disabled = Boolean(state.connectorId || data.running || active);
     button.textContent = `${option.label || reasoningEffortLabel(option.reasoningEffort)}${isDefault ? " · 默认" : ""}`;
     button.title = option.description || "";
     button.addEventListener("click", () => changeModelSettings({ reasoningEffort: button.dataset.effort }));
     els.modelSettingsEfforts.appendChild(button);
   }
-  els.modelSettingsStatus.textContent = data.running ? "当前会话正在处理，结束或中断后可切换。" : "";
+  els.modelSettingsStatus.textContent = state.connectorId ? "远端模型设置当前仅供查看，请在对应电脑上修改。" : (data.running ? "当前会话正在处理，结束或中断后可切换。" : "");
   return true;
 }
 
@@ -2591,6 +2650,16 @@ async function deleteProjectItem(file = "", name = "", type = "") {
 }
 
 async function openNewSessionPicker(dir = undefined) {
+  if (state.connectorId) {
+    const cwd = prompt("输入所选电脑上的项目绝对路径", state.cwd || "");
+    if (!cwd?.trim()) return;
+    try {
+      const data = await request("/api/remote/new", { method: "POST", body: JSON.stringify({ cwd: cwd.trim() }) });
+      renderState(data);
+      els.threadPanel.hidden = true;
+    } catch (error) { appendEvent(error.message); }
+    return;
+  }
   const nextDir = dir === undefined ? (state.newCwd || state.cwd || "") : dir;
   state.newCwd = nextDir || "";
   els.threadPanel.hidden = false;
@@ -2688,6 +2757,7 @@ async function openThreads({ load = true } = {}) {
     els.threadList.innerHTML = '<div class="remoteEvent">加载中...</div>';
   }
   try {
+    if (state.threadListCache && (state.threadListCache.connectorId || "") !== state.connectorId) state.threadListCache = null;
     const data = load ? await request("/api/remote/threads") : state.threadListCache;
     if (requestGeneration !== threadListRequestGeneration) return;
     if (!data) return;
@@ -2716,8 +2786,9 @@ async function openThreads({ load = true } = {}) {
       button.innerHTML = '<strong></strong><small class="threadMeta"></small><small class="threadPath"></small>';
       button.querySelector("strong").textContent = thread.name ? `📌 ${thread.title}` : thread.title;
       button.querySelector(".threadMeta").textContent = threadSubtitle(thread, isActive);
-      button.querySelector(".threadPath").textContent = thread.cwd || "";
-      button.addEventListener("click", () => selectThread(thread.threadId));
+      const hostName = state.hosts.find((host) => host.id === state.connectorId)?.name || "本机";
+      button.querySelector(".threadPath").textContent = `${hostName} · ${thread.cwd || ""}`;
+      button.addEventListener("click", () => selectThread(thread.threadId).catch((error) => { els.threadList.textContent = error.message; }));
 
       const actions = document.createElement("div");
       actions.className = "threadActions";
@@ -2737,10 +2808,16 @@ async function openThreads({ load = true } = {}) {
       row.append(button, actions);
       els.threadList.appendChild(row);
     }
+    if (data.truncated) {
+      const note = document.createElement("div");
+      note.className = "remoteEvent";
+      note.textContent = "已显示最近一批远端会话。";
+      els.threadList.appendChild(note);
+    }
   } catch (error) {
     if (requestGeneration !== threadListRequestGeneration) return;
     els.threadList.innerHTML = "";
-    els.threadList.innerHTML = `<div class="remoteEvent">错误：${error.message}</div>`;
+    els.threadList.textContent = `错误：${error.message}`;
   }
 }
 
@@ -3291,8 +3368,10 @@ function submitApprovalFromModal() {
 
 function handleRemoteEvent(data) {
   if (!rememberRemoteEvent(data)) return;
+  if ((data.connectorId || "") !== state.connectorId) return;
   if (data.type === "approval_request") { queueApprovalRequest(data); return; }
   if (data.type === "approval_resolved") { resolveApprovalRequest(data.requestId, data.approvalScope); return; }
+  if (state.connectorId && data.threadId && data.threadId !== state.threadId) return;
   if (data.type === "model_settings_update") {
     if (data.threadId !== state.threadId) return;
     applyIncomingModelSettings(data);
@@ -3452,7 +3531,8 @@ function updateRealtimeReconcile() {
   realtimeReconcileTimer = setTimeout(async () => {
     realtimeReconcileTimer = 0;
     if (document.visibilityState !== "hidden") {
-      await resyncEvents().catch(() => loadState().catch(() => {}));
+      if (state.connectorId) await loadState().catch(() => {});
+      else await resyncEvents().catch(() => loadState().catch(() => {}));
     }
     updateRealtimeReconcile();
   }, 3000);
@@ -3484,6 +3564,7 @@ function connectEvents() {
 
 function resyncWhenActive() {
   if (document.visibilityState === "hidden") return;
+  if (state.connectorId) { loadState().catch(() => {}); return; }
   // Replaying missed events preserves the live DOM bubbles. A full state
   // rebuild is only the fallback (or is requested by resyncEvents when the
   // replay window has expired).
@@ -3530,7 +3611,7 @@ async function sendMessage(mode = "steer") {
   try {
     const result = await request("/api/remote/send", {
       method: "POST",
-      body: JSON.stringify({ message: outgoingMessage, followMode: sendMode })
+      body: JSON.stringify({ message: outgoingMessage, followMode: sendMode, threadId: state.threadId })
     });
     state.uploads = [];
     renderUploadList();
@@ -3555,6 +3636,11 @@ async function sendMessage(mode = "steer") {
       setRunning(true, result.queueLength, result.queueMessages, result.followMode, result.steerLength, result.steerMessages, result.contextUsage, result.runningThreads, result.reconnecting, result.externalRunning);
     }
   } catch (error) {
+    if (state.connectorId && !composerText()) {
+      els.input.value = message;
+      saveDraft();
+      autosizeInput();
+    }
     upsertAssistantMessage(`错误：${error.message}`, true);
     setRunning(
       stateBeforeSend.running,
@@ -3581,7 +3667,7 @@ async function interruptCurrentTask() {
   try {
     const result = await request("/api/remote/send", {
       method: "POST",
-      body: JSON.stringify({ message: "/stop", followMode: "steer" })
+      body: JSON.stringify({ message: "/stop", followMode: "steer", threadId: state.threadId })
     });
     setRunning(
       result.running,
@@ -3998,13 +4084,63 @@ els.newChat?.addEventListener("click", () => {
 });
 
 renderCommandList();
+async function refreshIdleRemoteHost() {
+  try {
+    if (state.connectorId && !state.running && document.visibilityState !== "hidden") await loadState();
+  } catch { /* Keep the last readable transcript while a computer is offline. */ }
+  finally { setTimeout(refreshIdleRemoteHost, 5000); }
+}
+setTimeout(refreshIdleRemoteHost, 5000);
+document.querySelector("#hostSelect").addEventListener("change", (event) => {
+  switchHost(event.target.value).catch((error) => {
+    document.querySelector("#hostStatus").textContent = error.message;
+    document.querySelector("#hostSettings").hidden = false;
+  });
+});
+document.querySelector("#hostManage").addEventListener("click", (event) => {
+  const settings = document.querySelector("#hostSettings");
+  settings.hidden = !settings.hidden;
+  event.currentTarget.setAttribute("aria-expanded", String(!settings.hidden));
+});
+document.querySelector("#hostForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.target.querySelector('[type="submit"]');
+  button.disabled = true;
+  const status = document.querySelector("#hostStatus");
+  status.textContent = "正在添加电脑…";
+  try {
+    const { host } = await request("/api/remote/hosts", { method: "POST", body: JSON.stringify({
+      name: document.querySelector("#hostName").value,
+      url: document.querySelector("#hostUrl").value,
+      token: document.querySelector("#hostToken").value
+    }) });
+    event.target.reset();
+    await loadHosts();
+    await switchHost(host.id);
+    status.textContent = "已连接，可选择这台电脑上的会话。";
+  } catch (error) { status.textContent = error.message; }
+  finally { button.disabled = false; }
+});
+document.querySelector("#hostRemove").addEventListener("click", async () => {
+  if (!state.connectorId || !confirm("移除这台电脑的连接？远端会话不会删除。")) return;
+  try {
+    await request("/api/remote/hosts", { method: "DELETE", body: JSON.stringify({ id: state.connectorId }) });
+    await switchHost("");
+    await loadHosts();
+    document.querySelector("#hostStatus").textContent = "已移除连接。";
+  } catch (error) { document.querySelector("#hostStatus").textContent = error.message; }
+});
 (state.autoApprove ? syncAutoApprovalNotificationPreference() : Promise.resolve())
   .catch(() => null)
+  .then(() => loadHosts().catch((error) => {
+    document.querySelector("#hostStatus").textContent = `电脑列表暂不可用：${error.message}`;
+    if (state.connectorId) throw error;
+  }))
   .then(loadState)
-  .then(connectEvents)
   .catch((error) => {
     els.meta.textContent = error.message;
-  });
+  })
+  .then(connectEvents);
 restorePushSubscription();
 refreshNativeNotificationStatus().catch(() => {});
 autosizeInput();
