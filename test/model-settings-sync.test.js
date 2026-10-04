@@ -18,6 +18,13 @@ test("supplemental models are added to the selectable model list with High effor
     displayName: "GPT 5.6 Sol"
   }]);
   const gemini = options.find((item) => item.model === "gemini-3.6-flash-high");
+  const astra = options.find((item) => item.model === "gpt-6-astra");
+
+  assert.ok(astra);
+  assert.equal(astra.id, "gpt-6-astra");
+  assert.equal(astra.displayName, "GPT-6 Astra");
+  assert.equal(astra.defaultReasoningEffort, "high");
+  assert.deepEqual(astra.supportedReasoningEfforts, [{ reasoningEffort: "high" }]);
 
   assert.ok(gemini);
   assert.equal(gemini.id, "gemini-3.6-flash-high");
@@ -41,6 +48,11 @@ test("supplemental models are added to the selectable model list with High effor
 });
 
 test("a model already reported by Codex is not duplicated by the supplemental list", () => {
+  const reportedAstra = {
+    id: "gpt-6-astra",
+    model: "gpt-6-astra",
+    displayName: "Provider Astra"
+  };
   const reportedGemini = {
     id: "gemini-3.6-flash-high",
     model: "gemini-3.6-flash-high",
@@ -56,12 +68,13 @@ test("a model already reported by Codex is not duplicated by the supplemental li
     model: "deepseek-v4-flash",
     displayName: "Provider DeepSeek"
   };
-  const options = withSupplementalModelOptions([reportedGemini, reportedMimo, reportedDeepseek]);
+  const options = withSupplementalModelOptions([reportedAstra, reportedGemini, reportedMimo, reportedDeepseek]);
 
-  assert.equal(options.length, 3);
-  assert.equal(options[0], reportedGemini);
-  assert.equal(options[1], reportedMimo);
-  assert.equal(options[2], reportedDeepseek);
+  assert.equal(options.length, 4);
+  assert.equal(options[0], reportedAstra);
+  assert.equal(options[1], reportedGemini);
+  assert.equal(options[2], reportedMimo);
+  assert.equal(options[3], reportedDeepseek);
 });
 
 test("Gemini 3.6 Flash High can be selected and applies High effort", async () => {

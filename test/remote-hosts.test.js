@@ -8,7 +8,7 @@ import { WebSocketServer } from "ws";
 import { RemoteHosts, remoteThreadView, validateHost } from "../src/remote-hosts.js";
 import { handleRemoteHostHttp } from "../src/remote-host-routes.js";
 
-async function fixture(t) {
+async function fixture(t, behavior = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-remote-hosts-"));
   const requests = [];
   const sockets = new Set();
@@ -33,6 +33,21 @@ async function fixture(t) {
       const { id, method, params } = request;
       if (!id) return;
       let result = {};
+      if (behavior.writerLocked && method === "thread/resume") {
+        socket.send(JSON.stringify({ id, error: { code: -32600, message: "thread already has an active writer" } })); return;
+      }
+      if (behavior.emptyReadUnsupported && method === "thread/read" && params.includeTurns && !thread.turns.length) {
+        socket.send(JSON.stringify({ id, error: { code: -32600, message: "list_turns is not supported yet" } })); return;
+      }
+      if (method === "thread/start") result = { thread };
+      if (method === "model/list") result = { data: [
+        { model: "remote-model", supportedReasoningEfforts: [{ reasoningEffort: "medium" }, { reasoningEffort: "high" }], defaultReasoningEffort: "medium" },
+        { model: "other-model", supportedReasoningEfforts: [{ reasoningEffort: "high" }], defaultReasoningEffort: "high" }
+      ] };
+      if (method === "thread/settings/update") {
+        if (params.model) thread.model = params.model;
+        if (params.effort) thread.reasoningEffort = params.effort;
+      }
       if (method === "thread/list") result = { data: [thread], nextCursor: null };
       if (method === "thread/read" || method === "thread/resume") result = { thread };
       if (method === "turn/start") result = { turn: { id: "new-turn" } };
@@ -150,4 +165,111 @@ test("removing a connection cleans its selection but does not delete remote conv
   assert.equal(requests.some((request) => request.method === "thread/delete"), false);
   const saved = JSON.parse(await readFile(path.join(directory, "remote-host-state.json"), "utf8"));
   assert.equal(saved[host.id], undefined);
+});
+
+test("remote model settings read metadata without acquiring the desktop writer lock", async (t) => {
+  const { hosts, host, requests, thread } = await fixture(t);
+  Object.assign(thread, { model: "remote-model", reasoningEffort: "medium", serviceTier: null });
+  await hosts.select(host.id, thread.id);
+  const server = await hosts.control(host.id);
+  server.readThreadSettings = async () => { throw new Error("thread already has an active writer"); };
+  const response = { writeHead(status) { this.status = status; }, end(body) { this.body = JSON.parse(body); } };
+  await handleRemoteHostHttp({ method: "GET" }, response, new URL(`http://localhost/api/remote/model-settings?connectorId=${host.id}`), hosts);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.model, "remote-model");
+  assert.equal(response.body.reasoningEffort, "medium");
+  assert.equal(response.body.serviceTier, null);
+  assert.ok(requests.some(r => r.method === "model/list"));
+  assert.equal(requests.some(r => r.method === "thread/resume" || r.method === "config/read"), false);
+  delete thread.model;
+  delete thread.reasoningEffort;
+  await handleRemoteHostHttp({ method: "GET" }, response, new URL(`http://localhost/api/remote/model-settings?connectorId=${host.id}`), hosts);
+  assert.equal(response.body.model, "");
+  assert.equal(response.body.reasoningEffort, "");
+  assert.equal(requests.some(r => r.method === "thread/resume"), false);
+});
+
+
+test("remote settings validate catalog, update then verify without affecting another host", async t => {
+  const { hosts, host, thread, requests } = await fixture(t);
+  Object.assign(thread, { model: "remote-model", reasoningEffort: "medium" });
+  await hosts.select(host.id, thread.id);
+  await assert.rejects(hosts.updateModelSettings(host.id, { threadId: "stale", model: "other-model" }), /会话已切换/);
+  await assert.rejects(hosts.updateModelSettings(host.id, { model: "unknown" }), /未返回该模型/);
+  await assert.rejects(hosts.updateModelSettings(host.id, { reasoningEffort: "invalid" }), /不支持/);
+  assert.equal(requests.some(r => r.method === "thread/settings/update"), false);
+  const result = await hosts.updateModelSettings(host.id, { threadId: thread.id, model: "other-model" });
+  assert.equal(result.model, "other-model");
+  assert.equal(result.reasoningEffort, "high");
+  const update = requests.find(r => r.method === "thread/settings/update");
+  assert.deepEqual(update.params, { threadId: thread.id, model: "other-model", effort: "high" });
+});
+
+test("desktop writer lock is reported without changing settings or terminating desktop", async t => {
+  const { hosts, host, thread, requests } = await fixture(t, { writerLocked: true });
+  Object.assign(thread, { model: "remote-model", reasoningEffort: "medium" });
+  await hosts.select(host.id, thread.id);
+  await assert.rejects(hosts.updateModelSettings(host.id, { reasoningEffort: "high" }), e => e.statusCode === 409 && /桌面端占用/.test(e.message));
+  assert.equal(requests.some(r => r.method === "thread/settings/update"), false);
+  assert.equal(hosts.starting.size, 0);
+});
+
+test("new empty remote thread can be configured and deleted on its owning connection", async t => {
+  const { hosts, host, thread, requests } = await fixture(t, { emptyReadUnsupported: true });
+  Object.assign(thread, { model: "remote-model", reasoningEffort: "medium", turns: [] });
+  await assert.rejects(hosts.createThread(host.id, { cwd: "relative/path" }), /绝对路径/);
+  const created = await hosts.createThread(host.id, { cwd: "C:\\project" });
+  assert.equal(created.threadId, thread.id);
+  assert.deepEqual(created.messages, []);
+  const writer = hosts.writers.get(`${host.id}:${thread.id}`);
+  const result = await hosts.updateModelSettings(host.id, { threadId: thread.id, model: "other-model" });
+  assert.equal(result.reasoningEffort, "high");
+  assert.equal(requests.some(r => r.method === "thread/resume"), false);
+  assert.equal(hosts.writers.get(`${host.id}:${thread.id}`), writer);
+  await hosts.draft(host.id, { threadId: thread.id, text: "draft" });
+  await hosts.deleteThread(host.id, thread.id);
+  assert.equal(hosts.writers.size, 0);
+  assert.equal((await hosts.saved(host.id)).threadId, "");
+  assert.equal((await hosts.saved(host.id)).drafts[thread.id], undefined);
+  assert.ok(requests.some(r => r.method === "thread/delete"));
+});
+
+test("running remote turns block settings and delete operations", async t => {
+  const { hosts, host, thread, requests } = await fixture(t);
+  thread.status.type = "active";
+  await hosts.select(host.id, thread.id);
+  await assert.rejects(hosts.updateModelSettings(host.id, { model: "other-model" }), /中断当前回合/);
+  await assert.rejects(hosts.deleteThread(host.id, thread.id), /运行中的会话/);
+  assert.equal(requests.some(r => ["thread/delete", "thread/settings/update"].includes(r.method)), false);
+  assert.equal(hosts.starting.size, 0);
+});
+
+test("host list reports per-host connectivity and keeps authentication secrets private", async t => {
+  const { hosts, host } = await fixture(t);
+  const offline = await hosts.add({ name: "离线电脑", url: "wss://offline.example", token: "private-token" });
+  const factory = hosts.serverFactory;
+  let closed = false;
+  hosts.serverFactory = h => h.id === offline.id ? {
+    ensureStarted: async () => { assert.equal(h.token, "private-token"); throw Error("offline"); },
+    close: () => { closed = true; }
+  } : factory(h);
+  const list = await hosts.list();
+  assert.equal(list.find(h => h.id === host.id).online, true);
+  assert.equal(list.find(h => h.id === offline.id).online, false);
+  assert.equal(closed, true);
+  assert.equal(JSON.stringify(list).includes("private-token"), false);
+  assert.equal(JSON.stringify(list).includes("test-secret"), false);
+});
+
+test("refresh probes an existing connection without closing its controller", async t => {
+  const { hosts, host, requests } = await fixture(t);
+  const server = await hosts.control(host.id);
+  assert.equal((await hosts.list())[0].online, true);
+  assert.ok(requests.some(r => r.method === "thread/loaded/list"));
+  assert.equal(server.transport.alive, true);
+  const request = server.request.bind(server);
+  server.request = async method => { throw Error("network lost"); };
+  assert.equal((await hosts.list())[0].online, false);
+  assert.equal(server.transport.alive, true);
+  server.request = request;
 });

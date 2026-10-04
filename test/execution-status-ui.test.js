@@ -47,7 +47,7 @@ test("real Codex stream events supply analysis, tool, patch, and blocked-stage d
   assert.match(events, /data\.type === "message"[\s\S]*?正在分析/);
 });
 
-test("the live execution status supports click and Escape interruption", async () => {
+test("the live execution status is display-only and Escape still interrupts", async () => {
   const source = await readFile(new URL("../public/remote.js", import.meta.url), "utf8");
   const interrupt = source.slice(
     source.indexOf("async function interruptCurrentTask("),
@@ -60,6 +60,8 @@ test("the live execution status supports click and Escape interruption", async (
 
   assert.match(interrupt, /message: "\/stop"/);
   assert.match(interrupt, /taskInterruptPending/);
+  assert.match(source, /status = document\.createElement\("div"\)/);
+  assert.doesNotMatch(source.slice(source.indexOf("function renderTaskExecutionStatus("), source.indexOf("function syncTaskExecutionStatus(")), /addEventListener\("click"/);
   assert.match(escapeHandler, /!dismissedOverlay && taskExecutionCanInterrupt\(\)/);
   assert.match(escapeHandler, /interruptCurrentTask\(\)/);
 });

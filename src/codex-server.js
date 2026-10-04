@@ -12,6 +12,15 @@ import { sendNativeApprovalRequired } from "./native-notifications.js";
 
 export const supplementalModelOptions = Object.freeze([
   Object.freeze({
+    id: "gpt-6-astra",
+    model: "gpt-6-astra",
+    displayName: "GPT-6 Astra",
+    defaultReasoningEffort: "high",
+    supportedReasoningEfforts: Object.freeze([
+      Object.freeze({ reasoningEffort: "high" })
+    ])
+  }),
+  Object.freeze({
     id: "gemini-3.6-flash-high",
     model: "gemini-3.6-flash-high",
     displayName: "Gemini 3.6 Flash High",

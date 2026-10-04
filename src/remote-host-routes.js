@@ -25,8 +25,10 @@ export async function handleRemoteHostHttp(req, res, url, hosts = remoteHosts) {
     else if (route === "model-settings") {
       const state = await hosts.state(id);
       const server = await hosts.control(id);
+      // state() uses thread/read. Never resume a desktop-owned thread merely
+      // to display settings: resuming requires its exclusive writer lock.
       const settings = state.threadId
-        ? await server.readThreadSettings(state.threadId, state.cwd)
+        ? { model: state.model, reasoningEffort: state.reasoningEffort }
         : await server.configuredModelSettings("");
       result = { ...state, ...settings, models: await server.modelOptions() };
     } else if (route === "usage") {
@@ -36,6 +38,7 @@ export async function handleRemoteHostHttp(req, res, url, hosts = remoteHosts) {
   } else if (req.method === "POST") {
     const body = await readBody(req);
     if (route === "select") result = await hosts.select(id, body.threadId);
+    else if (route === "model-settings") result = await hosts.updateModelSettings(id, body);
     else if (route === "draft") result = await hosts.draft(id, body);
     else if (route === "send") result = await hosts.send(id, body);
     else if (route === "more") result = await hosts.state(id, { full, limit: 10000 });
@@ -43,16 +46,11 @@ export async function handleRemoteHostHttp(req, res, url, hosts = remoteHosts) {
     else if (["new", "name", "delete"].includes(route)) {
       const server = await hosts.control(id);
       if (route === "new") {
-        const cwd = String(body.cwd || "").trim();
-        if (!cwd || cwd.length > 4096) throw Object.assign(new Error("请输入远端项目的绝对路径。"), { statusCode: 400 });
-        const created = await server.request("thread/start", { cwd });
-        result = await hosts.select(id, created.thread.id);
+        result = await hosts.createThread(id, body);
       } else {
         const view = await hosts.read(id, body.threadId);
         if (route === "delete") {
-          if (view.running || hosts.runs.get(`${id}:${body.threadId}`)?.running) throw Object.assign(new Error("运行中的会话不能删除。"), { statusCode: 409 });
-          await server.request("thread/delete", { threadId: body.threadId });
-          if ((await hosts.saved(id)).threadId === body.threadId) await hosts.save(id, { threadId: "" });
+          await hosts.deleteThread(id, body.threadId);
           result = { ok: true };
         } else {
           const name = String(body.name || "").trim().slice(0, 200);

@@ -239,23 +239,8 @@ textarea:focus {
   text-align: left;
   white-space: normal;
   overflow-wrap: anywhere;
-  cursor: pointer;
-  animation: taskExecutionPulse 1.8s ease-in-out infinite;
-}
-
-.taskExecutionStatus:hover:not(:disabled),
-.taskExecutionStatus:focus-visible {
-  color: #e7e2d7;
-}
-
-.taskExecutionStatus:focus-visible {
-  outline: 1px solid #8b83ca;
-  outline-offset: 3px;
-}
-
-.taskExecutionStatus:disabled {
-  color: #8f8a82;
   cursor: default;
+  animation: taskExecutionPulse 1.8s ease-in-out infinite;
 }
 
 @keyframes taskExecutionPulse {

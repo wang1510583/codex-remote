@@ -409,12 +409,12 @@ export async function handle(req, res) {
       return json(res, 200, changesSince(afterSeq));
     }
 
-    if (req.method === "GET" && url.pathname === "/api/remote/model-settings") {
+    if (req.method === "GET" && url.pathname === "/api/remote/model-settings" && !url.searchParams.get("connectorId")) {
       const connectorId = "";
       return json(res, 200, await sessionModelSettingsPayload(connectorId));
     }
 
-    if (req.method === "POST" && url.pathname === "/api/remote/model-settings") {
+    if (req.method === "POST" && url.pathname === "/api/remote/model-settings" && !url.searchParams.get("connectorId")) {
       const body = await readBody(req);
       const connectorId = "";
       return json(res, 200, { ok: true, ...await updateSessionModelSettings(body, connectorId) });

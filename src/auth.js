@@ -23,7 +23,7 @@ export function routeBase(pathname, req = null) {
 }
 
 export function isPublicPath(pathname) {
-  return ["/login.html", "/styles.css", "/site.webmanifest", "/icon.svg", "/pwa.js", "/sw.js", "/api/remote/login", "/api/remote/auth"].includes(pathname);
+  return ["/login.html", "/styles.css", "/site.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png", "/pwa.js", "/sw.js", "/api/remote/login", "/api/remote/auth"].includes(pathname);
 }
 
 export function redirectToLogin(res, basePath = "") {

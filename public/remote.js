@@ -1637,12 +1637,8 @@ function renderTaskExecutionStatus() {
     return;
   }
   if (!status) {
-    status = document.createElement("button");
-    status.type = "button";
+    status = document.createElement("div");
     status.className = "taskExecutionStatus";
-    status.addEventListener("click", () => {
-      if (taskExecutionCanInterrupt()) interruptCurrentTask();
-    });
   }
   const startedAtMs = Number.isFinite(state.currentTaskStartedAtMs)
     ? state.currentTaskStartedAtMs
@@ -1651,9 +1647,8 @@ function renderTaskExecutionStatus() {
   const canInterrupt = taskExecutionCanInterrupt();
   const suffix = canInterrupt ? " • Esc to interrupt" : "";
   status.textContent = `• ${taskExecutionLabel()} (${elapsed}${suffix}) — ${taskExecutionDetailText()}`;
-  status.disabled = !canInterrupt;
   status.setAttribute("aria-live", "polite");
-  status.title = canInterrupt ? "点击或按 Esc 中断当前任务" : taskExecutionLabel();
+  status.title = canInterrupt ? "进度显示；按 Esc 可中断当前任务" : taskExecutionLabel();
   // Appending an existing node moves it after the newest bubble. This keeps
   // the status attached to the live end of the transcript as replies stream.
   els.log.appendChild(status);
@@ -1944,7 +1939,9 @@ async function loadHosts() {
   const data = await request("/api/remote/hosts");
   state.hosts = data.hosts || [];
   const select = document.querySelector("#hostSelect");
-  select.replaceChildren(new Option("本机", ""), ...state.hosts.map((host) => new Option(host.name, host.id)));
+  select.replaceChildren(new Option("本机 · 在线", ""), ...state.hosts.map((host) => new Option(
+    `${host.name} · ${typeof host.online !== "boolean" ? "未检测" : host.online ? "在线" : "离线"}`, host.id
+  )));
   if (state.connectorId && !state.hosts.some((host) => host.id === state.connectorId)) {
     // Do not silently route an open remote conversation to the local machine.
     select.add(new Option("已移除的电脑（请选择）", state.connectorId));
@@ -2137,7 +2134,7 @@ function renderModelSettings(data = {}) {
     button.className = `modelOption${active ? " active" : ""}`;
     button.type = "button";
     button.dataset.model = item.model || item.id || "";
-    button.disabled = Boolean(state.connectorId || data.running || active);
+    button.disabled = Boolean(data.running || active);
     button.innerHTML = "<strong></strong><small></small>";
     button.querySelector("strong").textContent = item.displayName || item.model || item.id;
     button.querySelector("small").textContent = item.description || item.model || item.id;
@@ -2152,13 +2149,13 @@ function renderModelSettings(data = {}) {
     button.className = `effortOption${active ? " active" : ""}`;
     button.type = "button";
     button.dataset.effort = option.reasoningEffort || "";
-    button.disabled = Boolean(state.connectorId || data.running || active);
+    button.disabled = Boolean(data.running || active);
     button.textContent = `${option.label || reasoningEffortLabel(option.reasoningEffort)}${isDefault ? " · 默认" : ""}`;
     button.title = option.description || "";
     button.addEventListener("click", () => changeModelSettings({ reasoningEffort: button.dataset.effort }));
     els.modelSettingsEfforts.appendChild(button);
   }
-  els.modelSettingsStatus.textContent = state.connectorId ? "远端模型设置当前仅供查看，请在对应电脑上修改。" : (data.running ? "当前会话正在处理，结束或中断后可切换。" : "");
+  els.modelSettingsStatus.textContent = data.running ? "当前会话正在处理，结束或中断后可切换。" : "";
   return true;
 }
 
@@ -2194,7 +2191,7 @@ async function changeModelSettings(update = {}) {
   try {
     const data = await request("/api/remote/model-settings", {
       method: "POST",
-      body: JSON.stringify(update)
+      body: JSON.stringify({ ...update, threadId })
     });
     if (threadId !== state.threadId) return;
     renderModelSettings(data);
@@ -2802,7 +2799,7 @@ async function openThreads({ load = true } = {}) {
       deleteButton.className = "threadAction danger";
       deleteButton.textContent = "删除";
       deleteButton.disabled = Boolean(thread.running || thread.runtimeKey);
-      deleteButton.addEventListener("click", () => deleteThread(thread));
+      deleteButton.addEventListener("click", () => deleteThread(thread).catch(error => { appendEvent(error.message); }));
       actions.append(nameButton, deleteButton);
 
       row.append(button, actions);
@@ -4096,6 +4093,14 @@ document.querySelector("#hostSelect").addEventListener("change", (event) => {
     document.querySelector("#hostStatus").textContent = error.message;
     document.querySelector("#hostSettings").hidden = false;
   });
+});
+document.querySelector("#refreshHosts").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = "检测中…";
+  try { await loadHosts(); document.querySelector("#hostStatus").textContent = "电脑状态已刷新。"; }
+  catch (error) { appendEvent(`刷新电脑状态失败：${error.message}`); }
+  finally { button.disabled = false; button.textContent = "刷新状态"; }
 });
 document.querySelector("#hostManage").addEventListener("click", (event) => {
   const settings = document.querySelector("#hostSettings");

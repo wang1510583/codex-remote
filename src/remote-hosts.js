@@ -60,7 +60,8 @@ export function remoteThreadView(thread = {}, { full = false, limit = 1000 } = {
   const running = thread.status?.type === "active" || Boolean(activeTurn);
   return {
     threadId: thread.id, cwd: thread.cwd || "", absoluteCwd: thread.cwd || "",
-    threadName: thread.name || "", model: thread.model || "", reasoningEffort: "",
+    threadName: thread.name || "", model: thread.model || "", reasoningEffort: thread.reasoningEffort || "",
+    ...(Object.hasOwn(thread, "serviceTier") ? { serviceTier: thread.serviceTier } : {}),
     messages: messages.slice(-limit), loadedCount: Math.min(messages.length, limit), messageCount: messages.length,
     ...(full ? { fullMessages: limitFullReplyMessages(fullMessages), fullMessageCount: fullMessages.length } : {}),
     running, externalRunning: running, activeTurnId: activeTurn?.id || "",
@@ -112,9 +113,31 @@ export class RemoteHosts {
     this.controls = new Map();
     this.runs = new Map();
     this.starting = new Set();
+    this.writers = new Map();
   }
   async hosts() { return readJsonFile(this.hostsFile, []); }
-  async list() { return (await this.hosts()).map(({ token, ...host }) => ({ ...host, hasToken: Boolean(token) })); }
+  async probe(host) {
+    const existing = this.controls.get(host.id);
+    const reuse = existing?.transport?.alive && existing.initialized;
+    const server = reuse ? existing : this.serverFactory(host);
+    let timer;
+    try {
+      await Promise.race([
+        reuse ? server.request("thread/loaded/list", {}, null, 5000) : server.ensureStarted(),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("probe timeout")), 6000); })
+      ]);
+      return true;
+    } catch { return false; }
+    finally { clearTimeout(timer); if (!reuse) server.close(); }
+  }
+  async list() {
+    const hosts = await this.hosts();
+    return await Promise.all(hosts.map(async host => {
+      const online = await this.probe(host);
+      const { token, ...publicHost } = host;
+      return { ...publicHost, hasToken: Boolean(token), online };
+    }));
+  }
   async host(id) {
     const host = (await this.hosts()).find((item) => item.id === id);
     if (!host) throw fail("找不到这台电脑，请重新选择。", 404);
@@ -135,6 +158,7 @@ export class RemoteHosts {
       throw fail("这台电脑还有任务运行，请结束后移除。", 409);
     }
     await updateJsonFile(this.hostsFile, [], (hosts) => hosts.filter((host) => host.id !== id));
+    for (const [key, writer] of this.writers) if (key.startsWith(`${id}:`)) { writer.server.close(); this.writers.delete(key); }
     this.controls.get(id)?.close();
     this.controls.delete(id);
     for (const [key, run] of this.runs) if (run.hostId === id) { run.server.close(); this.runs.delete(key); }
@@ -178,11 +202,22 @@ export class RemoteHosts {
       cursor = result.nextCursor;
       cursors.add(cursor);
     } while (threads.length < 1000 && cursors.size < 10);
+    for (const [key, writer] of this.writers) {
+      if (key.startsWith(`${id}:`) && writer.fresh && !threads.some(t => t.threadId === writer.thread.id)) {
+        threads.unshift({ threadId: writer.thread.id, title: "新会话", cwd: writer.thread.cwd, running: false, connectorId: id });
+      }
+    }
     return { threads, truncated: Boolean(cursor), connectorId: id };
   }
   async read(id, threadId, options = {}) {
-    const server = await this.control(id);
-    const result = await server.request("thread/read", { threadId, includeTurns: true });
+    const writer = this.writers.get(`${id}:${threadId}`);
+    const server = writer?.server || await this.control(id);
+    let result;
+    try { result = await server.request("thread/read", { threadId, includeTurns: true }); }
+    catch (error) {
+      if (!writer?.fresh || !/list_turns is not supported|thread not loaded|no rollout found/i.test(error.message)) throw error;
+      result = { thread: { ...writer.thread, turns: [] } };
+    }
     return remoteThreadView(result.thread, options);
   }
   async state(id, options = {}) {
@@ -215,6 +250,83 @@ export class RemoteHosts {
     });
     return { ok: true };
   }
+  async createThread(id, body) {
+    const cwd = String(body.cwd || "").trim();
+    if (cwd.length > 4096 || !(path.posix.isAbsolute(cwd) || path.win32.isAbsolute(cwd))) throw fail("请输入远端项目的绝对路径。");
+    if (this.writers.size >= 32) throw fail("打开的远端会话过多，请关闭部分连接后重试。", 409);
+    const server = this.serverFactory(await this.host(id));
+    try {
+      await server.ensureStarted();
+      const created = await server.request("thread/start", { cwd });
+      const thread = { ...created.thread, model: created.model || created.thread.model, reasoningEffort: created.reasoningEffort || created.thread.reasoningEffort };
+      server.activeThreadId = thread.id;
+      server.activeCwd = thread.cwd;
+      this.writers.set(`${id}:${thread.id}`, { server, thread, fresh: true });
+      await this.save(id, { threadId: thread.id });
+      return this.state(id);
+    } catch (error) { if (![...this.writers.values()].some(w => w.server === server)) server.close(); throw error; }
+  }
+  async updateModelSettings(id, body) {
+    const threadId = (await this.saved(id)).threadId;
+    if (!threadId) throw fail("请先选择远端会话。");
+    if (body.threadId && body.threadId !== threadId) throw fail("会话已切换，请重新选择模型。", 409);
+    const key = `${id}:${threadId}`;
+    if (this.starting.has(key)) throw fail("会话正在操作，请稍后重试。", 409);
+    this.starting.add(key);
+    let temporary;
+    try {
+      const view = await this.read(id, threadId);
+      if (view.running || this.runs.get(key)?.running) throw fail("请先结束或中断当前回合，再修改模型。", 409);
+      const models = await (await this.control(id)).modelOptions();
+      const model = String(body.model || "").trim();
+      let effort = String(body.reasoningEffort || "").trim();
+      if (!model && !effort) throw fail("请选择模型或思考强度。");
+      const selected = models.find(m => [m.model, m.id].includes(model || view.model));
+      if (!selected) throw fail("远端未返回该模型，请刷新模型列表。");
+      const efforts = (selected.supportedReasoningEfforts || []).map(e => e.reasoningEffort);
+      if (effort && !efforts.includes(effort)) throw fail("该模型不支持所选思考强度。");
+      if (model && !effort && !efforts.includes(view.reasoningEffort)) effort = selected.defaultReasoningEffort || efforts[0] || "";
+      const writer = this.writers.get(key);
+      const server = writer?.server || (temporary = this.serverFactory(await this.host(id)));
+      await server.ensureStarted();
+      if (!writer) {
+        await server.request("thread/resume", { threadId, excludeTurns: true });
+      }
+      const params = { threadId };
+      if (model) params.model = selected.model || selected.id;
+      if (effort) params.effort = effort;
+      await server.request("thread/settings/update", params);
+      const { thread } = await server.request("thread/read", { threadId, includeTurns: false });
+      if ((params.model && thread.model !== params.model) || (params.effort && thread.reasoningEffort !== params.effort)) throw fail("远端尚未确认模型设置，请刷新后重试。", 409);
+      if (writer) writer.thread = thread;
+      return { ...view, model: thread.model || "", reasoningEffort: thread.reasoningEffort || "", models, ok: true };
+    } catch (error) {
+      if (/active writer/i.test(error.message)) throw fail("该会话正由远端 Codex 桌面端占用。请在那台电脑关闭此会话或退出 Codex 桌面端后重试；网页无法强行夺取写入锁。", 409);
+      throw error;
+    } finally { temporary?.close(); this.starting.delete(key); }
+  }
+  async deleteThread(id, threadId) {
+    if (!threadId || typeof threadId !== "string") throw fail("无效的会话 ID。");
+    const key = `${id}:${threadId}`;
+    if (this.starting.has(key)) throw fail("会话正在操作，请稍后重试。", 409);
+    this.starting.add(key);
+    try {
+      const view = await this.read(id, threadId);
+      if (view.running || this.runs.get(key)?.running) throw fail("运行中的会话不能删除，请先中断。", 409);
+      const writer = this.writers.get(key);
+      const server = writer?.server || await this.control(id);
+      await server.request("thread/delete", { threadId });
+      writer?.server.close();
+      this.writers.delete(key);
+      this.runs.get(key)?.server.close();
+      this.runs.delete(key);
+      await updateJsonFile(this.stateFile, {}, all => {
+        const saved = all[id];
+        if (saved) { if (saved.threadId === threadId) saved.threadId = ""; if (saved.drafts) delete saved.drafts[threadId]; }
+        return all;
+      });
+    } finally { this.starting.delete(key); }
+  }
   async send(id, body) {
     const saved = await this.saved(id);
     const threadId = saved.threadId;
@@ -237,7 +349,7 @@ export class RemoteHosts {
         else if (view.running) throw fail("尚未取得远端回合 ID，请在对应电脑中断或稍后重试。", 409);
         return { ok: true, accepted: true, threadId };
       }
-      if (text.startsWith("/")) throw fail("远端会话目前支持普通消息和 /stop；模型可在模型设置中查看。");
+      if (text.startsWith("/")) throw fail("远端会话目前支持普通消息和 /stop；模型可在模型设置中修改。");
       if (existing?.running || view.running) {
         if (body.followMode !== "steer") throw fail("远端任务正在运行，请使用引导发送或等待完成。", 409);
         if (existing?.running) await existing.server.steerCurrentTurn(text);
@@ -247,8 +359,10 @@ export class RemoteHosts {
         return { ok: true, accepted: true, steered: true, threadId };
       }
       await this.draft(id, { threadId, text: "" });
-      existing?.server.close();
-      const server = this.serverFactory(await this.host(id));
+      const writer = this.writers.get(key);
+      if (!writer) existing?.server.close();
+      const server = writer?.server || this.serverFactory(await this.host(id));
+      if (writer) writer.fresh = false;
       const run = { hostId: id, threadId, server, running: true, startedAt: new Date().toISOString(), liveMessages: new Map() };
       this.runs.set(key, run);
       const emit = (event) => {
@@ -269,7 +383,7 @@ export class RemoteHosts {
       }).finally(() => {
         emit({ type: "status", running: false, followMode: "steer", contextUsage: server.contextUsage });
         run.liveMessages.clear();
-        server.close();
+        if (!this.writers.has(key)) server.close();
       });
       return { ok: true, accepted: true, threadId };
     } finally { this.starting.delete(key); }
@@ -280,6 +394,7 @@ export class RemoteHosts {
     return run.server.respondToApprovalRequest(body);
   }
   close() {
+    for (const writer of this.writers.values()) writer.server.close();
     for (const server of this.controls.values()) server.close();
     for (const run of this.runs.values()) run.server.close();
   }
