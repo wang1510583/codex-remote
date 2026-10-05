@@ -606,6 +606,11 @@ textarea:focus {
   z-index: 8;
 }
 
+.voiceToggleButton[aria-pressed="true"] {
+  color: #7dd3fc;
+  background: rgba(14, 165, 233, .18);
+}
+
 .remoteTitle {
   display: flex;
   align-items: center;
@@ -2199,3 +2204,29 @@ textarea:focus {
 :root .hostSettings label { display: grid; gap: 5px; margin: 10px 0; }
 :root .hostSettings input { box-sizing: border-box; width: 100%; padding: 9px; border-radius: 8px; border: 1px solid #6666; color: inherit; background: transparent; }
 :root #hostStatus { margin-top: 8px; overflow-wrap: anywhere; }
+
+.inputQuestionCard {
+  align-self: stretch;
+  margin: 10px 0;
+  padding: 14px;
+  border: 1px solid #69608b;
+  border-radius: 10px;
+  background: #1c1b24;
+  min-width: 0;
+}
+.inputQuestionBody { display: grid; gap: 10px; margin: 12px 0; }
+.inputQuestionCard .approvalOption { padding: 10px; border: 1px solid #45414e; border-radius: 7px; cursor: pointer; align-items: flex-start; }
+.inputQuestionCard .approvalOption:has(input:checked) { border-color: #b4a3f2; background: #302b42; }
+.inputQuestionCard .approvalOption small { display: block; margin-top: 4px; color: #b9b3c8; }
+.inputQuestionCard input[type="radio"] { flex: 0 0 auto; margin-top: 3px; }
+.inputQuestionCard textarea, .inputQuestionCard input[type="password"] { box-sizing: border-box; }
+.inputQuestionActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.inputQuestionStatus { font-size: 12px; color: #c3bdcf; margin-top: 10px; overflow-wrap: anywhere; }
+
+.transcriptQuestionCard { margin-top: 12px; padding: 16px; border: 1px solid var(--border, #475569); border-radius: 14px; }
+.transcriptQuestionCard .approvalOption { cursor: pointer; }
+.browserVoicePanel { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; padding: 10px 12px; border: 1px solid var(--border, #475569); border-radius: 12px; background: color-mix(in srgb, var(--panel, #111827) 88%, #2563eb); }
+.browserVoicePanel { grid-column: 1 / -1; }
+.browserVoicePanel strong { margin-right: 4px; }
+.browserVoicePanel [role="status"] { flex: 1 1 180px; color: var(--muted, #94a3b8); font-size: .9em; }
+.browserVoicePanel audio { width: 220px; max-width: 100%; height: 32px; }

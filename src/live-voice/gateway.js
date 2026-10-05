@@ -4,6 +4,7 @@ import {
   isTrustedVoiceOrigin,
   isVoiceRequestAuthenticated
 } from "./auth.js";
+import { isAuthenticated } from "../auth.js";
 import { acquireLiveVoiceThread } from "./leases.js";
 import { safeLiveVoiceSessionId } from "./thread-adapter.js";
 import {
@@ -14,6 +15,19 @@ import {
 const MAX_MESSAGE_BYTES = 256 * 1024;
 const MAX_SDP_BYTES = 192 * 1024;
 const MAX_TEXT_BYTES = 32 * 1024;
+
+// Browser WebSockets send Origin but may omit Sec-Fetch-Site. For the
+// cookie-authenticated web client, still require the exact served origin.
+function sameRequestOrigin(req) {
+  if (req.headers["sec-fetch-site"] && req.headers["sec-fetch-site"] !== "same-origin") return false;
+  try {
+    const origin = new URL(req.headers.origin);
+    const protocol = req.headers["x-forwarded-proto"] || (req.socket?.encrypted ? "https" : "http");
+    return origin.origin === req.headers.origin
+      && origin.host === req.headers.host
+      && origin.protocol === `${protocol}:`;
+  } catch { return false; }
+}
 
 function jsonResponse(res, status, body) {
   res.writeHead(status, {
@@ -101,12 +115,12 @@ export class LiveVoiceGateway {
       });
       return false;
     }
-    if (!isVoiceRequestAuthenticated(req, this.token)) {
+    if (!isVoiceRequestAuthenticated(req, this.token) && !isAuthenticated(req)) {
       res.setHeader("WWW-Authenticate", 'Basic realm="Codex Remote Live Voice"');
       jsonResponse(res, 401, { success: false, message: "Live Voice 鉴权失败。" });
       return false;
     }
-    if (!isTrustedVoiceOrigin(req)) {
+    if (!isTrustedVoiceOrigin(req) && !(isAuthenticated(req) && sameRequestOrigin(req))) {
       jsonResponse(res, 403, {
         success: false,
         message: "Live Voice 请求来源无效；请使用安卓应用中的同源服务器地址。"
@@ -239,11 +253,11 @@ export class LiveVoiceGateway {
         upgradeError(socket, 503, "Service Unavailable");
         return;
       }
-      if (!isVoiceRequestAuthenticated(req, this.token)) {
+      if (!isVoiceRequestAuthenticated(req, this.token) && !isAuthenticated(req)) {
         upgradeError(socket, 401, "Unauthorized");
         return;
       }
-      if (!isTrustedVoiceOrigin(req)) {
+      if (!isTrustedVoiceOrigin(req) && !(isAuthenticated(req) && sameRequestOrigin(req))) {
         upgradeError(socket, 403, "Forbidden");
         return;
       }

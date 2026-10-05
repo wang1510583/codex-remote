@@ -328,18 +328,27 @@ export function messageMetaKey(message = {}) {
 
 export async function rememberMessageMeta(threadId = "", messages = []) {
   if (!threadId) return;
-  const rows = (messages || []).filter((message) => message?.taskDurationMs !== undefined && message?.taskDurationMs !== null);
+  const rows = (messages || []).filter((message) => message?.messageId || (message?.taskDurationMs !== undefined && message?.taskDurationMs !== null));
   if (!rows.length) return;
   await updateJson(messageMetaPath, {}, (meta) => {
     const threadMeta = meta[threadId] && typeof meta[threadId] === "object" ? meta[threadId] : {};
     for (const message of rows) {
       const key = messageMetaKey(message);
       const items = Array.isArray(threadMeta[key]) ? threadMeta[key] : [];
-      const taskDurationMs = Number(message.taskDurationMs);
-      if (!Number.isFinite(taskDurationMs)) continue;
-      if (!items.some((item) => Number(item.taskDurationMs) === taskDurationMs)) {
-        items.push({ taskDurationMs, updatedAt: new Date().toISOString() });
+      const row = { updatedAt: new Date().toISOString() };
+      if (message.messageId) {
+        row.messageId = message.messageId;
+        row.final = message.final !== false;
+        if (message.turnId) row.turnId = message.turnId;
       }
+      if (message.taskDurationMs != null && Number.isFinite(Number(message.taskDurationMs))) {
+        row.taskDurationMs = Number(message.taskDurationMs);
+      }
+      const existing = items.find((item) => message.messageId
+        ? item.messageId === message.messageId
+        : !item.messageId && item.taskDurationMs === row.taskDurationMs);
+      if (existing) Object.assign(existing, row);
+      else items.push(row);
       threadMeta[key] = items.slice(-20);
     }
     meta[threadId] = threadMeta;

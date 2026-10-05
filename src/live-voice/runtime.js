@@ -49,15 +49,14 @@ export class CodexLiveVoiceRuntime {
     reasoningEffort = "",
     voice = "cove",
     onEvent = () => {},
-    // RealtimeConversation is captured when Codex loads a thread. A shared
-    // daemon may already have loaded that thread before the experimental
-    // feature was enabled, in which case realtime/start rejects it even if the
-    // daemon config has since changed. Keep voice on a coordinator-owned,
-    // explicitly feature-enabled app-server; the lease layer still guarantees
-    // that web and Android never write the thread concurrently.
+    // Reuse the coordinator's shared app-server. A second standalone
+    // app-server cannot resume a thread that already has the web writer,
+    // producing "already has an active writer". The shared daemon must have
+    // realtime_conversation enabled when it loads the thread, and the lease
+    // layer still guarantees that web and Android never write concurrently.
     appServerFactory = () => createLocalAppServer({
       realtime: true,
-      useShared: false
+      useShared: true
     })
   }) {
     this.threadId = threadId;

@@ -58,7 +58,7 @@ function normalizeDeliveryStore(value) {
       title: cleanText(String(item?.title || "服务器Codex"), 120) || "服务器Codex",
       body: notificationBody(item?.body),
       ts: Number(item?.ts) || 0,
-      kind: item?.kind === "approval" || item?.title === "Codex等待审核" ? "approval" : "task"
+      kind: item?.kind === "input" ? "input" : item?.kind === "approval" || item?.title === "Codex等待审核" ? "approval" : "task"
     }))
     .filter((item) => item.id && item.ts > 0);
   const acknowledgements = {};
@@ -309,7 +309,7 @@ export function createNativeNotificationHub(options = {}) {
       title: String(title || "服务器Codex").slice(0, 120),
       body: notificationBody(body),
       ts: Date.now(),
-      kind: kind === "approval" ? "approval" : "task"
+      kind: ["approval", "input"].includes(kind) ? kind : "task"
     };
     deliveryStore.notifications.push(notification);
     persistDeliveryStore();
@@ -332,6 +332,14 @@ export function createNativeNotificationHub(options = {}) {
   }
 
   function sendApprovalRequired(request = {}) {
+    if (request.kind === "input") {
+      const question = cleanText(String(request.summary || request.title || "请选择选项或填写回答"), 140);
+      return sendNotification({
+        title: "Codex等待选择",
+        body: `❓ ${question} 请打开 Codex 网页回答。`,
+        kind: "input"
+      });
+    }
     if (approvalNotificationsSuppressed) {
       return { configured: Boolean(token), sent: 0, total: clients.size, suppressed: true };
     }

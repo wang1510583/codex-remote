@@ -495,6 +495,30 @@ export function parseSessionFile(text, file = "", limit = defaultMessageLimit, o
       meta.updatedAt = row.timestamp || meta.updatedAt;
       continue;
     }
+    // Codex async user-input calls are persisted as AgentMessage items after
+    // the platform has rendered their prompt. Preserve the structured
+    // questions so the web client can turn the transcript entry into controls.
+    if (row.type === "event_msg" && row.payload?.type === "item_completed"
+      && row.payload.item?.type === "AgentMessage"
+      && Array.isArray(row.payload.item.questions) && row.payload.item.questions.length) {
+      const item = row.payload.item;
+      const content = (item.content || []).map((part) => part?.text || "").filter(Boolean).join("\n").trim();
+      if (content) {
+        messages.push({
+          role: "assistant",
+          content: cleanText(assistantBubbleText(content, "final_answer"), 20000),
+          at: row.timestamp || "",
+          messageId: item.id || `input-${row.timestamp || Date.now()}`,
+          final: true,
+          inputQuestions: item.questions,
+          _turnId: row.payload.turn_id || meta.activeTurnId || currentTurnId,
+          _phase: "final_answer"
+        });
+        addFullMessage({ ...messages[messages.length - 1], fullKind: "assistant" });
+      }
+      meta.updatedAt = row.timestamp || meta.updatedAt;
+      continue;
+    }
     if (row.type === "turn_context") {
       meta.model = row.payload?.model || row.payload?.collaboration_mode?.settings?.model || meta.model;
       meta.reasoningEffort = row.payload?.effort || row.payload?.reasoning_effort || row.payload?.collaboration_mode?.settings?.reasoning_effort || meta.reasoningEffort;
@@ -544,12 +568,22 @@ export function parseSessionFile(text, file = "", limit = defaultMessageLimit, o
       role,
       content: cleanText(displayContent, 20000),
       at: row.timestamp || "",
+      ...(row.payload.id ? { messageId: row.payload.id, final: role === "assistant" } : {}),
       _turnId: turnId,
       _phase: row.payload.phase || ""
     });
     meta.updatedAt = row.timestamp || meta.updatedAt;
   }
   const turnAssistantIndices = new Map();
+  let laterUserMessage = false;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index].role === "user") laterUserMessage = true;
+    if (messages[index].inputQuestions) {
+      messages[index].inputResolved = laterUserMessage;
+      const full = fullMessages.find(row => row.messageId === messages[index].messageId);
+      if (full) full.inputResolved = laterUserMessage;
+    }
+  }
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (msg.role === "assistant" && msg.content) {
@@ -690,32 +724,30 @@ export async function deleteThreadFromProvider(threadId, provider = localSession
 }
 
 export async function mergeLocalMessageMeta(threadId = "", messages = [], previousMessages = []) {
-  const byContent = new Map();
+  const stored = threadId ? (await readMessageMeta())[threadId] || {} : {};
+  const byContent = new Map(Object.entries(stored).map(([key, rows]) => [key, Array.isArray(rows) ? [...rows] : []]));
   for (const message of previousMessages || []) {
-    if (message?.taskDurationMs === undefined || message?.taskDurationMs === null) continue;
-    const key = `${message.role || ""}\n${message.content || ""}`;
+    if (!message?.messageId && message?.taskDurationMs == null) continue;
+    const key = messageMetaKey(message);
     const rows = byContent.get(key) || [];
-    rows.push({ taskDurationMs: message.taskDurationMs });
+    if (!rows.some((row) => message.messageId
+      ? row.messageId === message.messageId
+      : row.taskDurationMs === message.taskDurationMs)) rows.push(message);
     byContent.set(key, rows);
   }
-  if (threadId) {
-    const threadMeta = (await readMessageMeta())[threadId] || {};
-    for (const [hash, items] of Object.entries(threadMeta)) {
-      if (!Array.isArray(items)) continue;
-      const rows = byContent.get(hash) || [];
-      for (const item of items) {
-        if (item?.taskDurationMs !== undefined && item?.taskDurationMs !== null) rows.push({ taskDurationMs: item.taskDurationMs });
-      }
-      byContent.set(hash, rows);
+  // Page windows contain the newest occurrences. Match from the end so two
+  // tasks with identical answers keep separate item ids.
+  return [...(messages || [])].reverse().map((message) => {
+    const rows = byContent.get(messageMetaKey(message));
+    const index = message.messageId ? rows?.findIndex((row) => row.messageId === message.messageId) : (rows?.length || 0) - 1;
+    const meta = index >= 0 ? rows.splice(index, 1)[0] : null;
+    if (!meta) return message;
+    const merged = { ...message };
+    for (const key of ["messageId", "turnId", "final", "taskDurationMs"]) {
+      if (merged[key] == null && meta[key] != null) merged[key] = meta[key];
     }
-  }
-  return (messages || []).map((message) => {
-    if (message?.taskDurationMs !== undefined && message?.taskDurationMs === null) return message;
-    const localKey = `${message.role || ""}\n${message.content || ""}`;
-    const rows = byContent.get(localKey) || byContent.get(messageMetaKey(message));
-    const meta = rows?.shift();
-    return meta ? { ...message, taskDurationMs: meta.taskDurationMs } : message;
-  });
+    return merged;
+  }).reverse();
 }
 
 export { contextUsageFromTokenInfo };

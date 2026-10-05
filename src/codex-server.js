@@ -1,3 +1,4 @@
+import { userInputDisplay, validateUserInputAnswers } from "./user-input.js";
 import { randomUUID } from "node:crypto";
 import { codexBin, codexModel, codexReasoningEffort, codexWorkDir } from "./config.js";
 import { broadcast } from "./sse.js";
@@ -200,7 +201,7 @@ function serverRequestDisplay(record = {}) {
   }
   if (method === "item/tool/requestUserInput") {
     display.kind = "input";
-    display.questions = Array.isArray(params.questions) ? params.questions : [];
+    Object.assign(display, userInputDisplay(params, record.createdAt || record.startedAtMs));
     display.summary = display.questions[0]?.question || "Codex 请求用户输入";
     return display;
   }
@@ -494,6 +495,10 @@ export class CodexAppServer {
     const record = this.serverRequests.get(key);
     if (!record) {
       throw Object.assign(new Error("审批请求不存在或已处理。"), { statusCode: 404 });
+    }
+    if (record.method === "item/tool/requestUserInput" && !["cancel", "decline"].includes(body.decision)) {
+      try { body = { ...body, answers: validateUserInputAnswers(userInputDisplay(record.params).questions, body.answers) }; }
+      catch (error) { throw Object.assign(error, { statusCode: 400 }); }
     }
     try {
       const result = this.approvalResultForRequest(record, body);
@@ -822,8 +827,22 @@ export class CodexAppServer {
         this.turn.answers.push(content);
         (this.turn.answerPhases || (this.turn.answerPhases = [])).push(phase);
         const answerMessages = this.turn.answerMessages || (this.turn.answerMessages = []);
-        answerMessages.push({ content, messageId, final: true, taskDurationMs });
-        this.emit({ type: "message", role: "assistant", content, messageId, final: true, taskDurationMs });
+        const inputQuestions = Array.isArray(params.item.questions) ? params.item.questions : undefined;
+        const message = { content, messageId, final: true, taskDurationMs };
+        if (inputQuestions?.length) {
+          message.inputQuestions = inputQuestions;
+          try {
+            this.notifyApprovalRequired({
+              kind: "input",
+              title: inputQuestions[0]?.title || inputQuestions[0]?.question || "Codex 等待用户选择",
+              summary: inputQuestions.map((question) => question.title || question.question || "").filter(Boolean).join("；")
+            });
+          } catch (error) {
+            console.error("native user input notification failed", error?.message || error);
+          }
+        }
+        answerMessages.push(message);
+        this.emit({ type: "message", role: "assistant", ...message });
         this.emit({ type: "reply_done" });
       }
       this.turn.currentMessage = null;
@@ -1051,8 +1070,14 @@ export class CodexAppServer {
           reconnectMessage: "",
           lastError: null,
           onActivity: typeof options.onActivity === "function" ? options.onActivity : null,
-          resolve,
-          reject
+          resolve: (answers) => {
+            options.onAnswerMessages?.(turn.answerMessages || []);
+            resolve(answers);
+          },
+          reject: (error) => {
+            options.onAnswerMessages?.(turn.answerMessages || []);
+            reject(error);
+          }
         };
         this.turn = turn;
         this.request("turn/start", {
@@ -1488,8 +1513,8 @@ export function createLocalAppServer(options = {}) {
     cwd: codexWorkDir,
     env: process.env,
     extraArgs: realtime ? ["--enable", "realtime_conversation"] : [],
-    // Callers can opt out of the shared daemon when a capability must be fixed
-    // at process/thread load time (Live Voice does this for realtime).
+    // Callers can opt out when they intentionally need an independent process.
+    // Live Voice must share the daemon that owns the existing thread writer.
     // FallbackTransport starts the same explicitly feature-enabled standalone
     // process whenever shared transport is disabled or unavailable.
     useShared: options.useShared !== false

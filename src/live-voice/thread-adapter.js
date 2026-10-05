@@ -245,11 +245,16 @@ export class CodexRemoteThreadAdapter {
     if (state.inflight) {
       throw liveVoiceHttpError("当前 Codex 会话正在执行文字任务，请等待任务结束后再开启语音。", 409);
     }
-    const running = this.runningThreads().some((item) => (
+    const running = this.runningThreads().find((item) => (
       !item.connectorId && item.threadId === session.session_id
     ));
     if (running) {
-      throw liveVoiceHttpError("当前 Codex 会话正在其他客户端执行任务，请稍后再开启语音。", 409);
+      const message = running.liveVoiceRunning
+        ? "当前 Codex 会话已有语音连接，请先结束该连接后再开启语音。"
+        : running.externalRunning
+          ? "检测到当前 Codex 会话有外部任务运行记录，请等待任务结束后再开启语音。"
+          : "当前网页会话正在执行文字任务，请等待回复完成后再开启语音。";
+      throw liveVoiceHttpError(message, 409);
     }
     return {
       threadId: session.session_id,

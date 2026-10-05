@@ -591,12 +591,16 @@ export async function handle(req, res) {
       const content = cleanText(body.message || body.content || "", 20000).trim();
       if (!content) return json(res, 400, { error: "提示内容不能为空。" });
       const state = await readState(connectorId);
-      const message = { role: "assistant", content, at: new Date().toISOString() };
+      if ((body.threadId !== undefined && body.threadId !== state.threadId)
+          || (!state.threadId && body.runtimeId && body.runtimeId !== state.runtimeId)) {
+        return json(res, 409, { error: "会话已经切换，提示未写入其他会话。" });
+      }
+      const message = { messageId: cleanText(body.messageId || "", 120).trim() || `notice-${Date.now()}`, final: true, role: "assistant", content, at: new Date().toISOString() };
       state.messages.push(message);
       state.messages = state.messages.slice(-80);
       await appendThreadNotice(state.threadId, message, connectorId);
       await writeState(syncLoadedCounts(state), connectorId);
-      broadcast({ type: "message", connectorId, ...message, messageId: cleanText(body.messageId || "", 120).trim() || `notice-${Date.now()}`, final: true });
+      broadcast({ type: "message", connectorId, threadId: state.threadId || "", runtimeId: state.runtimeId || "", ...message });
       return json(res, 200, { ok: true, message });
     }
 

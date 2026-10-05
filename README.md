@@ -8,7 +8,7 @@
 浏览器 PWA  <--HTTP+SSE-->  总控端 server.js  <--Unix WebSocket-->  Codex Desktop 共享 app-server（本机）
                               |                    └─不可用时回退 stdio 独立进程
                               |
-Android 语音 App <--HTTP+WS--> Live Voice 兼容层 <--WebRTC信令--> 专用 realtime app-server
+Android 语音 App <--HTTP+WS--> Live Voice 兼容层 <--WebRTC信令--> 共享 realtime app-server
                               |                                  └─恢复并持有网页当前 thread
                               |
                               +-- Web Push / 微信 -->  任务完成通知
@@ -180,13 +180,22 @@ location /codex-remote/ {
 
 连接时，服务端会读取 Codex Remote 网页当前选择的本机会话，恢复同一个 Codex `threadId` 和工作目录，再启动 WebRTC Live Voice。关闭语音只释放实时连接，不删除 thread；之后的文字和语音仍会继续同一上下文。
 
-网页文字端可以继续使用共享 app-server daemon；Live Voice 则由兼容层启动并持有一个专用、明确启用实时能力的 app-server：
+网页文字端和 Live Voice 复用共享 app-server daemon，避免两个进程争抢同一线程的 writer。需要在 daemon 载入线程前启用实时能力：
 
 ```sh
 codex features enable realtime_conversation
 ```
 
-这是因为 Codex 会在线程载入时确定它是否支持 Realtime。即使旧的共享 daemon 后来修改了配置，它已经载入的 thread 仍可能拒绝 `thread/realtime/start`。专用进程会用 `--enable realtime_conversation` 启动，避开这个旧线程状态；兼容层的租约仍保证网页和 Android 不会同时写入同一个 thread。
+Codex 会在线程载入时确定实时能力。修改配置后，应等待任务结束再重启共享 daemon。共享连接不可用时，回退进程会用 `--enable realtime_conversation` 启动。
+
+使用支持 Codex Live 协议的模型代理时，音频创建和后台控制 WebSocket 必须配套配置。在用户级 `~/.codex/config.toml` 顶部（所有表之前）设置，例如：
+
+```toml
+experimental_realtime_webrtc_call_base_url = "https://proxy.example.com/v1"
+experimental_realtime_ws_base_url = "wss://proxy.example.com"
+```
+
+WebSocket 配置只包含协议和主机，不包含 `/v1` 路径；Codex 会追加控制连接路径。代理需要支持创建实时会话和附加后台控制连接，仅支持文字 Responses 不够。音频能播放但随后出现 `401 Unauthorized: realtime websocket handshake failed` 时，应检查这两个入口是否使用同一服务及匹配的凭据。以上为实验配置，需与所部署 Codex 版本一起验证。
 
 协调规则：
 
@@ -235,6 +244,10 @@ npm run verify:live-voice -- https://你的域名/codex-remote
 ```
 
 ## 自动语音朗读
+
+网页实时语音：在本机空闲会话中输入 `/voice`，或在 `/` 菜单点击“实时语音对话”。允许麦克风权限后即可连接；面板支持静音、播放音频和结束，`/voice off` 也可结束。切换电脑、切换会话或离开页面会关闭麦克风。需要 HTTPS（本机 localhost 除外）及浏览器 WebRTC 支持；目前不支持远端电脑会话。
+
+此入口复用 `src/live-voice` 的 Codex `thread/realtime/start` 通道和现有 Codex 登录状态。网页通过登录 Cookie 和一次性票据连接，安卓原有 Basic Auth 接口保留。Codex 实时语音接口仍属实验接口，是否能成功启动取决于当前 Codex 版本和账号支持。
 
 在网页的 `/` 命令面板点击 `/tts` 可以开启或关闭自动语音朗读。开启后，每个完成的 Codex 助手气泡都会通过浏览器或 Android WebView 的系统 TTS 按顺序朗读；Markdown、链接和代码块会先转换成适合朗读的文字。同一消息在 SSE 重连后不会重复朗读，切换会话或关闭功能会停止当前队列。开关保存在当前浏览器本机。
 

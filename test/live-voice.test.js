@@ -178,6 +178,29 @@ test("thread adapter reuses the web-selected thread and creates only when empty"
   assert.equal((await adapter.runtimeContext("thread-created")).threadId, "thread-created");
 });
 
+test("thread adapter distinguishes web tasks, external tasks and voice ownership", async () => {
+  let rows = [];
+  const adapter = new CodexRemoteThreadAdapter({
+    readStateFn: async () => ({ threadId: "thread-web", cwd: ".", inflight: null }),
+    runningThreadsFn: () => rows
+  });
+  for (const [flags, message] of [
+    [{ externalRunning: false }, /当前网页会话正在执行文字任务/],
+    [{ externalRunning: true }, /外部任务运行记录/],
+    [{ liveVoiceRunning: true }, /已有语音连接/]
+  ]) {
+    rows = [{ threadId: "thread-web", connectorId: "", ...flags }];
+    await assert.rejects(adapter.runtimeContext("thread-web"), message);
+  }
+  rows = [
+    { threadId: "thread-other", connectorId: "", externalRunning: true },
+    { threadId: "thread-web", connectorId: "remote", externalRunning: true }
+  ];
+  assert.equal((await adapter.runtimeContext("thread-web")).threadId, "thread-web");
+  rows = [];
+  assert.equal((await adapter.runtimeContext("thread-web")).threadId, "thread-web");
+});
+
 test("thread adapter restores completed bubbles from the web-selected Codex thread", async () => {
   const adapter = new CodexRemoteThreadAdapter({
     readStateFn: async () => ({

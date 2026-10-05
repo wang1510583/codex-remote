@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { rootDir, restartScript, codexConnectWaitMs, codexConnectTimeoutMs, codexTurnTimeoutMs, codexWorkDir } from "./config.js";
 import { cleanText } from "./utils.js";
-import { broadcast } from "./sse.js";
+import { broadcast, currentEventSeq } from "./sse.js";
 import {
   readState, writeState, draftForState, saveDraftForState,
   followModeForState, saveFollowModeForState, rememberMessageMeta,
@@ -50,12 +50,25 @@ export let contextUsage = null;
 export function mergePersistentLiveVoiceMessages(messages = [], voiceMessages = []) {
   const rows = [];
   const keys = new Set();
+  // Snapshot replies used to be accidentally persisted as local notices with
+  // new timestamps. Prefer canonical transcript rows over these derived copies.
+  const canonical = new Set(messages.filter((row) => !row.threadNotice)
+    .map((row) => `${row.role}\n${row.content}`));
+  const legacyNotices = new Set();
   for (const rawMessage of [...messages, ...voiceMessages]) {
     if (!rawMessage?.role || !rawMessage?.content) continue;
     const message = rawMessage.liveVoiceTranscript
       ? { ...rawMessage, content: labelLiveVoiceTranscript(rawMessage.content) }
       : rawMessage;
-    const key = [message.role, message.content, message.at || ""].join("\n");
+    const contentKey = `${message.role}\n${message.content}`;
+    if (message.threadNotice) {
+      if (canonical.has(contentKey)) continue;
+      if (!message.messageId && legacyNotices.has(contentKey)) continue;
+      if (!message.messageId) legacyNotices.add(contentKey);
+    }
+    const key = message.messageId
+      ? `${message.role}\nid:${message.messageId}`
+      : [message.role, message.content, message.at || ""].join("\n");
     if (keys.has(key)) continue;
     keys.add(key);
     rows.push(message);
@@ -591,7 +604,17 @@ function releaseRunnerAppServerIfIdle(runner) {
 
 export function broadcastRunner(runner, event) {
   broadcast({ type: "runner_status", runningThreads: runningThreads() });
-  if (isRunnerSelected(runner)) broadcast({ ...event, connectorId: runner.connectorId || "" });
+  if (isRunnerSelected(runner)) {
+    // Every runner-owned event must carry its conversation id. Without this,
+    // a local browser (connectorId="") cannot distinguish a late event from
+    // another selected thread after a session switch.
+    broadcast({
+      ...event,
+      connectorId: runner.connectorId || "",
+      threadId: event.threadId ?? runner.state?.threadId ?? "",
+      runtimeId: runner.state?.runtimeId || ""
+    });
+  }
 }
 
 export function selectedRunner() {
@@ -1228,7 +1251,7 @@ async function localCommandResponse(message, connectorId = "") {
     const nextState = { threadId: "", runtimeId: randomUUID(), connectorId: state.connectorId || "", cwd: state.cwd || "", model: defaults.model || "", reasoningEffort: defaults.reasoningEffort || "", messages: [] };
     selectedRunnerKey = runnerKeyForState(nextState);
     await writeState(nextState, state.connectorId || "");
-    broadcast({ type: "state", ...nextState, absoluteCwd: resolveAbsoluteCwd(nextState), contextUsage, runningThreads: runningThreads() });
+    broadcast({ type: "state", previousThreadId: state.threadId || "", previousRuntimeId: state.runtimeId || "", ...nextState, absoluteCwd: resolveAbsoluteCwd(nextState), contextUsage, runningThreads: runningThreads() });
     return "已新建线程。";
   }
   if (command === "/resume") {
@@ -1273,6 +1296,7 @@ export async function runRemoteTask(message, runner) {
   try {
     let ok = true;
     let answers = [];
+    let answerMessages = [];
     try {
       waitTimer = setTimeout(() => {
         if (connected || !runner.running) return;
@@ -1293,6 +1317,7 @@ export async function runRemoteTask(message, runner) {
           model: runner.state.model,
           reasoningEffort: runner.state.reasoningEffort,
           onActivity: armTurnTimeout,
+          onAnswerMessages: (messages) => { answerMessages = messages; },
           onConnected: markConnected,
           onThreadReady: async (st) => {
             runner.state.threadId = st.threadId;
@@ -1344,7 +1369,8 @@ export async function runRemoteTask(message, runner) {
     const terminalIndex = ok ? completionIndex : savedAnswers.length - 1;
     const savedMessages = [];
     for (const [index, answer] of savedAnswers.entries()) {
-      const msg = { role: "assistant", content: answer, at: new Date().toISOString() };
+      const original = answerMessages[index];
+      const msg = { ...(original || {}), role: "assistant", content: answer, final: true, at: new Date().toISOString() };
       if (index === terminalIndex && taskDurationMs !== null) msg.taskDurationMs = taskDurationMs;
       savedMessages.push(msg);
       state.messages.push(msg);
@@ -1610,8 +1636,8 @@ export async function submitRemoteMessage(message, requestedFollowMode = "", con
     state.messages.push(assistantMessage);
     state.messages = state.messages.slice(-80);
     await writeState(syncLoadedCounts(state), connectorId);
-    broadcast({ type: "message", connectorId, ...userMessage });
-    broadcast({ type: "message", connectorId, ...assistantMessage, final: true });
+    broadcast({ type: "message", connectorId, threadId: state.threadId || "", runtimeId: state.runtimeId || "", ...userMessage });
+    broadcast({ type: "message", connectorId, threadId: state.threadId || "", runtimeId: state.runtimeId || "", ...assistantMessage, final: true });
     broadcast({ ...statusPayload(runner), connectorId });
     broadcast({ type: "done", ok: true, local: true, connectorId, threadId: state.threadId });
     return {
@@ -1822,7 +1848,25 @@ export async function listThreads(connectorId = "") {
   return [...runningRows, ...rows];
 }
 
+const conversationSelections = new Map();
+
+export function queueConversationSelection(connectorId, operation) {
+  const previous = conversationSelections.get(connectorId) || Promise.resolve();
+  const next = previous.catch(() => {}).then(operation);
+  conversationSelections.set(connectorId, next);
+  const cleanup = () => {
+    if (conversationSelections.get(connectorId) === next) conversationSelections.delete(connectorId);
+  };
+  next.then(cleanup, cleanup);
+  return next;
+}
+
 export async function selectRemoteThread(rawThreadId, connectorId = "") {
+  return queueConversationSelection(connectorId, () => selectRemoteThreadNow(rawThreadId, connectorId));
+}
+
+async function selectRemoteThreadNow(rawThreadId, connectorId = "") {
+  const eventSeq = currentEventSeq();
   const threadId = cleanText(rawThreadId, 120).trim();
   await persistExistingFailureNotices(await readState(connectorId), connectorId);
   const provider = localSessionProvider;
@@ -1832,7 +1876,7 @@ export async function selectRemoteThread(rawThreadId, connectorId = "") {
     stopExternalSessionMonitor(connectorId);
     selectedRunnerKey = runner.key;
     await writeState(runner.state, runner.connectorId || "");
-    const payload = runnerStatePayload(runner, { threadName: "" });
+    const payload = runnerStatePayload(runner, { threadName: "", eventSeq });
     await restorePersistentLiveVoiceMessages(payload, runner.connectorId || "");
     payload.draft = await draftForState(runner.state, runner.connectorId || "");
     broadcast({ type: "state", connectorId, ...payload });
@@ -1845,7 +1889,7 @@ export async function selectRemoteThread(rawThreadId, connectorId = "") {
     selectedRunnerKey = existingRunner.key;
     await writeState(existingRunner.state, existingRunner.connectorId || "");
     const name = existingRunner.state.threadId ? await threadName(existingRunner.state.threadId) : "";
-    const payload = runnerStatePayload(existingRunner, { threadName: name });
+    const payload = runnerStatePayload(existingRunner, { threadName: name, eventSeq });
     await restorePersistentLiveVoiceMessages(payload, existingRunner.connectorId || "");
     payload.draft = await draftForState(existingRunner.state, existingRunner.connectorId || "");
     broadcast({ type: "state", connectorId, ...payload });
@@ -1873,6 +1917,7 @@ export async function selectRemoteThread(rawThreadId, connectorId = "") {
   const mode = await followModeForState(state, connectorId);
   const payload = {
     ...state,
+    eventSeq,
     absoluteCwd: resolveAbsoluteCwd(state),
     threadName: name,
     draft,
@@ -1910,6 +1955,11 @@ export async function deleteThread(threadId, connectorId = "") {
 }
 
 export async function createRemoteSession(rawCwd = "", connectorId = "") {
+  return queueConversationSelection(connectorId, () => createRemoteSessionNow(rawCwd, connectorId));
+}
+
+async function createRemoteSessionNow(rawCwd = "", connectorId = "") {
+  const eventSeq = currentEventSeq();
   const previousState = await readState(connectorId);
   await persistExistingFailureNotices(previousState, connectorId);
   const cwd = stateCwdValue(rawCwd || "");
@@ -1932,7 +1982,7 @@ export async function createRemoteSession(rawCwd = "", connectorId = "") {
   await writeState(state, connectorId);
   const draft = await draftForState(state, connectorId);
   const mode = await followModeForState(state, connectorId);
-  const payload = { ...state, absoluteCwd: resolveAbsoluteCwd(state), draft, followMode: mode, contextUsage, runningThreads: runningThreads() };
+  const payload = { ...state, eventSeq, absoluteCwd: resolveAbsoluteCwd(state), draft, followMode: mode, contextUsage, runningThreads: runningThreads() };
   broadcast({ type: "state", connectorId, ...payload });
   return payload;
 }

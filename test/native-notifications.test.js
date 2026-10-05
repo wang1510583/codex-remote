@@ -112,6 +112,11 @@ test("WebToApp notification websocket receives task completion, terminal errors,
   assert.deepEqual(approvalResult, { configured: true, sent: 1, total: 1 });
   assert.equal(approvalMessage.title, "Codex等待审核");
   assert.equal(approvalMessage.body, "⚠️ 命令执行确认：npm test。请打开 Codex 网页手动确认。");
+  hub.setApprovalNotificationsSuppressed(true);
+  const receivedInput = matchingMessage(ws, next => next.title === "Codex等待选择");
+  const inputResult = hub.sendApprovalRequired({ kind: "input", summary: "你最喜欢哪种主题？" });
+  assert.equal(inputResult.sent, 1);
+  assert.equal((await receivedInput).body, "❓ 你最喜欢哪种主题？ 请打开 Codex 网页回答。");
 });
 
 test("WebToApp notification websocket rejects an invalid token", async (t) => {

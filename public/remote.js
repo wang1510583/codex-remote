@@ -9,6 +9,8 @@ const state = {
   liveVoiceTaskRunning: false,
   externalTaskStartedAt: "",
   threadId: "",
+  runtimeId: "",
+  snapshotEventSeq: 0,
   threadName: "",
   cwd: "",
   absoluteCwd: "",
@@ -72,11 +74,19 @@ const state = {
 const basePath = ["/codexremote", "/codex-remote"].find((path) => location.pathname === path || location.pathname.startsWith(`${path}/`)) || "";
 const draftPrefix = "codex-remote-draft:";
 let draftTimer = 0;
+let threadSelectionGeneration = 0;
+let selectingConversation = false;
+const selectionEvents = [];
 let modelSettingsChanging = false;
 let stateLoadGeneration = 0;
 let realtimeReconcileTimer = 0;
 let taskExecutionStatusTimer = 0;
 let taskInterruptPending = false;
+let browserVoice = null;
+let browserVoiceLoading = false;
+let approvalAutoTimer = 0;
+let approvalAutoDeadline = 0;
+const inputDrafts = new Map();
 const processedEventSeqs = new Set();
 const pendingRemoteEvents = [];
 const slashCommands = [
@@ -96,6 +106,7 @@ const slashCommands = [
   { command: "/notify", title: "通知", detail: notificationDetail, action: requestNotifications },
   { command: "/autoapprove", title: "自动确认审核", detail: autoApprovalDetail, action: toggleAutoApproval, active: () => state.autoApprove },
   { command: "/tts", title: "自动语音朗读", detail: speechDetail, action: toggleAutoSpeech },
+  { command: "/voice", title: "实时语音对话", detail: () => state.liveVoiceRunning ? "结束当前网页实时语音" : "使用 Codex 官方 Live Voice 实时对话", action: toggleBrowserLiveVoice, active: () => state.liveVoiceRunning },
   { command: "/full", title: "显示Codex完整回复", detail: fullRepliesDetail, action: toggleFullReplies },
   { command: "/result", title: "只看结果", detail: () => state.hideThoughts ? "当前只显示用户气泡和 ✅ 气泡，点击后显示全部" : "隐藏思考过程气泡，只显示用户气泡和 ✅ 气泡", action: toggleResultOnly },
   { command: "/mine", title: "只看自己", detail: () => state.onlyMine ? "当前只显示自己发送的气泡，点击后显示全部" : "只显示自己发送的消息气泡", action: toggleOnlyMine },
@@ -213,6 +224,67 @@ function speechEngine() {
   return typeof window !== "undefined" && "speechSynthesis" in window
     ? window.speechSynthesis
     : null;
+}
+
+function updateBrowserVoiceButton() {
+  const button = document.querySelector("#browserVoiceRemote");
+  if (!button) return;
+  const active = Boolean(browserVoice?.active);
+  const loading = browserVoiceLoading && !active;
+  const label = active ? "关闭实时语音" : loading ? "正在准备实时语音" : "开启实时语音";
+  button.setAttribute("aria-pressed", String(active));
+  button.setAttribute("aria-busy", String(loading));
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  button.disabled = loading;
+}
+
+async function toggleBrowserLiveVoice(force = "") {
+  closeCommandMenu();
+  if (force === "off" || browserVoice?.active) {
+    if (force !== "on") browserVoice?.stop();
+    return;
+  }
+  if (browserVoiceLoading) return;
+  if (state.connectorId) { appendEvent("实时语音目前支持本机会话，请先切换到本机。"); return; }
+  if (state.running) { appendEvent("请等待当前任务结束后，再开启实时语音。"); return; }
+  if (!state.threadId) { appendEvent("请先创建或选择一个会话，再开启实时语音。"); return; }
+  browserVoiceLoading = true;
+  updateBrowserVoiceButton();
+  const threadId = state.threadId;
+  try {
+    const { BrowserLiveVoice } = await import("./live-voice.js?v=20261005");
+    if (state.threadId !== threadId || state.connectorId) return;
+    let panel = document.querySelector("#browserVoicePanel");
+    if (!panel) {
+      panel = document.createElement("section"); panel.id = "browserVoicePanel";
+      panel.className = "browserVoicePanel";
+      panel.innerHTML = `<strong>实时语音</strong><span role="status" aria-live="polite"></span><audio controls autoplay></audio><button type="button" data-voice-mute>静音</button><button type="button" data-voice-stop>结束语音</button>`;
+      els.form.prepend(panel);
+      panel.querySelector("[data-voice-mute]").addEventListener("click", event => {
+        const muted = browserVoice?.mute();
+        event.target.textContent = muted ? "开启麦克风" : "静音";
+        event.target.setAttribute("aria-pressed", String(Boolean(muted)));
+      });
+      panel.querySelector("[data-voice-stop]").addEventListener("click", () => browserVoice?.stop());
+    }
+    panel.querySelector("[data-voice-mute]").textContent = "静音";
+    panel.querySelector("[data-voice-mute]").setAttribute("aria-pressed", "false");
+    browserVoice = new BrowserLiveVoice({ basePath, audio: panel.querySelector("audio"), onStatus: message => {
+      panel.querySelector("[role=status]").textContent = message;
+      const active = Boolean(browserVoice?.active);
+      panel.querySelector("[data-voice-mute]").disabled = !active;
+      panel.querySelector("[data-voice-stop]").disabled = !active;
+      updateBrowserVoiceButton();
+    } });
+    stopSpeech();
+    await browserVoice.start(threadId);
+  } catch (error) { appendEvent(`实时语音：${error.message}`); }
+  finally { browserVoiceLoading = false; updateBrowserVoiceButton(); }
+}
+
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("pagehide", () => browserVoice?.stop());
 }
 
 function speechSupported() {
@@ -1631,6 +1703,7 @@ function taskExecutionCanInterrupt() {
 }
 
 function renderTaskExecutionStatus() {
+  if (state.pendingApproval?.kind === "input") renderInputCard(state.pendingApproval);
   let status = els.log.querySelector(".taskExecutionStatus");
   if (!state.running) {
     status?.remove();
@@ -1668,6 +1741,9 @@ function syncTaskExecutionStatus() {
 
 function appendMessage(role, text, meta = {}) {
   if (!text) return;
+  if (role === "user") {
+    for (const card of els.log.querySelectorAll(".transcriptQuestionCard")) card.dispatchEvent(new Event("questionAnswered"));
+  }
   const shouldFollow = isNearBottom();
   const isCompletion = role === "assistant" && /^✅\s/.test(text || "");
   const isLiveVoiceAssistant = role === "assistant" && Boolean(meta.liveVoiceTranscript);
@@ -1694,6 +1770,9 @@ function appendMessage(role, text, meta = {}) {
   }
   setMessageContent(item, text);
   wrapper.appendChild(item);
+  if (role === "assistant" && Array.isArray(meta.inputQuestions) && meta.inputQuestions.length) {
+    appendTranscriptQuestionCard(wrapper, meta.inputQuestions, meta.messageId || `question-${Date.now()}`, meta);
+  }
   const at = meta.at || (role === "user" ? new Date().toISOString() : "");
   const timeText = formatBubbleTime(at);
   const durationText = meta.taskDurationMs !== undefined && meta.taskDurationMs !== null ? formatDuration(meta.taskDurationMs) : "";
@@ -1709,6 +1788,83 @@ function appendMessage(role, text, meta = {}) {
   if (shouldFollow) scrollToLatest(true);
   else requestAnimationFrame(updateScrollJumps);
   return item;
+}
+
+const transcriptQuestionDrafts = new Map();
+function appendTranscriptQuestionCard(wrapper, questions = [], messageId = "", meta = {}) {
+  if (wrapper.querySelector(".transcriptQuestionCard")) return;
+  const threadId = state.threadId, connectorId = state.connectorId;
+  const key = JSON.stringify([connectorId, threadId, messageId]);
+  let draft = transcriptQuestionDrafts.get(key);
+  if (!draft) {
+    try { draft = JSON.parse(sessionStorage.getItem(`async-input:${key}`)); } catch {}
+    draft ||= { values: {}, paused: false, done: false, deadline: Date.now() + 60000 };
+    transcriptQuestionDrafts.set(key, draft);
+  }
+  const persist = () => { try { sessionStorage.setItem(`async-input:${key}`, JSON.stringify(draft)); } catch {} };
+  const normalized = questions.map((q, i) => ({ ...q, id: `async-${i}`, question: q.title || q.question || "", isOther: true,
+    options: (Array.isArray(q.options) ? q.options : []).map(o => typeof o === "string" ? { label: o } : o) }));
+  const card = document.createElement("section");
+  card.className = "transcriptQuestionCard";
+  card.innerHTML = `<strong>请选择回答</strong><div class="inputQuestionBody">${normalized.map(approvalQuestionHtml).join("")}</div><div class="inputQuestionActions"></div><div class="inputQuestionStatus" role="status"></div>`;
+  const status = card.querySelector(".inputQuestionStatus");
+  const roots = [...card.querySelectorAll("[data-question-id]")];
+  // Independent radio groups for multiple questions/cards in the transcript.
+  roots.forEach((root, index) => {
+    for (const radio of root.querySelectorAll('input[type="radio"]')) {
+      radio.name = `async-${key}-${index}`;
+      if (draft.values[index]) radio.checked = radio.value === draft.values[index].selected;
+    }
+    const field = root.querySelector("[data-approval-question]");
+    if (field) field.value = draft.values[index]?.text || "";
+  });
+  const button = (label, action) => { const b = document.createElement("button"); b.type = "button"; b.textContent = label; b.addEventListener("click", action); card.querySelector(".inputQuestionActions").appendChild(b); return b; };
+  let timer = 0;
+  const pause = () => {
+    clearInterval(timer); draft.paused = true;
+    roots.forEach((root, i) => { draft.values[i] = { selected: root.querySelector("input:checked")?.value || "", text: root.querySelector("[data-approval-question]")?.value || "" }; });
+    persist(); status.textContent = "已取消自动提交，请点击提交回答。";
+  };
+  card.addEventListener("input", event => {
+    if (event.target.matches("[data-approval-question]")) event.target.closest("[data-question-id]").querySelector("[data-other-answer]").checked = true;
+    pause();
+  });
+  card.addEventListener("change", pause);
+  const disable = () => { for (const e of card.querySelectorAll("button,input,textarea")) e.disabled = true; };
+  card.addEventListener("questionAnswered", () => {
+    clearInterval(timer); draft.done = true; persist(); disable(); status.textContent = "此问题已结束";
+  });
+  const send = async () => {
+    if (draft.done || draft.sending || !card.isConnected || state.threadId !== threadId || state.connectorId !== connectorId) return;
+    pause();
+    const answers = roots.map(root => root.querySelector("input:checked")?.value || root.querySelector("[data-approval-question]")?.value.trim() || "");
+    if (answers.some(a => !a)) { status.textContent = "请回答所有问题。"; return; }
+    const message = normalized.map((q, i) => `${q.question}\n我的选择：${answers[i]}`).join("\n\n");
+    draft.sending = true; disable(); status.textContent = "正在提交回答…";
+    try {
+      await request("/api/remote/send", { method: "POST", connectorId, body: JSON.stringify({ message, followMode: "steer", threadId }) });
+      draft.done = true; status.textContent = "回答已提交";
+    } catch (error) {
+      status.textContent = `提交失败：${error.message}`;
+      for (const e of card.querySelectorAll("button,input,textarea")) e.disabled = false;
+    } finally { draft.sending = false; persist(); }
+  };
+  button("提交回答", send).classList.add("primary");
+  button("取消倒计时", pause);
+  wrapper.appendChild(card);
+  const eligible = normalized.every(q => !q.isSecret && q.options.length && !q.options.some(o => /^(accept|allow|approve|decline|deny|cancel|允许|批准|拒绝|取消)/i.test(o.label || "")));
+  // Old history must never automatically send new messages after a reload.
+  const recent = !meta.at || Date.now() - Date.parse(meta.at) < 60000;
+  if (meta.inputResolved || draft.done) { disable(); status.textContent = "此问题已结束"; return; }
+  if (draft.paused || !eligible || !recent) { status.textContent = "请选择选项或填写回答，然后提交。"; return; }
+  persist();
+  timer = setInterval(() => {
+    if (!card.isConnected || state.threadId !== threadId || state.connectorId !== connectorId) { clearInterval(timer); return; }
+    if (draft.done || draft.paused) { clearInterval(timer); return; }
+    const remaining = Math.max(0, draft.deadline - Date.now());
+    status.textContent = `${Math.ceil(remaining / 1000)} 秒后自动提交推荐选项；选择或输入可取消倒计时。`;
+    if (!remaining) { clearInterval(timer); send(); }
+  }, 500);
 }
 
 function appendEvent(text) {
@@ -1749,7 +1905,7 @@ function persistAssistantNotice(text, messageId) {
   if (state.connectorId) return;
   request("/api/remote/notice", {
     method: "POST",
-    body: JSON.stringify({ message: text, messageId })
+    body: JSON.stringify({ message: text, messageId, threadId: state.threadId, runtimeId: state.runtimeId })
   }).then(() => {
     requestAnimationFrame(() => replayLocalNotices());
   }).catch((error) => console.error("failed to persist assistant notice", error));
@@ -1813,18 +1969,19 @@ function upsertAssistantMessage(text, final = false, messageId = "assistant", me
     // event sequence after reconnecting. A real app-server item id is stable,
     // so this is the same bubble rather than a new reply. Ignore late deltas
     // and only accept a repeated final payload as an idempotent content update.
-    if (final) setMessageContent(bubble, text);
+    if (final) {
+      setMessageContent(bubble, text);
+      if (meta.inputQuestions?.length) appendTranscriptQuestionCard(bubble.closest(".messageBlock"), meta.inputQuestions, messageId, meta);
+    }
     return bubble;
   }
   if (final && /^✅\s/.test(text || "")) {
-    if (bubble?.isConnected) {
-      const container = bubble.closest(".messageBlock") || bubble;
-      container.remove();
-    }
+    const previousContainer = bubble?.isConnected ? (bubble.closest(".messageBlock") || bubble) : null;
     const nextBubble = appendMessage("assistant", text, { ...meta, at: meta.at || new Date().toISOString() });
     if (nextBubble) {
       nextBubble.dataset.messageId = String(messageId);
       nextBubble.dataset.final = "true";
+      if (previousContainer) previousContainer.replaceWith(nextBubble.closest(".messageBlock") || nextBubble);
     }
     state.assistantBubbles.delete(messageId);
     if (shouldPersistLocalAssistantBubble(final, meta)) persistAssistantNotice(text, messageId);
@@ -1840,6 +1997,7 @@ function upsertAssistantMessage(text, final = false, messageId = "assistant", me
   } else {
     const shouldFollow = isNearBottom();
     setMessageContent(bubble, text);
+    if (meta.inputQuestions?.length) appendTranscriptQuestionCard(bubble.closest(".messageBlock"), meta.inputQuestions, messageId, meta);
     if (shouldFollow) scrollToLatest(true);
     else requestAnimationFrame(updateScrollJumps);
   }
@@ -1958,9 +2116,16 @@ function updateHostControls() {
 }
 
 async function switchHost(id) {
+  browserVoice?.stop();
   saveDraft();
   clearTimeout(draftTimer);
   saveServerDraft(composerText(), state.threadId, state.cwd);
+  clearApprovalModal();
+  state.pendingApprovalQueue = [];
+  threadSelectionGeneration += 1;
+  selectingConversation = false;
+  selectionEvents.length = 0;
+  state.snapshotEventSeq = 0;
   state.connectorId = id;
   localStorage.setItem("codex-remote-host", id);
   stateLoadGeneration += 1;
@@ -1989,10 +2154,15 @@ function isCurrentStateSnapshot(generation, snapshotEventSeq) {
 }
 
 async function loadState() {
+  if (selectingConversation) return false;
   const generation = ++stateLoadGeneration;
+  const threadId = state.threadId;
+  const runtimeId = state.runtimeId;
   const stateUrl = state.showFullReplies ? "/api/remote/state?full=1" : "/api/remote/state";
   const data = await request(stateUrl);
   if (!isCurrentStateSnapshot(generation, data.eventSeq)) return false;
+  if (threadId && data.threadId !== threadId) return false;
+  if (!threadId && runtimeId && data.runtimeId !== runtimeId) return false;
   renderState(data);
   return true;
 }
@@ -2017,6 +2187,7 @@ function renderState(data) {
   const previousThreadId = state.threadId;
   const nextThreadId = data.threadId || "";
   if (nextThreadId !== previousThreadId) {
+    browserVoice?.stop();
     stopSpeech();
     clearTaskExecutionDetail();
   }
@@ -2024,6 +2195,8 @@ function renderState(data) {
     || settingsResponseIsCurrent(data.modelSettingsUpdatedAt || "");
   if (Number(data.eventSeq) > state.lastEventSeq) state.lastEventSeq = Number(data.eventSeq);
   state.threadId = nextThreadId;
+  state.runtimeId = data.runtimeId || "";
+  state.snapshotEventSeq = Math.max(state.snapshotEventSeq || 0, Number(data.eventSeq) || 0);
   if (Object.prototype.hasOwnProperty.call(data, "threadName")) {
     state.threadName = data.threadName || "";
   } else if (state.threadId !== previousThreadId) {
@@ -2060,13 +2233,13 @@ function renderState(data) {
     appendEvent(`完整输出共 ${state.fullMessageCount} 条；为保证手机页面流畅，当前显示最近 ${historyMessages.length} 条。`);
   }
   for (const message of historyMessages) {
-    appendMessage(message.role, message.content, message);
+    appendMessage(message.role, message.content, { ...message, final: message.final !== false });
     renderedMessages.add(renderedMessageKey(message));
   }
   for (const message of data.liveMessages || []) {
     if (message.final && renderedMessages.has(renderedMessageKey(message))) continue;
     if (message.role === "assistant") {
-      upsertAssistantMessage(message.content, message.final, message.messageId || "assistant", message);
+      upsertAssistantMessage(message.content, message.final, message.messageId || "assistant", { ...message, persist: false });
     } else {
       appendMessage(message.role, message.content, message);
     }
@@ -2651,9 +2824,7 @@ async function openNewSessionPicker(dir = undefined) {
     const cwd = prompt("输入所选电脑上的项目绝对路径", state.cwd || "");
     if (!cwd?.trim()) return;
     try {
-      const data = await request("/api/remote/new", { method: "POST", body: JSON.stringify({ cwd: cwd.trim() }) });
-      renderState(data);
-      els.threadPanel.hidden = true;
+      await requestConversation("/api/remote/new", { cwd: cwd.trim() });
     } catch (error) { appendEvent(error.message); }
     return;
   }
@@ -2700,12 +2871,8 @@ async function openNewSessionPicker(dir = undefined) {
 }
 
 async function createSessionInSelectedFolder() {
-  const data = await request("/api/remote/new", {
-    method: "POST",
-    body: JSON.stringify({ cwd: state.newCwd || "" })
-  });
-  renderState(data);
-  els.threadPanel.hidden = true;
+  browserVoice?.stop();
+  await requestConversation("/api/remote/new", { cwd: state.newCwd || "" });
 }
 
 async function previewFile(file) {
@@ -2889,15 +3056,29 @@ async function deleteThread(thread) {
   }
 }
 
+async function requestConversation(url, body) {
+  const generation = ++threadSelectionGeneration;
+  stateLoadGeneration += 1;
+  selectingConversation = true;
+  try {
+    const data = await request(url, { method: "POST", body: JSON.stringify(body) });
+    if (generation !== threadSelectionGeneration) return false;
+    renderState(data);
+    els.threadPanel.hidden = true;
+    return true;
+  } finally {
+    if (generation === threadSelectionGeneration) {
+      selectingConversation = false;
+      processRemoteEvents(selectionEvents.splice(0));
+    }
+  }
+}
+
 async function selectThread(threadId) {
-  const data = await request("/api/remote/select", {
-    method: "POST",
-    body: JSON.stringify({ threadId })
-  });
+  browserVoice?.stop();
+  if (!await requestConversation("/api/remote/select", { threadId })) return;
   state.completedUnreadThreads.delete(threadId);
   if (state.showFullReplies) await loadState();
-  else renderState(data);
-  els.threadPanel.hidden = true;
 }
 
 let externalSessionRefreshTimer = null;
@@ -2940,6 +3121,7 @@ function remoteEventSequence(data = {}) {
 function rememberRemoteEvent(data = {}) {
   const sequence = remoteEventSequence(data);
   if (!sequence) return true;
+  if (sequence <= (state.snapshotEventSeq || 0)) return false;
   if (processedEventSeqs.has(sequence)) return false;
   processedEventSeqs.add(sequence);
   while (processedEventSeqs.size > 1000) {
@@ -3089,6 +3271,7 @@ function showNextApproval() {
     return;
   }
   renderApprovalModal(next);
+  if (next.kind === "input") return;
   els.approvalModal.hidden = false;
   requestAnimationFrame(() => {
     const primary = els.approvalActions.querySelector(".approvalPrimary");
@@ -3097,6 +3280,10 @@ function showNextApproval() {
 }
 
 function clearApprovalModal() {
+  els.log?.querySelector(".inputQuestionCard")?.remove();
+  if (approvalAutoTimer) clearInterval(approvalAutoTimer);
+  approvalAutoTimer = 0;
+  approvalAutoDeadline = 0;
   state.pendingApproval = null;
   state.pendingApprovalSubmitting = false;
   if (els.approvalModal) els.approvalModal.hidden = true;
@@ -3175,22 +3362,18 @@ function approvalQuestionHtml(question = {}, index = 0) {
   const questionId = question.id || `question-${index}`;
   const options = Array.isArray(question.options) ? question.options : [];
   const optionName = `approval-question-${questionId}`;
-  const optionsHtml = options.map((option, optionIndex) => `
+  const recommended = inputRecommendedOption(question);
+  const optionsHtml = options.map(option => `
     <label class="approvalOption">
-      <input type="${question.isOther ? "checkbox" : "radio"}" name="${escapeHtml(optionName)}" value="${escapeHtml(option.label || option.description || String(optionIndex))}" ${optionIndex === 0 && !question.isOther ? "checked" : ""}>
-      <span>${escapeHtml(option.label || "")}${option.description ? ` <small>${escapeHtml(option.description)}</small>` : ""}</span>
-    </label>
-  `).join("");
-  const inputHtml = question.isSecret
-    ? `<input class="approvalInput" data-approval-question="${escapeHtml(questionId)}" type="password" placeholder="输入回答">`
-    : `<textarea class="approvalTextarea" data-approval-question="${escapeHtml(questionId)}" placeholder="输入回答"></textarea>`;
-  return `
-    <div class="approvalQuestion" data-question-id="${escapeHtml(questionId)}">
-      <strong>${escapeHtml(question.header || question.question || `问题 ${index + 1}`)}</strong>
-      ${question.question ? `<p>${escapeHtml(question.question)}</p>` : ""}
-      ${optionsHtml || inputHtml}
-    </div>
-  `;
+      <input type="radio" name="${escapeHtml(optionName)}" value="${escapeHtml(option.label || "")}" ${option === recommended ? "checked" : ""}>
+      <span>${escapeHtml(option.label || "")}${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}</span>
+    </label>`).join("");
+  const freeText = !options.length || question.isOther;
+  const inputHtml = freeText ? `${options.length ? `<label class="approvalOption"><input type="radio" data-other-answer name="${escapeHtml(optionName)}" value=""><span>其他回答</span></label>` : ""}
+    ${question.isSecret ? `<input class="approvalInput" type="password" autocomplete="off"` : `<textarea class="approvalTextarea"`} data-approval-question="${escapeHtml(questionId)}" placeholder="输入回答">${question.isSecret ? "" : "</textarea>"}` : "";
+  return `<div class="approvalQuestion" data-question-id="${escapeHtml(questionId)}">
+    <strong>${escapeHtml(question.header || `问题 ${index + 1}`)}</strong>
+    <p>${escapeHtml(question.question || "")}</p>${optionsHtml}${inputHtml}</div>`;
 }
 
 function elicitationFieldsHtml(schema = {}) {
@@ -3211,6 +3394,7 @@ function elicitationFieldsHtml(schema = {}) {
 }
 
 function renderApprovalModal(request = {}) {
+  if (request.kind === "input") { renderInputCard(request); return; }
   if (!els.approvalKind || !els.approvalTitle) return;
   const kindLabel = approvalKindLabel(request.kind);
   els.approvalKind.textContent = kindLabel;
@@ -3219,6 +3403,105 @@ function renderApprovalModal(request = {}) {
   els.approvalBody.innerHTML = approvalBodyHtml(request);
   renderApprovalActions(request);
   els.approvalStatus.textContent = "";
+  startInputAutoResolution(request);
+}
+
+function inputDraft(request) {
+  const key = approvalRequestKey(request);
+  if (!inputDrafts.has(key)) {
+    let saved;
+    try { saved = JSON.parse(sessionStorage.getItem(`codex-input:${key}`) || "null"); } catch {}
+    inputDrafts.set(key, saved || { paused: false, values: {} });
+  }
+  return inputDrafts.get(key);
+}
+
+function pauseInputCountdown(request) {
+  const draft = inputDraft(request);
+  draft.paused = true;
+  const card = els.log.querySelector(".inputQuestionCard");
+  if (card) {
+    for (const root of card.querySelectorAll("[data-question-id]")) {
+      draft.values[root.dataset.questionId] = {
+        selected: root.querySelector('input[type="radio"]:checked')?.value || "",
+        text: root.querySelector("[data-approval-question]")?.value || ""
+      };
+    }
+  }
+  const persisted = { ...draft, values: { ...draft.values } };
+  for (const question of request.questions || []) if (question.isSecret) delete persisted.values[question.id];
+  try { sessionStorage.setItem(`codex-input:${approvalRequestKey(request)}`, JSON.stringify(persisted)); } catch {}
+  clearInterval(approvalAutoTimer); approvalAutoTimer = 0;
+  setApprovalStatus("已取消自动提交，请选择后点击提交回答。");
+}
+
+function inputRecommendedOption(question) {
+  return question.options?.find(option => /推荐|recommended/i.test(option.label)) || question.options?.[0];
+}
+
+function renderInputCard(request) {
+  const key = approvalRequestKey(request);
+  const old = els.log.querySelector(".inputQuestionCard");
+  if (request.threadId && state.threadId && request.threadId !== state.threadId) {
+    old?.remove(); clearInterval(approvalAutoTimer); approvalAutoTimer = 0; return;
+  }
+  if (old?.dataset.requestKey === key) return;
+  old?.remove();
+  els.approvalModal.hidden = true;
+  const card = document.createElement("section");
+  card.className = "inputQuestionCard";
+  card.dataset.requestKey = key;
+  card.innerHTML = `<strong>请选择或填写回答</strong><div class="inputQuestionBody">${(request.questions || []).map(approvalQuestionHtml).join("")}</div><div class="inputQuestionActions"></div><div class="inputQuestionStatus" role="status"></div>`;
+  const actions = card.querySelector(".inputQuestionActions");
+  actions.append(approvalButton("提交回答", "submit", { primary: true }), approvalButton("跳过回答", "cancel"));
+  const pause = document.createElement("button");
+  pause.type = "button"; pause.textContent = "取消倒计时";
+  pause.hidden = request.autoSubmitAt == null;
+  pause.addEventListener("click", () => pauseInputCountdown(request));
+  actions.append(pause);
+  const draft = inputDraft(request);
+  for (const root of card.querySelectorAll("[data-question-id]")) {
+    const saved = draft.values[root.dataset.questionId];
+    if (!saved) continue;
+    for (const radio of root.querySelectorAll('input[type="radio"]')) radio.checked = radio.value === saved.selected;
+    const field = root.querySelector("[data-approval-question]");
+    if (field) field.value = saved.text;
+  }
+  card.addEventListener("input", event => {
+    const root = event.target.closest("[data-question-id]");
+    if (event.target.matches("[data-approval-question]") && root) {
+      const other = root.querySelector('input[data-other-answer]');
+      if (other) other.checked = true;
+    }
+    pauseInputCountdown(request);
+  });
+  card.addEventListener("change", () => pauseInputCountdown(request));
+  els.log.appendChild(card);
+  startInputAutoResolution(request);
+}
+
+function startInputAutoResolution(request = {}) {
+  clearInterval(approvalAutoTimer); approvalAutoTimer = 0;
+  const draft = inputDraft(request);
+  if (request.kind !== "input" || request.autoSubmitAt == null || draft.paused) {
+    setApprovalStatus(draft.paused ? "自动提交已取消，请手动回答。" : "请选择选项或填写回答。");
+    return;
+  }
+  approvalAutoDeadline = request.autoSubmitAt;
+  const key = approvalRequestKey(request);
+  const tick = () => {
+    if (!state.pendingApproval || approvalRequestKey(state.pendingApproval) !== key || state.pendingApprovalSubmitting) return;
+    if (request.threadId && request.threadId !== state.threadId) return;
+    const remaining = Math.max(0, approvalAutoDeadline - Date.now());
+    if (remaining <= 0) {
+      pauseInputCountdown(request);
+      submitApprovalFromModal({ automatic: true });
+      return;
+    }
+    setApprovalStatus(`${Math.ceil(remaining / 1000)} 秒后自动提交推荐选项（未标推荐时选第一项）；手动选择或输入将取消倒计时。`);
+  };
+  approvalAutoTimer = setInterval(tick, 1000);
+  tick();
 }
 
 function approvalButton(label = "", decision = "", options = {}) {
@@ -3270,17 +3553,21 @@ function renderApprovalActions(request = {}) {
 }
 
 function setApprovalStatus(message = "") {
+  const status = els.log?.querySelector(".inputQuestionStatus");
+  if (state.pendingApproval?.kind === "input" && status) { status.textContent = message; return; }
   if (els.approvalStatus) els.approvalStatus.textContent = message;
 }
 
 function setApprovalButtonsDisabled(disabled = false) {
-  for (const button of els.approvalActions?.querySelectorAll("button") || []) {
+  for (const button of state.pendingApproval?.kind === "input" ? els.log.querySelectorAll(".inputQuestionCard button, .inputQuestionCard input, .inputQuestionCard textarea") : els.approvalActions?.querySelectorAll("button") || []) {
     button.disabled = disabled;
   }
 }
 
 async function submitApproval(decision = "", payload = {}, options = {}) {
   if (!state.pendingApproval || state.pendingApprovalSubmitting) return;
+  const submittedApproval = state.pendingApproval;
+  clearInterval(approvalAutoTimer); approvalAutoTimer = 0;
   state.pendingApprovalSubmitting = true;
   setApprovalStatus(options.automatic ? "正在自动确认..." : "正在提交确认...");
   setApprovalButtonsDisabled(true);
@@ -3297,11 +3584,13 @@ async function submitApproval(decision = "", payload = {}, options = {}) {
         ...payload
       })
     });
-    const completedApproval = state.pendingApproval;
+    if (!state.pendingApproval || approvalRequestKey(state.pendingApproval) !== approvalRequestKey(submittedApproval)) return;
+    const completedApproval = submittedApproval;
     state.pendingApprovalQueue = state.pendingApprovalQueue.filter((item) => approvalRequestKey(item) !== approvalRequestKey(completedApproval));
     clearApprovalModal();
     showNextApproval();
   } catch (error) {
+    if (!state.pendingApproval || approvalRequestKey(state.pendingApproval) !== approvalRequestKey(submittedApproval)) return;
     if (/审批请求不存在或已处理/.test(String(error?.message || ""))) {
       const expiredApproval = state.pendingApproval;
       resolveApprovalRequest(expiredApproval?.requestId, expiredApproval?.approvalScope);
@@ -3311,23 +3600,23 @@ async function submitApproval(decision = "", payload = {}, options = {}) {
     state.pendingApprovalSubmitting = false;
     if (options.automatic && els.approvalModal) {
       renderApprovalModal(state.pendingApproval);
-      els.approvalModal.hidden = false;
+      els.approvalModal.hidden = state.pendingApproval.kind === "input";
     }
     setApprovalStatus(options.automatic ? `自动确认失败：${error.message || "请手动处理。"}` : (error.message || "提交失败。"));
     setApprovalButtonsDisabled(false);
   }
 }
 
-function submitApprovalFromModal() {
+function submitApprovalFromModal(options = {}) {
   const request = state.pendingApproval;
   if (!request) return;
   const payload = {};
   if (request.kind === "input") {
     const answers = {};
-    for (const root of els.approvalBody.querySelectorAll("[data-question-id]")) {
+    for (const root of (els.log.querySelector(".inputQuestionCard") || els.approvalBody).querySelectorAll("[data-question-id]")) {
       const questionId = root.dataset.questionId;
       const selected = [...root.querySelectorAll(`input[name="${CSS.escape(`approval-question-${questionId}`)}"]:checked`)].map((input) => input.value);
-      if (selected.length) {
+      if (selected.length && selected[0]) {
         answers[questionId] = { answers: selected };
         continue;
       }
@@ -3336,9 +3625,15 @@ function submitApprovalFromModal() {
         answers[questionId] = { answers: [field.value.trim()] };
       }
     }
+    if (options.automatic) {
+      for (const question of request.questions || []) {
+        const first = inputRecommendedOption(question);
+        if (first?.label) answers[question.id] = { answers: [first.label] };
+      }
+    }
     payload.answers = answers;
-    if (!Object.keys(answers).length) {
-      setApprovalStatus("请至少填写一个回答。");
+    if (Object.keys(answers).length !== (request.questions || []).length) {
+      setApprovalStatus("请为每个问题选择一个选项或填写回答。");
       return;
     }
   }
@@ -3360,15 +3655,32 @@ function submitApprovalFromModal() {
       return;
     }
   }
-  submitApproval("accept", payload);
+  submitApproval("accept", payload, options);
 }
 
 function handleRemoteEvent(data) {
+  if (selectingConversation) {
+    selectionEvents.push(data);
+    return;
+  }
   if (!rememberRemoteEvent(data)) return;
   if ((data.connectorId || "") !== state.connectorId) return;
   if (data.type === "approval_request") { queueApprovalRequest(data); return; }
   if (data.type === "approval_resolved") { resolveApprovalRequest(data.requestId, data.approvalScope); return; }
-  if (state.connectorId && data.threadId && data.threadId !== state.threadId) return;
+  if (data.type !== "runner_status" && data.type !== "thread_completion") {
+    if (data.type === "state") {
+      const sameThread = (data.threadId || "") === state.threadId;
+      const sameRuntime = state.runtimeId && data.runtimeId === state.runtimeId;
+      const explicitNew = data.previousThreadId === state.threadId
+        && data.previousRuntimeId === state.runtimeId;
+      if (!sameThread && !sameRuntime && !explicitNew) return;
+      if (!data.threadId && data.runtimeId && state.runtimeId
+          && !sameRuntime && !explicitNew) return;
+    } else {
+      if (data.threadId !== undefined && data.threadId !== state.threadId) return;
+      if (!data.threadId && data.runtimeId && data.runtimeId !== state.runtimeId) return;
+    }
+  }
   if (data.type === "model_settings_update") {
     if (data.threadId !== state.threadId) return;
     applyIncomingModelSettings(data);
@@ -3584,6 +3896,12 @@ async function refreshNativeNotificationStatus() {
 async function sendMessage(mode = "steer") {
   cancelPendingAndroidImeEnter();
   const message = composerText().trim();
+  const voiceCommand = message.match(/^\/voice(?:\s+(on|off))?$/i);
+  if (voiceCommand) {
+    els.input.value = ""; clearDraft(); autosizeInput();
+    await toggleBrowserLiveVoice(voiceCommand[1]?.toLowerCase() || "");
+    return;
+  }
   if (!message && !state.uploads.length) return;
   const outgoingMessage = messageWithUploads(message);
   const sendMode = mode === "steer" ? "steer" : "queue";
@@ -4146,6 +4464,8 @@ document.querySelector("#hostRemove").addEventListener("click", async () => {
     els.meta.textContent = error.message;
   })
   .then(connectEvents);
+document.querySelector("#browserVoiceRemote")?.addEventListener("click", () => toggleBrowserLiveVoice());
+updateBrowserVoiceButton();
 restorePushSubscription();
 refreshNativeNotificationStatus().catch(() => {});
 autosizeInput();

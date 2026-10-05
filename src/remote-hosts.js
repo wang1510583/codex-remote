@@ -48,6 +48,7 @@ export function remoteThreadView(thread = {}, { full = false, limit = 1000 } = {
         message = { role: "user", content, at, messageId: item.id };
       } else if (item.type === "agentMessage") {
         message = { role: "assistant", content: assistantBubbleText(item.text || "", item.phase), at, messageId: item.id };
+        if (Array.isArray(item.questions) && item.questions.length) message.inputQuestions = item.questions;
       }
       if (message?.content) { messages.push(message); fullMessages.push(message); }
       else {
@@ -57,6 +58,11 @@ export function remoteThreadView(thread = {}, { full = false, limit = 1000 } = {
     }
   }
   const activeTurn = (thread.turns || []).findLast((turn) => turn.status === "inProgress");
+  let laterUserMessage = false;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index].role === "user") laterUserMessage = true;
+    if (messages[index].inputQuestions) messages[index].inputResolved = laterUserMessage;
+  }
   const running = thread.status?.type === "active" || Boolean(activeTurn);
   return {
     threadId: thread.id, cwd: thread.cwd || "", absoluteCwd: thread.cwd || "",

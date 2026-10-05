@@ -58,14 +58,14 @@ test("browser status distinguishes connected voice, detached voice task, and ext
   assert.match(source, /Live Voice 已断线 · 后台任务继续执行 · 等待重连/);
 });
 
-test("Live Voice owns a dedicated feature-enabled app-server", async () => {
+test("Live Voice shares the thread writer and enables realtime for standalone fallback", async () => {
   const runtimeSource = await readFile(
     new URL("../src/live-voice/runtime.js", import.meta.url),
     "utf8"
   );
   assert.match(
     runtimeSource,
-    /appServerFactory\s*=\s*\(\)\s*=>\s*createLocalAppServer\(\{[\s\S]*?realtime:\s*true,[\s\S]*?useShared:\s*false[\s\S]*?\}\)/
+    /appServerFactory\s*=\s*\(\)\s*=>\s*createLocalAppServer\(\{[\s\S]*?realtime:\s*true,[\s\S]*?useShared:\s*true[\s\S]*?\}\)/
   );
 
   const serverSource = await readFile(
