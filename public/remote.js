@@ -275,11 +275,17 @@ async function toggleBrowserLiveVoice(force = "") {
       const active = Boolean(browserVoice?.active);
       panel.querySelector("[data-voice-mute]").disabled = !active;
       panel.querySelector("[data-voice-stop]").disabled = !active;
+      if (!active) {
+        panel.remove();
+      }
       updateBrowserVoiceButton();
     } });
     stopSpeech();
     await browserVoice.start(threadId);
-  } catch (error) { appendEvent(`实时语音：${error.message}`); }
+  } catch (error) {
+    if (!browserVoice?.active) document.querySelector("#browserVoicePanel")?.remove();
+    appendEvent(`实时语音：${error.message}`);
+  }
   finally { browserVoiceLoading = false; updateBrowserVoiceButton(); }
 }
 
