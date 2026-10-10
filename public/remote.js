@@ -2722,7 +2722,7 @@ async function openFiles(dir = "") {
     state.fileCwd = data.cwd || "";
     els.filePath.textContent = displayProjectPath(data.cwd, data.absoluteCwd);
     els.fileList.innerHTML = "";
-    if (data.cwd) {
+    if (connectorId ? data.parent !== null : data.cwd) {
       const up = document.createElement("button");
       up.className = "fileItem";
       up.type = "button";
@@ -2825,26 +2825,28 @@ async function deleteProjectItem(file = "", name = "", type = "") {
   await openFiles(state.fileCwd);
 }
 
+let newFolderRequestGeneration = 0;
+let newFolderConnectorId = null;
 async function openNewSessionPicker(dir = undefined) {
-  if (state.connectorId) {
-    const cwd = prompt("输入所选电脑上的项目绝对路径", state.cwd || "");
-    if (!cwd?.trim()) return;
-    try {
-      await requestConversation("/api/remote/new", { cwd: cwd.trim() });
-    } catch (error) { appendEvent(error.message); }
-    return;
-  }
-  const nextDir = dir === undefined ? (state.newCwd || state.cwd || "") : dir;
+  const generation = ++newFolderRequestGeneration;
+  const connectorId = state.connectorId || "";
+  const nextDir = dir === undefined
+    ? (newFolderConnectorId === connectorId ? state.newCwd : (state.cwd || "")) : dir;
+  newFolderConnectorId = connectorId;
+  els.createSession.disabled = true;
   state.newCwd = nextDir || "";
   els.threadPanel.hidden = false;
   setThreadView("new");
   els.newList.innerHTML = '<div class="remoteEvent">加载中...</div>';
   try {
-    const data = await request(`/api/remote/files?dir=${encodeURIComponent(state.newCwd)}`);
+    const endpoint = connectorId ? "folders" : "files";
+    const data = await request(`/api/remote/${endpoint}?dir=${encodeURIComponent(state.newCwd)}`);
+    if (generation !== newFolderRequestGeneration || connectorId !== (state.connectorId || "")) return;
+    els.createSession.disabled = data.selectable === false;
     state.newCwd = data.cwd || "";
     els.newPath.textContent = data.absoluteCwd || displayProjectPath(state.newCwd);
     els.newList.innerHTML = "";
-    if (data.cwd) {
+    if (connectorId ? data.parent !== null : data.cwd) {
       const up = document.createElement("button");
       up.className = "fileItem";
       up.type = "button";
@@ -2872,11 +2874,13 @@ async function openNewSessionPicker(dir = undefined) {
     }
     applyDotFolderFilter(els.newList, els.newDotFolderFilter, state.hideNewSessionDotFolders);
   } catch (error) {
-    els.newList.innerHTML = `<div class="remoteEvent">错误：${error.message}</div>`;
+    if (generation !== newFolderRequestGeneration || connectorId !== (state.connectorId || "")) return;
+    els.newList.innerHTML = `<div class="remoteEvent">错误：${escapeHtml(error.message)}</div>`;
   }
 }
 
 async function createSessionInSelectedFolder() {
+  if (els.createSession.disabled || newFolderConnectorId !== (state.connectorId || "")) return;
   browserVoice?.stop();
   await requestConversation("/api/remote/new", { cwd: state.newCwd || "" });
 }

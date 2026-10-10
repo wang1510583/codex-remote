@@ -20,7 +20,8 @@ export async function handleRemoteHostHttp(req, res, url, hosts = remoteHosts) {
   const full = url.searchParams.get("full") === "1";
   let result;
   if (req.method === "GET") {
-    if (route === "threads") result = await hosts.threads(id);
+    if (route === "folders") result = await hosts.folders(id, url.searchParams.get("dir") || "");
+    else if (route === "threads") result = await hosts.threads(id);
     else if (route === "state") result = await hosts.state(id, { full });
     else if (route === "model-settings") {
       const state = await hosts.state(id);

@@ -191,6 +191,36 @@ export class RemoteHosts {
   approvals(id) {
     return [...this.runs.values()].filter((run) => run.hostId === id).flatMap((run) => run.server.pendingApprovalRequests());
   }
+  async folders(id, directory = "") {
+    const server = await this.control(id);
+    if (!directory) {
+      // Fixed commands only: directory names are never interpolated into a shell.
+      const drives = await server.request("command/exec", {
+        command: ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+          "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); @(Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Root }) | ConvertTo-Json -Compress"],
+        timeoutMs: 10000
+      }).catch(() => null);
+      if (drives?.exitCode === 0) {
+        const parsed = JSON.parse(drives.stdout.replace(/^\uFEFF/, "").trim());
+        const roots = (Array.isArray(parsed) ? parsed : [parsed]).filter(value => typeof value === "string" && path.win32.isAbsolute(value));
+        if (roots.length) return { cwd: "", absoluteCwd: "此电脑", parent: null, selectable: false,
+          entries: roots.map(root => ({ name: root, path: root, type: "dir" })) };
+      }
+      directory = "/";
+    }
+    if (typeof directory !== "string" || directory.includes("\0")) throw fail("目录路径无效。");
+    const windows = /^[a-z]:[\\/]/i.test(directory) || directory.startsWith("\\\\");
+    const paths = windows ? path.win32 : path.posix;
+    if (!paths.isAbsolute(directory)) throw fail("请选择远端电脑的绝对路径。");
+    const cwd = paths.normalize(directory);
+    const result = await server.request("fs/readDirectory", { path: cwd });
+    const entries = (result.entries || []).filter(item => item.isDirectory
+      && typeof item.fileName === "string" && item.fileName !== "." && item.fileName !== ".."
+      && !/[\\/]/.test(item.fileName)).map(item => ({ name: item.fileName, path: paths.join(cwd, item.fileName), type: "dir" }));
+    entries.sort((a, b) => a.name.localeCompare(b.name, "zh-CN", { numeric: true }));
+    const parent = paths.dirname(cwd);
+    return { cwd, absoluteCwd: cwd, parent: parent === cwd ? (windows ? "" : null) : parent, selectable: true, entries };
+  }
   async threads(id) {
     const server = await this.control(id);
     const threads = [];
