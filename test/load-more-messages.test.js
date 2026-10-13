@@ -1,10 +1,35 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdtemp, writeFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { loadThreadFromProvider } from "../src/threads.js";
+import { loadThreadFromProvider, localSessionProvider } from "../src/threads.js";
 
 const threadId = "11111111-1111-4111-8111-111111111111";
 const sessionFile = `/tmp/rollout-test-${threadId}.jsonl`;
+test("local history reads a file tail and expands it only when requested", async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'recent-history-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = path.join(directory, path.basename(sessionFile));
+  const text = sessionWithMessages(6000);
+  await writeFile(file, text);
+  const provider = {
+    listFiles: async () => [{ file }],
+    readRecentFile: localSessionProvider.readRecentFile,
+    readFile: async () => { throw new Error('must not read the entire file'); }
+  };
+  const recent = await provider.readRecentFile(file, 10);
+  assert.ok(Buffer.byteLength(recent.text) < Buffer.byteLength(text) / 2);
+  const initial = await loadThreadFromProvider(threadId, provider);
+  assert.equal(initial.messages.length, 10);
+  assert.equal(initial.messages[0].content, 'message-5990');
+  assert.equal(initial.cwd, '/tmp/project');
+  assert.equal(initial.hasMore, true);
+  assert.equal(initial.fullMessages.length, 10);
+  const expanded = await loadThreadFromProvider(threadId, provider, 6000);
+  assert.equal(expanded.messages.length, 6000);
+  assert.equal(expanded.hasMore, false);
+});
 
 function sessionWithMessages(count) {
   const rows = [{

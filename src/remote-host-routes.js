@@ -21,6 +21,8 @@ export async function handleRemoteHostHttp(req, res, url, hosts = remoteHosts) {
   let result;
   if (req.method === "GET") {
     if (route === "folders") result = await hosts.folders(id, url.searchParams.get("dir") || "");
+    else if (route === "files") result = await hosts.files(id, url.searchParams.get("dir") || "");
+    else if (route === "file") result = await hosts.file(id, url.searchParams.get("path") || "");
     else if (route === "threads") result = await hosts.threads(id);
     else if (route === "state") result = await hosts.state(id, { full });
     else if (route === "model-settings") {
@@ -38,11 +40,11 @@ export async function handleRemoteHostHttp(req, res, url, hosts = remoteHosts) {
     }
   } else if (req.method === "POST") {
     const body = await readBody(req);
-    if (route === "select") result = await hosts.select(id, body.threadId);
+    if (route === "select") result = await hosts.select(id, body.threadId, { full });
     else if (route === "model-settings") result = await hosts.updateModelSettings(id, body);
     else if (route === "draft") result = await hosts.draft(id, body);
     else if (route === "send") result = await hosts.send(id, body);
-    else if (route === "more") result = await hosts.state(id, { full, limit: 10000 });
+    else if (route === "more") result = await hosts.more(id, body, { full });
     else if (route === "approval/respond") result = { ok: true, ...await hosts.respond(id, body) };
     else if (["new", "name", "delete"].includes(route)) {
       const server = await hosts.control(id);

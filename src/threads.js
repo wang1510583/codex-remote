@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
@@ -688,6 +688,27 @@ async function listLocalSessionFiles(dir = sessionsDir, out = []) {
 export const localSessionProvider = {
   async listFiles() { return listLocalSessionFiles(); },
   async readFile(file) { return readFile(file, "utf8"); },
+  async readRecentFile(file, limit) {
+    const handle = await open(file, "r");
+    try {
+      const { size } = await handle.stat();
+      const head = Buffer.alloc(Math.min(size, 256 * 1024));
+      const first = await handle.read(head, 0, head.length, 0);
+      const headerEnd = head.subarray(0, first.bytesRead).indexOf(10);
+      const header = headerEnd >= 0 ? head.subarray(0, headerEnd + 1).toString("utf8") : "";
+      let bytes = Math.min(size, 256 * 1024);
+      while (true) {
+        const start = Math.max(0, size - bytes);
+        const buffer = Buffer.alloc(bytes);
+        const { bytesRead } = await handle.read(buffer, 0, bytes, start);
+        const raw = buffer.subarray(0, bytesRead);
+        const newline = start ? raw.indexOf(10) : -1;
+        const text = start ? header + (newline >= 0 ? raw.subarray(newline + 1).toString("utf8") : "") : raw.toString("utf8");
+        if (!start || parseSessionFile(text, file, limit, { includeFull: false }).messageCount > limit) return { text, hasMore: start > 0 };
+        bytes = Math.min(size, bytes * 2);
+      }
+    } finally { await handle.close(); }
+  },
   async deleteFile(file) { return unlink(file); }
 };
 
@@ -704,8 +725,18 @@ export async function loadThreadFromProvider(threadId, provider = localSessionPr
   const hit = files.find((item) => threadIdFromFile(item.file) === threadId);
   if (!hit) throw new Error("没有找到这个 Codex 会话。");
   const requestedLimit = Math.max(defaultMessageLimit, Math.floor(Number(limit) || defaultMessageLimit));
+  const recent = provider.readRecentFile ? await provider.readRecentFile(hit.file, requestedLimit) : { text: await provider.readFile(hit.file), hasMore: false };
+  const parsed = parseSessionFile(recent.text, hit.file, requestedLimit);
+  const firstMessage = parsed.messages[0];
+  const fullStart = firstMessage ? parsed.fullMessages.findIndex(message =>
+    message.role === firstMessage.role && message.at === firstMessage.at
+    && (firstMessage.messageId ? message.messageId === firstMessage.messageId : String(message.content || "").includes(firstMessage.content.replace(/^[✅🤔]\s/u, "")))) : -1;
+  const fullMessages = fullStart >= 0 ? parsed.fullMessages.slice(fullStart) : parsed.fullMessages.slice(-requestedLimit * 4);
   return {
-    ...parseSessionFile(await provider.readFile(hit.file), hit.file, requestedLimit),
+    ...parsed,
+    hasMore: recent.hasMore || parsed.messageCount > parsed.messages.length,
+    fullMessages,
+    fullMessageCount: fullMessages.length,
     file: hit.file,
     mtimeMs: Number(hit.mtimeMs) || 0
   };

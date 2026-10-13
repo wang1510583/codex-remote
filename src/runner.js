@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { rootDir, restartScript, codexConnectWaitMs, codexConnectTimeoutMs, codexTurnTimeoutMs, codexWorkDir } from "./config.js";
+import { rootDir, restartScript, codexConnectWaitMs, codexConnectTimeoutMs, codexTurnTimeoutMs, codexWorkDir, defaultMessageLimit } from "./config.js";
 import { cleanText } from "./utils.js";
 import { broadcast, currentEventSeq } from "./sse.js";
 import {
@@ -719,11 +719,15 @@ export function liveFullMessagesFor(runner) {
 export function runnerStatePayload(runner, extra = {}) {
   const status = statusPayload(runner);
   delete status.type;
+  const messages = (runner.state.messages || []).slice(-(runner.historyLimit || defaultMessageLimit));
   return {
     ...runner.state,
     ...extra,
     absoluteCwd: resolveAbsoluteCwd({ ...runner.state, ...extra }),
     ...status,
+    messages,
+    loadedCount: messages.length,
+    hasMore: Boolean(runner.state.hasMore) || (runner.state.messages || []).length > messages.length,
     liveMessages: liveMessagesFor(runner)
   };
 }
@@ -746,6 +750,8 @@ export async function createRunner(state = {}) {
       modelSettingsUpdatedAt: state.modelSettingsUpdatedAt || "",
       modelSettingsSource: state.modelSettingsSource || "",
       messages: Array.isArray(state.messages) ? state.messages : [],
+      hasMore: state.hasMore,
+      messageCount: state.messageCount,
       inflight: state.inflight || null
     }),
     appServer,
@@ -1884,6 +1890,7 @@ async function selectRemoteThreadNow(rawThreadId, connectorId = "") {
   }
   const existingRunner = runners.get(`${connectorId ? `${connectorId}:` : ""}thread:${threadId}`);
   if (existingRunner?.running) {
+    existingRunner.historyLimit = defaultMessageLimit;
     if (!existingRunner.externalTurn) stopExternalSessionMonitor(connectorId);
     await clearThreadCompletedUnread(threadId);
     selectedRunnerKey = existingRunner.key;
@@ -1907,7 +1914,7 @@ async function selectRemoteThreadNow(rawThreadId, connectorId = "") {
     : [];
   const notices = await readThreadNotices(thread.threadId, connectorId).catch(() => []);
   const messages = mergePersistentLiveVoiceMessages(sessionMessages, [...voiceMessages, ...notices]);
-  const state = { threadId: thread.threadId, connectorId, cwd: thread.cwd || "", model: thread.model || "", reasoningEffort: thread.reasoningEffort || "", messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length), inflight: null };
+  const state = { threadId: thread.threadId, connectorId, cwd: thread.cwd || "", model: thread.model || "", reasoningEffort: thread.reasoningEffort || "", messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length), hasMore: thread.hasMore, inflight: null };
   await ensureStateModelSettings(state, thread);
   selectedRunnerKey = runnerKeyForState(state);
   contextUsage = thread.contextUsage || null;
@@ -1918,6 +1925,8 @@ async function selectRemoteThreadNow(rawThreadId, connectorId = "") {
   const payload = {
     ...state,
     eventSeq,
+    fullMessages: thread.fullMessages,
+    fullMessageCount: thread.fullMessageCount,
     absoluteCwd: resolveAbsoluteCwd(state),
     threadName: name,
     draft,
@@ -1936,7 +1945,7 @@ async function selectRemoteThreadNow(rawThreadId, connectorId = "") {
   return payload;
 }
 
-export async function loadThreadPage(threadId, connectorId = "", limit = 1000) {
+export async function loadThreadPage(threadId, connectorId = "", limit = defaultMessageLimit) {
   return loadThreadFromProvider(threadId, localSessionProvider, limit);
 }
 

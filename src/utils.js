@@ -16,11 +16,15 @@ export function json(res, status, data) {
 }
 
 export async function readBody(req, maxLength = 40000) {
-  let body = "";
+  const chunks = [];
+  let size = 0;
   for await (const chunk of req) {
-    body += chunk.toString();
-    if (body.length > maxLength) throw new Error("请求内容太长。");
+    const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += value.length;
+    if (size > maxLength) throw new Error("请求内容太长。");
+    chunks.push(value);
   }
+  const body = Buffer.concat(chunks).toString("utf8");
   return body ? JSON.parse(body) : {};
 }
 

@@ -2116,7 +2116,10 @@ async function loadHosts() {
 }
 
 function updateHostControls() {
-  els.threadFilesToggle.hidden = Boolean(state.connectorId);
+  els.threadFilesToggle.hidden = false;
+  for (const selector of [".projectUploadPicker", "#createFolderRemote", "#createFileRemote"]) {
+    document.querySelector(selector).hidden = Boolean(state.connectorId);
+  }
   els.uploadButton.disabled = Boolean(state.connectorId);
   updateMeta();
 }
@@ -2144,6 +2147,7 @@ async function switchHost(id) {
   state.draftKey = "";
   state.threadId = "";
   state.cwd = "";
+  state.fileCwd = "";
   els.input.value = "";
   renderUploadList();
   renderState({ threadId: "", messages: [], running: false, pendingApprovals: [], fileLinkRoots: [], model: "", reasoningEffort: "", contextUsage: null });
@@ -2220,6 +2224,7 @@ function renderState(data) {
   restoreDraftForCurrentState(data.draft);
   state.loadedCount = Number(data.loadedCount || data.messages?.length || 0);
   state.messageCount = Number(data.messageCount || state.loadedCount);
+  state.hasMore = data.hasMore === undefined ? state.messageCount > state.loadedCount : Boolean(data.hasMore);
   state.fullMessageCount = Number(data.fullMessageCount || 0);
   if (data.followMode === "steer" || data.followMode === "queue") {
     state.followMode = data.followMode;
@@ -2505,20 +2510,16 @@ async function resetUsageCredit(credit = {}) {
 }
 
 function updateLoadMore() {
-  if (state.showFullReplies) {
-    els.loadMore.hidden = true;
-    return;
-  }
-  const hasMore = state.threadId && state.messageCount > state.loadedCount;
+  const hasMore = state.threadId && state.hasMore;
   els.loadMore.hidden = !hasMore;
   els.loadMore.disabled = Boolean(state.loadingMore || state.running);
   els.loadMore.textContent = !hasMore
     ? "加载更多"
     : state.loadingMore
-      ? `正在加载（${state.loadedCount}/${state.messageCount}）...`
+      ? "正在加载..."
       : state.running
-        ? `任务完成后可加载（${state.loadedCount}/${state.messageCount}）`
-        : `加载更多（${state.loadedCount}/${state.messageCount}）`;
+        ? "任务完成后可加载更早消息"
+        : `加载更早消息（已加载 ${state.loadedCount} 条）`;
 }
 
 async function loadMoreMessages() {
@@ -2528,7 +2529,7 @@ async function loadMoreMessages() {
   state.loadingMore = true;
   updateLoadMore();
   try {
-    const data = await request("/api/remote/more", {
+    const data = await request(state.showFullReplies ? "/api/remote/more?full=1" : "/api/remote/more", {
       method: "POST",
       body: JSON.stringify({ threadId })
     });
@@ -2711,6 +2712,7 @@ function downloadProjectItem(file = "", name = "", type = "file") {
 }
 
 async function openFiles(dir = "") {
+  const connectorId = state.connectorId || "";
   els.modelSettingsPanel.hidden = true;
   els.threadPanel.hidden = false;
   els.threadButton.setAttribute("aria-expanded", "true");
@@ -2719,6 +2721,7 @@ async function openFiles(dir = "") {
   els.fileList.innerHTML = '<div class="remoteEvent">加载中...</div>';
   try {
     const data = await request(`/api/remote/files?dir=${encodeURIComponent(dir)}`);
+    if (connectorId !== (state.connectorId || "")) return;
     state.fileCwd = data.cwd || "";
     els.filePath.textContent = displayProjectPath(data.cwd, data.absoluteCwd);
     els.fileList.innerHTML = "";
@@ -2743,16 +2746,19 @@ async function openFiles(dir = "") {
       row.innerHTML = '<span></span><div><strong></strong><small></small></div><div class="fileActions"></div>';
       row.querySelector("span").textContent = fileIcon(item);
       row.querySelector("strong").textContent = item.name;
-      row.querySelector("small").textContent = item.type === "dir" ? "文件夹" : `${formatSize(item.size)} · ${new Date(item.mtime).toLocaleString()}`;
+      row.querySelector("small").textContent = item.type === "dir" ? "文件夹" : connectorId ? "文件 · 点击预览" : `${formatSize(item.size)} · ${new Date(item.mtime).toLocaleString()}`;
       const actions = row.querySelector(".fileActions");
-      actions.append(fileActionButton("下载", "download"));
-      if (item.type === "file") actions.append(fileActionButton("编辑", "edit"));
-      actions.append(fileActionButton("改名", "rename"), fileActionButton("删除", "delete", "danger"));
+      if (!connectorId) {
+        actions.append(fileActionButton("下载", "download"));
+        if (item.type === "file") actions.append(fileActionButton("编辑", "edit"));
+        actions.append(fileActionButton("改名", "rename"), fileActionButton("删除", "delete", "danger"));
+      }
       els.fileList.appendChild(row);
     }
     applyDotFolderFilter(els.fileList, els.projectDotFolderFilter, state.hideProjectDotFolders);
   } catch (error) {
-    els.fileList.innerHTML = `<div class="remoteEvent">错误：${error.message}</div>`;
+    if (connectorId !== (state.connectorId || "")) return;
+    els.fileList.innerHTML = `<div class="remoteEvent">错误：${escapeHtml(error.message)}</div>`;
   }
 }
 
@@ -2885,11 +2891,22 @@ async function createSessionInSelectedFolder() {
   await requestConversation("/api/remote/new", { cwd: state.newCwd || "" });
 }
 
+let filePreviewGeneration = 0;
 async function previewFile(file) {
+  const connectorId = state.connectorId || "";
+  const generation = ++filePreviewGeneration;
   els.filePreview.hidden = false;
   els.filePreview.innerHTML = '<div class="remoteEvent">加载中...</div>';
   try {
     const data = await request(`/api/remote/file?path=${encodeURIComponent(file)}`);
+    if (generation !== filePreviewGeneration || connectorId !== (state.connectorId || "")) return;
+    if (connectorId) {
+      const title = `<div class="filePreviewTop"><strong>${escapeHtml(data.path)}</strong><span>只读预览</span></div>`;
+      els.filePreview.innerHTML = data.type === "image"
+        ? `${title}<img src="${escapeHtml(data.url)}" alt="${escapeHtml(data.path)}">`
+        : `${title}<div class="projectEditor"><textarea spellcheck="false" readonly>${escapeHtml(data.text)}</textarea></div>`;
+      return;
+    }
     if (data.type === "image") {
       els.filePreview.innerHTML = `<div class="filePreviewTop"><strong>${escapeHtml(data.path)}</strong><button type="button" data-download-project-file>下载</button></div><img src="${basePath}${data.url}" alt="${escapeHtml(data.path)}">`;
     } else {
@@ -2903,6 +2920,11 @@ async function previewFile(file) {
       downloadProjectItem(data.path || file, projectItemName(data.path || file), "file");
     });
   } catch (error) {
+    if (generation !== filePreviewGeneration || connectorId !== (state.connectorId || "")) return;
+    if (connectorId) {
+      els.filePreview.innerHTML = `<div class="remoteEvent">${escapeHtml(error.message)}</div>`;
+      return;
+    }
     els.filePreview.innerHTML = `<div class="filePreviewTop"><strong>${escapeHtml(file)}</strong><button type="button" data-download-project-file>下载</button></div><div class="remoteEvent">${escapeHtml(error.message)}</div>`;
     els.filePreview.querySelector("[data-download-project-file]")?.addEventListener("click", () => {
       downloadProjectItem(file, projectItemName(file), "file");
@@ -2946,7 +2968,22 @@ async function openThreads({ load = true } = {}) {
       els.threadList.innerHTML = '<div class="remoteEvent">没有找到会话</div>';
       return;
     }
+    // Keep conversations from the same project folder together. The server
+    // returns the working directory for every thread; use its normalized
+    // spelling as the stable grouping key while preserving server order
+    // inside each group.
+    const groups = new Map();
     for (const thread of data.threads) {
+      const projectPath = String(thread.cwd || "").trim() || "(未设置项目文件夹)";
+      if (!groups.has(projectPath)) groups.set(projectPath, []);
+      groups.get(projectPath).push(thread);
+    }
+    for (const [projectPath, threads] of groups) {
+      const heading = document.createElement("div");
+      heading.className = "threadProjectGroup";
+      heading.textContent = projectPath;
+      els.threadList.appendChild(heading);
+      for (const thread of threads) {
       const row = document.createElement("div");
       row.className = "threadRow";
 
@@ -2981,6 +3018,7 @@ async function openThreads({ load = true } = {}) {
 
       row.append(button, actions);
       els.threadList.appendChild(row);
+      }
     }
     if (data.truncated) {
       const note = document.createElement("div");
@@ -3071,7 +3109,7 @@ async function requestConversation(url, body) {
   stateLoadGeneration += 1;
   selectingConversation = true;
   try {
-    const data = await request(url, { method: "POST", body: JSON.stringify(body) });
+    const data = await request(state.showFullReplies ? `${url}?full=1` : url, { method: "POST", body: JSON.stringify(body) });
     if (generation !== threadSelectionGeneration) return false;
     renderState(data);
     els.threadPanel.hidden = true;
@@ -3088,7 +3126,6 @@ async function selectThread(threadId) {
   browserVoice?.stop();
   if (!await requestConversation("/api/remote/select", { threadId })) return;
   state.completedUnreadThreads.delete(threadId);
-  if (state.showFullReplies) await loadState();
 }
 
 let externalSessionRefreshTimer = null;
@@ -4373,7 +4410,7 @@ els.toggleThreadView.addEventListener("click", () => {
 });
 els.threadFilesToggle.addEventListener("click", () => {
   if (els.threadFilesView.hidden) {
-    openFiles(state.fileCwd || "");
+    openFiles(state.fileCwd || state.cwd || "");
     return;
   }
   openThreads({ load: false });

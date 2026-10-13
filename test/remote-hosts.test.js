@@ -23,6 +23,12 @@ async function fixture(t, behavior = {}) {
     ] }]
   };
   let authorization;
+  if (behavior.longHistory) thread.turns = Array.from({ length: 60 }, (_, index) => ({
+    id: `turn-${index}`, status: "completed", items: [
+      { type: "userMessage", id: `u-${index}`, content: [{ type: "text", text: `question-${index}` }] },
+      { type: "agentMessage", id: `a-${index}`, text: `answer-${index}`, phase: "final_answer" }
+    ]
+  }));
   ws.on("connection", (socket, req) => {
     sockets.add(socket);
     authorization = req.headers.authorization;
@@ -33,6 +39,9 @@ async function fixture(t, behavior = {}) {
       const { id, method, params } = request;
       if (!id) return;
       let result = {};
+      if (behavior.unmaterialized && method === "thread/turns/list" && !thread.turns.length) {
+        socket.send(JSON.stringify({ id, error: { code: -32600, message: `thread ${thread.id} is not materialized yet; thread/turns/list is unavailable before first user message` } })); return;
+      }
       if (behavior.writerLocked && method === "thread/resume") {
         socket.send(JSON.stringify({ id, error: { code: -32600, message: "thread already has an active writer" } })); return;
       }
@@ -48,7 +57,15 @@ async function fixture(t, behavior = {}) {
         if (params.model) thread.model = params.model;
         if (params.effort) thread.reasoningEffort = params.effort;
       }
-      if (method === "thread/list") result = { data: [thread], nextCursor: null };
+      if (method === "thread/list") {
+        const otherProviderThread = { ...thread, id: "other-provider-thread", modelProvider: "cli_proxy_api" };
+        result = { data: behavior.multipleProviders && Array.isArray(params.modelProviders) && !params.modelProviders.length ? [thread, otherProviderThread] : [thread], nextCursor: null };
+      }
+      if (behavior.paginated && method === "thread/turns/list") {
+        const ordered = params.sortDirection === "desc" ? [...thread.turns].reverse() : thread.turns;
+        const offset = Number(params.cursor || 0);
+        result = { data: ordered.slice(offset, offset + params.limit).map(turn => ({ ...turn, itemsView: "full" })), nextCursor: offset + params.limit < ordered.length ? String(offset + params.limit) : null };
+      }
       if (method === "thread/read" || method === "thread/resume") result = { thread };
       if (method === "turn/start") result = { turn: { id: "new-turn" } };
       socket.send(JSON.stringify({ id, result }));
@@ -69,6 +86,29 @@ async function fixture(t, behavior = {}) {
   const host = await hosts.add({ name: "Windows", url: `ws://127.0.0.1:${ws.address().port}`, token: "test-secret" });
   return { hosts, host, directory, requests, events, thread, sockets, authorization: () => authorization };
 }
+
+test("unmaterialized remote threads can be created, selected and deleted", async t => {
+  const { hosts, host, thread, requests } = await fixture(t, { unmaterialized: true });
+  thread.turns = [];
+  const created = await hosts.createThread(host.id, { cwd: "C:\\project" });
+  assert.equal(created.threadId, thread.id);
+  assert.deepEqual(created.messages, []);
+  assert.equal(created.cwd, thread.cwd);
+  // Also handle empty threads found via another connection, without a fresh writer.
+  hosts.writers.get(`${host.id}:${thread.id}`).server.close();
+  hosts.writers.clear();
+  assert.deepEqual((await hosts.select(host.id, thread.id)).messages, []);
+  await hosts.deleteThread(host.id, thread.id);
+  assert.ok(requests.some(r => r.method === "thread/delete"));
+  assert.equal((await hosts.saved(host.id)).threadId, "");
+  assert.equal(requests.some(r => r.method === "thread/read" && r.params.includeTurns), false);
+});
+
+test("remote thread list includes conversations from previous model providers", async t => {
+  const { hosts, host } = await fixture(t, { multipleProviders: true });
+  const list = await hosts.threads(host.id);
+  assert.deepEqual(list.threads.map(thread => thread.threadId), ["same-thread-id", "other-provider-thread"]);
+});
 
 test("host validation rejects unsafe URLs and accepts SSH targets without shell commands", () => {
   for (const url of ["https://host", "ws://remote.example:4500", "wss://user:pass@host", "wss://host?token=x", "ssh://-oProxyCommand=bad", "ssh://user@host/command"]) {
@@ -107,6 +147,32 @@ test("real WebSocket RPC lists and reads remote threads and isolates identical I
   assert.equal(state.messages.length, 2);
   assert.equal(state.draft, "第一台电脑的草稿");
   assert.equal(state.connectorId, host.id);
+});
+
+test("remote history uses paginated turns without full thread hydration", async (t) => {
+  const { hosts, host, requests } = await fixture(t, { paginated: true });
+  await hosts.select(host.id, "same-thread-id");
+  const state = await hosts.state(host.id);
+  assert.equal(state.messages.length, 2);
+  assert.ok(requests.some(request => request.method === "thread/turns/list"));
+  assert.equal(requests.some(request => request.method === "thread/read" && request.params.includeTurns === true), false);
+});
+test("entering a remote thread loads one recent page once and more expands history", async t => {
+  const { hosts, host, requests } = await fixture(t, { paginated: true, longHistory: true });
+  const state = await hosts.select(host.id, "same-thread-id", { full: true });
+  assert.equal(state.messages.length, 10);
+  assert.equal(state.messages[0].content, "question-55");
+  assert.equal(state.hasMore, true);
+  assert.equal(state.fullMessages.length, 10);
+  const pages = requests.filter(request => request.method === "thread/turns/list");
+  assert.equal(pages.length, 1);
+  assert.equal(pages[0].params.limit, 10);
+  assert.equal(pages[0].params.sortDirection, "desc");
+  const more = await hosts.more(host.id, { threadId: "same-thread-id" });
+  assert.equal(more.messages.length, 20);
+  assert.equal(more.messages[0].content, "question-50");
+  assert.equal((await hosts.state(host.id)).messages.length, 20);
+  await assert.rejects(hosts.more(host.id, { threadId: "other" }), /会话已经切换/);
 });
 
 test("continuing a remote thread preserves its cwd and permissions and scopes streaming events", async (t) => {
@@ -151,7 +217,7 @@ test("remote history renders images, tools and busy state without reading local 
 test("unsupported or missing remote host requests never fall through to local handlers", async (t) => {
   const { hosts, host } = await fixture(t);
   const response = { writeHead(status) { this.status = status; }, end(body) { this.body = JSON.parse(body); } };
-  const handled = await handleRemoteHostHttp({ method: "GET" }, response, new URL(`http://localhost/api/remote/files?connectorId=${host.id}`), hosts);
+  const handled = await handleRemoteHostHttp({ method: "GET" }, response, new URL(`http://localhost/api/remote/project-download?connectorId=${host.id}`), hosts);
   assert.equal(handled, true);
   assert.equal(response.status, 400);
   await assert.rejects(handleRemoteHostHttp({ method: "GET" }, response, new URL("http://localhost/api/remote/state?connectorId=missing"), hosts), /找不到/);
@@ -232,6 +298,29 @@ test("new empty remote thread can be configured and deleted on its owning connec
   assert.equal((await hosts.saved(host.id)).threadId, "");
   assert.equal((await hosts.saved(host.id)).drafts[thread.id], undefined);
   assert.ok(requests.some(r => r.method === "thread/delete"));
+});
+
+test("reading a cached remote writer reinitializes a dropped transport", async t => {
+  const { hosts, host, thread } = await fixture(t);
+  const created = await hosts.createThread(host.id, { cwd: "C:\\project" });
+  const writer = hosts.writers.get(`${host.id}:${created.threadId}`);
+  let ensured = 0;
+  const ensureStarted = writer.server.ensureStarted.bind(writer.server);
+  writer.server.ensureStarted = async () => { ensured += 1; return ensureStarted(); };
+  await hosts.read(host.id, thread.id);
+  assert.equal(ensured, 1);
+});
+
+test("remote history reads use the extended timeout", async t => {
+  const { hosts, host, thread } = await fixture(t);
+  const created = await hosts.createThread(host.id, { cwd: "C:\\project" });
+  const writer = hosts.writers.get(`${host.id}:${created.threadId}`);
+  const calls = [];
+  const original = writer.server.request.bind(writer.server);
+  writer.server.request = async (...args) => { calls.push(args); return original(...args); };
+  await hosts.read(host.id, thread.id);
+  const read = calls.filter(([method]) => method === "thread/read").at(-1);
+  assert.equal(read[3], 60_000);
 });
 
 test("running remote turns block settings and delete operations", async t => {

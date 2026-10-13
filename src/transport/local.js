@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import WebSocket from "ws";
 
 export class LocalTransport {
@@ -16,11 +17,13 @@ export class LocalTransport {
     this._onError = null;
     this._onClose = null;
     this._buffer = "";
+    this._decoder = new StringDecoder("utf8");
   }
 
   async start() {
     if (this.child && !this.child.killed) return;
     this._buffer = "";
+    this._decoder = new StringDecoder("utf8");
     const child = this.spawnImpl(this.bin, this.args, {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
@@ -48,7 +51,7 @@ export class LocalTransport {
 
   _onStdout(chunk, child = this.child) {
     if (this.child !== child) return;
-    this._buffer += chunk.toString();
+    this._buffer += this._decoder.write(chunk);
     const lines = this._buffer.split(/\r?\n/);
     this._buffer = lines.pop() || "";
     for (const line of lines) {

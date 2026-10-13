@@ -132,6 +132,15 @@ test("standalone stdin errors are reported without crashing the controller", asy
   transport.kill();
 });
 
+test("local stdout keeps UTF-8 characters intact when a code point spans chunks", () => {
+  const transport = new LocalTransport({ bin: "codex" });
+  let received;
+  transport.onMessage((line) => { received = JSON.parse(line); });
+  const bytes = Buffer.from(JSON.stringify({ message: "中文路径/你好" }) + "\n");
+  for (const byte of bytes) transport._onStdout(Buffer.from([byte]));
+  assert.equal(received.message, "中文路径/你好");
+});
+
 test("local app-server transport keeps standalone overrides as its fallback", () => {
   const transport = createLocalAppServerTransport({
     bin: "/opt/codex",

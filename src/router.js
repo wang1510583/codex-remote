@@ -315,7 +315,7 @@ export async function handle(req, res) {
         if (!runner.externalTurn) stopExternalSessionMonitor(connectorId);
         state = runner.state;
         if (wantsFullReplies && state.threadId) {
-          loadedThread = await loadThreadPage(state.threadId, connectorId).catch(() => null);
+          loadedThread = await loadThreadPage(state.threadId, connectorId, Math.max(messagePageSize, state.loadedCount || 0)).catch(() => null);
         }
         if (persistentVoiceMessages.length || persistentNotices.length) {
           state = {
@@ -328,7 +328,7 @@ export async function handle(req, res) {
           };
         }
       } else if (state.threadId) {
-        const thread = await loadThreadPage(state.threadId, connectorId).catch(() => null);
+        const thread = await loadThreadPage(state.threadId, connectorId, Math.max(messagePageSize, state.loadedCount || 0)).catch(() => null);
         if (thread) {
           loadedThread = thread;
           if (liveVoice) {
@@ -344,7 +344,7 @@ export async function handle(req, res) {
             ...persistentVoiceMessages,
             ...persistentNotices
           ]);
-          state = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length), inflight: null };
+          state = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length), hasMore: thread.hasMore, inflight: null };
         } else if (persistentVoiceMessages.length || persistentNotices.length) {
           const messages = mergeStateMessages([], [
             ...(state.messages || []),
@@ -620,6 +620,8 @@ export async function handle(req, res) {
         return json(res, 409, { error: "会话已经切换，请重新点击加载更多。" });
       }
       const nextLimit = Math.max(Number(state.loadedCount) || 0, messagePageSize) + messagePageSize;
+      const historyRunner = runnerForState(state);
+      if (historyRunner) historyRunner.historyLimit = nextLimit;
       const thread = await loadThreadPage(state.threadId, connectorId, nextLimit);
       const sessionMessages = await mergeLocalMessageMeta(state.threadId, thread.messages, state.messages);
       const persistentVoiceMessages = !connectorId
@@ -631,13 +633,13 @@ export async function handle(req, res) {
         ...persistentVoiceMessages,
         ...persistentNotices
       ]);
-      const nextState = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length) };
+      const nextState = { ...state, cwd: connectorId ? (state.cwd || "") : (thread.cwd || state.cwd || ""), messages, loadedCount: messages.length, messageCount: Math.max(thread.messageCount, messages.length), hasMore: thread.hasMore };
       await writeState(nextState, connectorId);
       const name = await threadName(state.threadId);
       const draft = await draftForState(nextState, connectorId);
       const mode = await followModeForState(nextState, connectorId);
       broadcast({ type: "state", connectorId, ...nextState, absoluteCwd: connectorId ? nextState.cwd : absoluteCwdLocal(nextState.cwd), threadName: name, draft, followMode: mode });
-      return json(res, 200, { ok: true, ...nextState, absoluteCwd: connectorId ? nextState.cwd : absoluteCwdLocal(nextState.cwd), threadName: name, draft, followMode: mode });
+      return json(res, 200, { ok: true, ...nextState, fullMessages: thread.fullMessages, fullMessageCount: thread.fullMessageCount, absoluteCwd: connectorId ? nextState.cwd : absoluteCwdLocal(nextState.cwd), threadName: name, draft, followMode: mode });
     }
 
     if (req.method === "POST" && url.pathname === "/api/remote/new") {

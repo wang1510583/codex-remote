@@ -1,12 +1,13 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { dataDir } from "./config.js";
+import { dataDir, defaultMessageLimit, messagePageSize } from "./config.js";
 import { readJsonFile, updateJsonFile } from "./json-file.js";
 import { CodexAppServer } from "./codex-server.js";
 import { RemoteWebSocketTransport } from "./transport/remote.js";
 import { LocalTransport } from "./transport/local.js";
 import { assistantBubbleText, fullReplyMessageFromThreadItem, limitFullReplyMessages } from "./threads.js";
 import { broadcast, currentEventSeq } from "./sse.js";
+import { mimeType } from "./utils.js";
 
 const fail = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const iso = (seconds) => Number.isFinite(Number(seconds)) && Number(seconds) > 0 ? new Date(Number(seconds) * 1000).toISOString() : "";
@@ -36,7 +37,7 @@ export function validateHost(input, id = randomUUID()) {
   return { id, name, url: url.toString(), token };
 }
 
-export function remoteThreadView(thread = {}, { full = false, limit = 1000 } = {}) {
+export function remoteThreadView(thread = {}, { full = false, limit = defaultMessageLimit } = {}) {
   const messages = [];
   const fullMessages = [];
   for (const turn of thread.turns || []) {
@@ -64,12 +65,16 @@ export function remoteThreadView(thread = {}, { full = false, limit = 1000 } = {
     if (messages[index].inputQuestions) messages[index].inputResolved = laterUserMessage;
   }
   const running = thread.status?.type === "active" || Boolean(activeTurn);
+  const visibleMessages = messages.slice(-limit);
+  const fullStart = fullMessages.indexOf(visibleMessages[0]);
+  const visibleFullMessages = fullStart >= 0 ? fullMessages.slice(fullStart) : fullMessages;
   return {
     threadId: thread.id, cwd: thread.cwd || "", absoluteCwd: thread.cwd || "",
     threadName: thread.name || "", model: thread.model || "", reasoningEffort: thread.reasoningEffort || "",
     ...(Object.hasOwn(thread, "serviceTier") ? { serviceTier: thread.serviceTier } : {}),
     messages: messages.slice(-limit), loadedCount: Math.min(messages.length, limit), messageCount: messages.length,
-    ...(full ? { fullMessages: limitFullReplyMessages(fullMessages), fullMessageCount: fullMessages.length } : {}),
+    hasMore: Boolean(thread.hasMore) || messages.length > limit,
+    ...(full ? { fullMessages: limitFullReplyMessages(visibleFullMessages), fullMessageCount: visibleFullMessages.length } : {}),
     running, externalRunning: running, activeTurnId: activeTurn?.id || "",
     updatedAt: iso(thread.updatedAt), fileLinkRoots: [],
     followMode: "steer", queueLength: 0, queueMessages: [], steerLength: 0, steerMessages: []
@@ -108,6 +113,64 @@ function makeServer(host) {
     return request(method, params, onResult, timeout);
   };
   return server;
+}
+
+const paginationUnsupported = (error) => /(?:thread\/(?:turns\/list|items\/list).*?(?:not supported|not implemented|unknown|method)|(?:unknown|unsupported|not found).*?thread\/(?:turns\/list|items\/list)|method.*?(?:not found|unknown|unsupported))/i.test(String(error?.message || error));
+
+async function readPaginatedThread(server, threadId, limit = defaultMessageLimit) {
+  const metadata = await server.request("thread/read", { threadId, includeTurns: false }, null, 15_000);
+  const thread = { ...(metadata.thread || {}), turns: [] };
+  let cursor = null;
+  const cursors = new Set();
+  for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+    let page;
+    try {
+      page = await server.request("thread/turns/list", {
+        threadId,
+        cursor,
+        limit: Math.min(100, Math.max(1, limit - thread.turns.length)),
+        sortDirection: "desc",
+        itemsView: "full"
+      }, null, 60_000);
+    } catch (error) {
+      // A newly-created thread has metadata but no rollout yet. Preserve the
+      // metadata so callers can still select, configure, or delete it.
+      if (pageNumber === 0 && /not materialized yet; thread\/turns\/list is unavailable before first user message/i.test(error.message)) return { thread };
+      throw error;
+    }
+    if (!Array.isArray(page.data)) throw new Error("thread/turns/list is not supported");
+    for (const turn of page.data || []) {
+      if (turn && typeof turn.id === "string") thread.turns.push(turn);
+    }
+    thread.hasMore = Boolean(page.nextCursor);
+    if (!page.nextCursor || cursors.has(page.nextCursor) || thread.turns.length >= limit) break;
+    cursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+  thread.turns.reverse();
+  for (const turn of thread.turns) {
+    if (turn.itemsView === "full") continue;
+    const items = [];
+    let itemCursor = null;
+    const itemCursors = new Set();
+    for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+      const page = await server.request("thread/items/list", {
+        threadId,
+        turnId: turn.id,
+        cursor: itemCursor,
+        limit: 100,
+        sortDirection: "asc"
+      }, null, 60_000);
+      if (!Array.isArray(page.data)) throw new Error("thread/items/list is not supported");
+      for (const entry of page.data) if (entry?.item) items.push(entry.item);
+      if (!page.nextCursor || itemCursors.has(page.nextCursor)) break;
+      itemCursors.add(page.nextCursor);
+      itemCursor = page.nextCursor;
+    }
+    turn.items = items;
+    turn.itemsView = "full";
+  }
+  return { thread };
 }
 
 export class RemoteHosts {
@@ -191,7 +254,31 @@ export class RemoteHosts {
   approvals(id) {
     return [...this.runs.values()].filter((run) => run.hostId === id).flatMap((run) => run.server.pendingApprovalRequests());
   }
-  async folders(id, directory = "") {
+  async files(id, directory = "") {
+    return this.folders(id, directory, { includeFiles: true });
+  }
+  async file(id, filePath) {
+    if (typeof filePath !== "string" || filePath.includes("\0") || !(path.posix.isAbsolute(filePath) || path.win32.isAbsolute(filePath))) throw fail("请选择远端文件的绝对路径。");
+    const server = await this.control(id);
+    const metadata = await server.request("fs/getMetadata", { path: filePath });
+    if (!metadata.isFile) throw fail("只能预览文件。");
+    const result = await server.request("fs/readFile", { path: filePath });
+    if (typeof result.dataBase64 !== "string") throw fail("远端返回了无效的文件内容。");
+    const mime = mimeType(filePath);
+    const isImage = /^image\/(png|jpeg|gif|webp|bmp)$/.test(mime);
+    const maxBytes = (isImage ? 8 : 1) * 1024 * 1024;
+    if (result.dataBase64.length > Math.ceil(maxBytes / 3) * 4) throw fail(`文件超过 ${isImage ? 8 : 1}MB，无法预览。`);
+    const buffer = Buffer.from(result.dataBase64, "base64");
+    if (buffer.length > maxBytes) throw fail(`文件超过 ${isImage ? 8 : 1}MB，无法预览。`);
+    if (isImage) return { type: "image", path: filePath, mime, url: `data:${mime};base64,${buffer.toString("base64")}` };
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+      if (text.includes("\0")) throw new Error("binary");
+    } catch { throw fail("该文件不是 UTF-8 文本或受支持的图片，无法预览。"); }
+    return { type: "text", path: filePath, mime, text };
+  }
+  async folders(id, directory = "", { includeFiles = false } = {}) {
     const server = await this.control(id);
     if (!directory) {
       // Fixed commands only: directory names are never interpolated into a shell.
@@ -214,10 +301,10 @@ export class RemoteHosts {
     if (!paths.isAbsolute(directory)) throw fail("请选择远端电脑的绝对路径。");
     const cwd = paths.normalize(directory);
     const result = await server.request("fs/readDirectory", { path: cwd });
-    const entries = (result.entries || []).filter(item => item.isDirectory
+    const entries = (result.entries || []).filter(item => (includeFiles || item.isDirectory)
       && typeof item.fileName === "string" && item.fileName !== "." && item.fileName !== ".."
-      && !/[\\/]/.test(item.fileName)).map(item => ({ name: item.fileName, path: paths.join(cwd, item.fileName), type: "dir" }));
-    entries.sort((a, b) => a.name.localeCompare(b.name, "zh-CN", { numeric: true }));
+      && !/[\\/]/.test(item.fileName)).map(item => ({ name: item.fileName, path: paths.join(cwd, item.fileName), type: item.isDirectory ? "dir" : "file" }));
+    entries.sort((a, b) => a.type === b.type ? a.name.localeCompare(b.name, "zh-CN", { numeric: true }) : a.type === "dir" ? -1 : 1);
     const parent = paths.dirname(cwd);
     return { cwd, absoluteCwd: cwd, parent: parent === cwd ? (windows ? "" : null) : parent, selectable: true, entries };
   }
@@ -228,7 +315,9 @@ export class RemoteHosts {
     const seen = new Set();
     const cursors = new Set();
     do {
-      const result = await server.request("thread/list", { limit: 100, cursor, archived: false, sourceKinds: [] });
+      // An omitted provider filter defaults to the remote CLI's current
+      // provider, hiding conversations created before a provider switch.
+      const result = await server.request("thread/list", { limit: 100, cursor, archived: false, sourceKinds: [], modelProviders: [] });
       for (const thread of result.data || []) {
         if (seen.has(thread.id) || (typeof thread.source === "object" && thread.source?.subAgent)) continue;
         seen.add(thread.id);
@@ -248,11 +337,28 @@ export class RemoteHosts {
   async read(id, threadId, options = {}) {
     const writer = this.writers.get(`${id}:${threadId}`);
     const server = writer?.server || await this.control(id);
+    // A cached writer can outlive a dropped SSH/WebSocket transport. Restart
+    // the app-server connection before issuing the history request.
+    await server.ensureStarted();
     let result;
-    try { result = await server.request("thread/read", { threadId, includeTurns: true }); }
-    catch (error) {
-      if (!writer?.fresh || !/list_turns is not supported|thread not loaded|no rollout found/i.test(error.message)) throw error;
-      result = { thread: { ...writer.thread, turns: [] } };
+    try {
+      // Newer Codex app-servers keep history paginated. Asking thread/read to
+      // hydrate every turn can block for minutes on a large Windows rollout.
+      result = await readPaginatedThread(server, threadId, options.limit || defaultMessageLimit);
+    } catch (error) {
+      if (!paginationUnsupported(error)) {
+        if (!writer?.fresh || !/thread not loaded|no rollout found/i.test(error.message)) throw error;
+        result = { thread: { ...writer.thread, turns: [] } };
+      } else {
+        // Keep compatibility with older app-servers that predate the paging
+        // methods. This path is deliberately bounded and is no longer used by
+        // current remote Codex versions.
+        try { result = await server.request("thread/read", { threadId, includeTurns: true }, null, 60_000); }
+        catch (legacyError) {
+          if (!writer?.fresh || !/thread not loaded|no rollout found|list_turns is not supported/i.test(legacyError.message)) throw legacyError;
+          result = { thread: { ...writer.thread, turns: [] } };
+        }
+      }
     }
     return remoteThreadView(result.thread, options);
   }
@@ -260,7 +366,7 @@ export class RemoteHosts {
     const eventSeq = currentEventSeq();
     await this.host(id);
     const saved = await this.saved(id);
-    const view = saved.threadId ? await this.read(id, saved.threadId, options) : { threadId: "", messages: [], running: false, followMode: "steer" };
+    const view = options.view || (saved.threadId ? await this.read(id, saved.threadId, { ...options, limit: options.limit || saved.historyLimit || defaultMessageLimit }) : { threadId: "", messages: [], running: false, followMode: "steer" });
     const run = this.runs.get(`${id}:${saved.threadId}`);
     if (run?.running) {
       view.running = true;
@@ -272,11 +378,19 @@ export class RemoteHosts {
     if (run?.error) view.messages.push({ role: "assistant", content: run.error, taskFailed: true });
     return { ...view, connectorId: id, eventSeq, pendingApprovals: this.approvals(id), draft: saved.drafts?.[saved.threadId] || "" };
   }
-  async select(id, threadId) {
+  async select(id, threadId, options = {}) {
     if (!threadId || typeof threadId !== "string") throw fail("无效的会话 ID。");
-    await this.read(id, threadId);
-    await this.save(id, { threadId });
-    return this.state(id);
+    const view = await this.read(id, threadId, { ...options, limit: defaultMessageLimit });
+    await this.save(id, { threadId, historyLimit: defaultMessageLimit });
+    return this.state(id, { ...options, view });
+  }
+  async more(id, body, options = {}) {
+    const saved = await this.saved(id);
+    if (!saved.threadId || (body.threadId && body.threadId !== saved.threadId)) throw fail("会话已经切换，请重新点击加载更多。", 409);
+    const limit = Math.min(10000, (saved.historyLimit || defaultMessageLimit) + messagePageSize);
+    const view = await this.read(id, saved.threadId, { ...options, limit });
+    await this.save(id, { historyLimit: limit });
+    return this.state(id, { ...options, view });
   }
   async draft(id, body) {
     await updateJsonFile(this.stateFile, {}, (all) => {
